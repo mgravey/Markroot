@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; base-uri 'none'; object-src 'none'; connect-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' blob: data:; worker-src 'self' blob:"
+    />
+    <title>Markroot export smoke test</title>
+  </head>
+  <body>
+    <main>
+      <h1>Markroot export smoke test</h1>
+      <pre id="result" data-status="running">Starting export worker…</pre>
+    </main>
+    <script type="module" src="/src/workers/export-smoke.ts"></script>
+  </body>
+</html>

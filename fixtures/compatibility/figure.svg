@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="240" viewBox="0 0 480 240" role="img" aria-labelledby="title description">
+  <title id="title">Markroot fixture figure</title>
+  <desc id="description">A green curve over a coordinate grid.</desc>
+  <rect width="480" height="240" fill="#f6f3eb"/>
+  <path d="M40 200H450M40 200V25" stroke="#6f7773" stroke-width="2"/>
+  <path d="M40 190C125 185 165 150 235 132S350 85 445 35" fill="none" stroke="#17745e" stroke-width="6"/>
+</svg>

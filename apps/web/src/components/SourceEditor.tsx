@@ -1,0 +1,239 @@
+import { useEffect, useRef } from 'react';
+import { basicSetup } from 'codemirror';
+import { markdown } from '@codemirror/lang-markdown';
+import { SearchQuery, setSearchQuery } from '@codemirror/search';
+import { Compartment, EditorState, StateEffect, StateField, type Extension, type Text } from '@codemirror/state';
+import { Decoration, EditorView, keymap, type DecorationSet } from '@codemirror/view';
+import type { DocumentBlock } from '@markroot/document';
+import { relativeWorkspaceReference, type SourceRange, type WorkspacePath } from '@markroot/core';
+import { isScrollKey, ScrollIntentGate } from './scroll-sync.js';
+
+interface Props {
+  path: WorkspacePath;
+  workspacePaths: readonly WorkspacePath[];
+  value: string;
+  blocks: readonly DocumentBlock[];
+  search: string;
+  regularExpression: boolean;
+  dark: boolean;
+  fontFamily: 'serif' | 'sans' | 'mono';
+  fontSize: number;
+  activeBlock?: string | undefined;
+  scrollTarget?: string | undefined;
+  scrollProgress?: number | undefined;
+  cursorTarget?: number | undefined;
+  goToLine?: number | undefined;
+  onChange(value: string): void;
+  onSelection(range: SourceRange): void;
+  onScroll(blockId: string, progress: number): void;
+  onSave(): void;
+  onFind(): void;
+}
+
+export function SourceEditor(props: Props) {
+  const host = useRef<HTMLDivElement>(null);
+  const view = useRef<EditorView | undefined>(undefined);
+  const changing = useRef(false);
+  const scrollIntent = useRef(new ScrollIntentGate());
+  const appearance = useRef(new Compartment());
+  const latest = useRef(props);
+  latest.current = props;
+
+  useEffect(() => {
+    if (!host.current) return;
+    const extensions: Extension[] = [
+      basicSetup,
+      markdown(),
+      EditorView.lineWrapping,
+      keymap.of([
+        { key: 'Mod-s', preventDefault: true, run: () => { latest.current.onSave(); return true; } },
+        { key: 'Mod-f', preventDefault: true, run: () => { latest.current.onFind(); return true; } },
+      ]),
+      EditorView.updateListener.of((update) => {
+        if (update.docChanged && !changing.current) latest.current.onChange(update.state.doc.toString());
+        if (update.selectionSet) {
+          const selection = update.state.selection.main;
+          latest.current.onSelection({ from: selection.from, to: selection.to });
+        }
+      }),
+      EditorView.domEventHandlers({
+        paste(event, editor) {
+          const pasted = event.clipboardData?.getData('text/plain').trim();
+          if (!pasted || pasted.includes('\n')) return false;
+          const normalized = pasted.replace(/^\.\//, '');
+          const target = latest.current.workspacePaths.find((path) => path === normalized);
+          if (!target) return false;
+          const selection = editor.state.selection.main;
+          const relative = relativeWorkspaceReference(latest.current.path, target);
+          const insertion = markdownPathAtCursor(editor.state.doc.toString(), selection.from, relative);
+          event.preventDefault();
+          editor.dispatch({
+            changes: { from: selection.from, to: selection.to, insert: insertion },
+            selection: { anchor: selection.from + insertion.length },
+            userEvent: 'input.paste',
+          });
+          return true;
+        },
+      }),
+      activeBlockField,
+      appearance.current.of(editorTheme(props.dark, props.fontFamily, props.fontSize)),
+    ];
+    const editor = new EditorView({ state: EditorState.create({ doc: props.value, extensions }), parent: host.current });
+    let frame = 0;
+    const onScroll = () => {
+      if (!scrollIntent.current.shouldPublish()) return;
+      scrollIntent.current.continueScroll();
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const viewport = editor.scrollDOM.getBoundingClientRect();
+        const position = editor.posAtCoords({ x: viewport.left + 24, y: viewport.top + Math.min(32, viewport.height / 3) }) ?? editor.viewport.from;
+        const block = latest.current.blocks.find((candidate) => position >= candidate.from && position <= candidate.to) ?? latest.current.blocks.at(-1);
+        if (!block) return;
+        latest.current.onScroll(block.id, Math.max(0, Math.min(1, (position - block.from) / Math.max(1, block.to - block.from))));
+      });
+    };
+    const beginPointer = () => scrollIntent.current.beginPointer();
+    const endPointer = () => scrollIntent.current.endPointer();
+    const markWheel = () => scrollIntent.current.markIntent();
+    const markKeyboard = (event: KeyboardEvent) => { if (isScrollKey(event)) scrollIntent.current.markIntent(); };
+    editor.scrollDOM.addEventListener('scroll', onScroll, { passive: true });
+    editor.scrollDOM.addEventListener('wheel', markWheel, { passive: true });
+    editor.scrollDOM.addEventListener('pointerdown', beginPointer, { passive: true });
+    editor.scrollDOM.addEventListener('keydown', markKeyboard);
+    window.addEventListener('pointerup', endPointer, { passive: true });
+    window.addEventListener('pointercancel', endPointer, { passive: true });
+    view.current = editor;
+    return () => {
+      cancelAnimationFrame(frame);
+      editor.scrollDOM.removeEventListener('scroll', onScroll);
+      editor.scrollDOM.removeEventListener('wheel', markWheel);
+      editor.scrollDOM.removeEventListener('pointerdown', beginPointer);
+      editor.scrollDOM.removeEventListener('keydown', markKeyboard);
+      window.removeEventListener('pointerup', endPointer);
+      window.removeEventListener('pointercancel', endPointer);
+      editor.destroy();
+      view.current = undefined;
+    };
+  }, []);
+
+  useEffect(() => {
+    view.current?.dispatch({ effects: appearance.current.reconfigure(editorTheme(props.dark, props.fontFamily, props.fontSize)) });
+  }, [props.dark, props.fontFamily, props.fontSize]);
+
+  useEffect(() => {
+    const editor = view.current;
+    if (!editor || editor.state.doc.toString() === props.value) return;
+    changing.current = true;
+    editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: props.value } });
+    changing.current = false;
+  }, [props.value]);
+
+  useEffect(() => {
+    const editor = view.current;
+    if (!editor) return;
+    editor.dispatch({ effects: setSearchQuery.of(new SearchQuery({ search: props.search, literal: !props.regularExpression })) });
+  }, [props.search, props.regularExpression]);
+
+  useEffect(() => {
+    const editor = view.current;
+    const block = props.blocks.find((candidate) => candidate.id === props.scrollTarget);
+    if (editor && block) {
+      const progress = Math.max(0, Math.min(1, props.scrollProgress ?? 0));
+      const position = Math.min(block.to, block.from + Math.round((block.to - block.from) * progress));
+      const moved = !positionVisible(editor, position);
+      scrollIntent.current.beginProgrammatic();
+      if (moved) {
+        editor.dispatch({ effects: EditorView.scrollIntoView(position, { y: 'center' }) });
+      }
+      requestAnimationFrame(() => scrollIntent.current.endProgrammatic());
+    }
+  }, [props.scrollTarget, props.scrollProgress, props.blocks]);
+
+  useEffect(() => {
+    const editor = view.current;
+    if (!editor || props.cursorTarget === undefined) return;
+    const position = Math.max(0, Math.min(props.cursorTarget, editor.state.doc.length));
+    scrollIntent.current.beginProgrammatic();
+    editor.dispatch({
+      selection: { anchor: position },
+      ...(positionVisible(editor, position) ? {} : { effects: EditorView.scrollIntoView(position, { y: 'center' }) }),
+    });
+    editor.focus();
+    requestAnimationFrame(() => scrollIntent.current.endProgrammatic());
+  }, [props.cursorTarget]);
+
+  useEffect(() => {
+    const editor = view.current;
+    const block = props.blocks.find((candidate) => candidate.id === props.activeBlock);
+    editor?.dispatch({ effects: setActiveBlock.of(block ? { from: block.from, to: block.to } : undefined) });
+  }, [props.activeBlock, props.blocks]);
+
+  useEffect(() => {
+    const editor = view.current;
+    if (!editor || props.goToLine === undefined) return;
+    const lineNumber = Math.max(1, Math.min(props.goToLine, editor.state.doc.lines));
+    const position = editor.state.doc.line(lineNumber).from;
+    scrollIntent.current.beginProgrammatic();
+    editor.dispatch({ selection: { anchor: position }, effects: EditorView.scrollIntoView(position, { y: 'center' }) });
+    editor.focus();
+    requestAnimationFrame(() => scrollIntent.current.endProgrammatic());
+  }, [props.goToLine]);
+
+  return <div className="source-editor" ref={host} aria-label="Markdown source editor" />;
+}
+
+const setActiveBlock = StateEffect.define<SourceRange | undefined>();
+const activeBlockField = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(value, transaction) {
+    let next = value.map(transaction.changes);
+    for (const effect of transaction.effects) if (effect.is(setActiveBlock)) next = blockDecorations(transaction.state.doc, effect.value);
+    return next;
+  },
+  provide: (field) => EditorView.decorations.from(field),
+});
+
+function blockDecorations(document: Text, range: SourceRange | undefined): DecorationSet {
+  if (!range || range.from >= range.to || range.from > document.length) return Decoration.none;
+  const decorations = [];
+  let position = Math.max(0, range.from);
+  const to = Math.min(range.to, document.length);
+  while (position <= to) {
+    const line = document.lineAt(position);
+    decorations.push(Decoration.line({ class: 'cm-current-block' }).range(line.from));
+    if (line.to >= to || line.to >= document.length) break;
+    position = line.to + 1;
+  }
+  return Decoration.set(decorations);
+}
+
+function editorTheme(dark: boolean, fontFamily: Props['fontFamily'], fontSize: number): Extension {
+  return EditorView.theme({
+    '&': { height: '100%', fontSize: `${fontSize}px`, backgroundColor: 'transparent' },
+    '.cm-scroller': { fontFamily: fontStack(fontFamily), lineHeight: '1.65' },
+    '.cm-gutters': { backgroundColor: 'transparent', border: 'none' },
+    '.cm-content': { padding: '24px 12px 64px' },
+    '.cm-activeLine, .cm-activeLineGutter': { backgroundColor: 'var(--active-line)' },
+    '.cm-current-block': { backgroundColor: 'color-mix(in srgb, var(--accent) 9%, transparent)', boxShadow: 'inset 3px 0 0 var(--accent)' },
+  }, { dark });
+}
+
+function positionVisible(editor: EditorView, position: number): boolean {
+  const coords = editor.coordsAtPos(position);
+  const viewport = editor.scrollDOM.getBoundingClientRect();
+  if (!coords) return false;
+  const margin = Math.min(48, viewport.height * .12);
+  return coords.top >= viewport.top + margin && coords.bottom <= viewport.bottom - margin;
+}
+
+function fontStack(font: Props['fontFamily']): string {
+  if (font === 'serif') return '"Source Serif 4", Georgia, serif';
+  if (font === 'sans') return '"Manrope", system-ui, sans-serif';
+  return '"IBM Plex Mono", "SFMono-Regular", Consolas, monospace';
+}
+
+function markdownPathAtCursor(source: string, offset: number, path: string): string {
+  if (!/\s/.test(path)) return path;
+  const lineStart = source.lastIndexOf('\n', Math.max(0, offset - 1)) + 1;
+  return /!?\[[^\]]*\]\([^)]*$/.test(source.slice(lineStart, offset)) ? `<${path}>` : path;
+}

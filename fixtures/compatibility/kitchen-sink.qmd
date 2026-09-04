@@ -1,0 +1,63 @@
+---
+title: "Markroot compatibility fixture"
+bibliography: references.bib
+csl: style.csl
+crossref:
+  fig-title: Figure
+execute:
+  enabled: true
+---
+
+# Introduction {#sec-introduction}
+
+This paragraph has **strong text**, *emphasis*, `code`, a [local link](#sec-results),
+an inline citation [@doe2026], inline math $E = mc^2$, and a cross-reference to
+@fig-example.
+
+::: {.callout-note}
+## A callout
+
+Callouts remain editable as source-backed blocks.
+:::
+
+## Lists and quotation
+
+1. A first item
+2. A nested item
+   - with a bullet
+
+> A quotation with a citation [@doe2026, pp. 4-5].
+
+## Table
+
+| Column A | Column B |
+|:---------|---------:|
+| alpha    |        1 |
+| beta     |        2 |
+
+## Figure {#sec-results}
+
+![A local test figure with a citation [@doe2026].](figure.svg){#fig-example width="60%"}
+
+::: {layout-ncol=2}
+![Panel A](figure.svg){#fig-panel-a}
+
+![Panel B](figure.svg){#fig-panel-b}
+:::
+
+## Equation
+
+$$
+f(x) = \int_0^x t^2\,dt
+$$ {#eq-integral}
+
+## Inert computation
+
+```{python}
+#| label: fig-computation
+print("This must never execute")
+```
+
+```{=html}
+<aside data-unknown="preserve-me">Atomic raw content</aside>
+```

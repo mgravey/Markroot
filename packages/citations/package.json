@@ -1,0 +1,9 @@
+{
+  "name": "@markroot/citations",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": { "@markroot/core": "workspace:*", "@markroot/workspace": "workspace:*" },
+  "scripts": { "typecheck": "tsc -p tsconfig.json" }
+}

@@ -1,0 +1,44 @@
+{
+  "name": "@markroot/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc -p tsconfig.json && vite build",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@codemirror/lang-markdown": "^6.3.4",
+    "@codemirror/search": "^6.5.11",
+    "@codemirror/state": "^6.5.2",
+    "@codemirror/view": "^6.38.2",
+    "@fontsource/ibm-plex-mono": "^5.2.6",
+    "@fontsource/manrope": "^5.2.6",
+    "@fontsource/source-serif-4": "^5.2.8",
+    "@markroot/citations": "workspace:*",
+    "@markroot/comments": "workspace:*",
+    "@markroot/core": "workspace:*",
+    "@markroot/document": "workspace:*",
+    "@markroot/export": "workspace:*",
+    "@markroot/git": "workspace:*",
+    "@markroot/rendering": "workspace:*",
+    "@markroot/review": "workspace:*",
+    "@markroot/settings": "workspace:*",
+    "@markroot/workspace": "workspace:*",
+    "@vitejs/plugin-react": "^5.0.2",
+    "codemirror": "^6.0.2",
+    "dompurify": "^3.2.6",
+    "lucide-react": "^0.542.0",
+    "prosemirror-markdown": "^1.13.2",
+    "prosemirror-state": "^1.4.3",
+    "prosemirror-view": "^1.41.1",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.12",
+    "@types/react-dom": "^19.1.9",
+    "vite": "^7.1.4"
+  }
+}

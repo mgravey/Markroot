@@ -1,0 +1,23 @@
+{
+  "name": "@markroot/rendering",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@markroot/comments": "workspace:*",
+    "@markroot/core": "workspace:*",
+    "@markroot/document": "workspace:*",
+    "katex": "0.16.22",
+    "markdown-it": "^14.1.0",
+    "pandoc-wasm": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/markdown-it": "^14.1.2"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  }
+}

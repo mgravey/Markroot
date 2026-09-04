@@ -1,0 +1,15 @@
+{
+  "name": "@markroot/git",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@markroot/core": "workspace:*",
+    "@markroot/workspace": "workspace:*",
+    "diff": "^8.0.2",
+    "isomorphic-git": "^1.36.3"
+  },
+  "devDependencies": { "@types/diff": "^7.0.2" },
+  "scripts": { "typecheck": "tsc -p tsconfig.json" }
+}
