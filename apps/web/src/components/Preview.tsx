@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import DOMPurify from 'dompurify';
 import type { DocumentBlock } from '@markroot/document';
-import { isScrollKey, ScrollIntentGate } from './scroll-sync.js';
+import { centeredScrollTop, isScrollKey, ScrollIntentGate, viewportCenter } from './scroll-sync.js';
 
 interface Props {
   html: string;
@@ -13,6 +13,7 @@ interface Props {
   activeBlock?: string | undefined;
   scrollTarget?: string | undefined;
   scrollProgress?: number | undefined;
+  scrollAlignment: 'center' | 'reveal';
   anchorTarget?: Readonly<{ id: string; request: number }> | undefined;
   allowRemoteResources: boolean;
   fontFamily: 'serif' | 'sans' | 'mono';
@@ -22,7 +23,7 @@ interface Props {
   onScroll(id: string, progress: number): void;
 }
 
-export function Preview({ html, objectUrls, warnings, blocks, search, regularExpression, activeBlock, scrollTarget, scrollProgress, anchorTarget, allowRemoteResources, fontFamily, fontSize, justified, onNavigate, onScroll }: Props) {
+export function Preview({ html, objectUrls, warnings, blocks, search, regularExpression, activeBlock, scrollTarget, scrollProgress, scrollAlignment, anchorTarget, allowRemoteResources, fontFamily, fontSize, justified, onNavigate, onScroll }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const scrollIntent = useRef(new ScrollIntentGate());
   const latestOnScroll = useRef(onScroll);
@@ -59,11 +60,11 @@ export function Preview({ html, objectUrls, warnings, blocks, search, regularExp
       const container = host.current?.parentElement;
       const next = target.nextElementSibling instanceof HTMLElement ? target.nextElementSibling : undefined;
       scrollIntent.current.beginProgrammatic();
-      const moved = container ? revealPoint(container, target, next, scrollProgress ?? 0) : (target.scrollIntoView({ block: 'center' }), true);
+      const moved = container ? (scrollAlignment === 'center' ? centerPoint : revealPoint)(container, target, next, scrollProgress ?? 0) : (target.scrollIntoView({ block: 'center' }), true);
       if (!moved) scrollIntent.current.endProgrammatic();
       else requestAnimationFrame(() => scrollIntent.current.endProgrammatic());
     }
-  }, [scrollTarget, scrollProgress]);
+  }, [scrollTarget, scrollProgress, scrollAlignment]);
   useEffect(() => {
     if (anchorTarget) navigatePreviewAnchor(host.current, anchorTarget.id, blocks, scrollIntent.current, latestOnNavigate.current);
   }, [anchorTarget, blocks, html]);
@@ -78,13 +79,13 @@ export function Preview({ html, objectUrls, warnings, blocks, search, regularExp
       frame = requestAnimationFrame(() => {
         const blocks = [...(host.current?.shadowRoot?.querySelectorAll<HTMLElement>('[data-block-id]') ?? [])];
         if (!blocks.length) return;
-        const top = container.getBoundingClientRect().top + 16;
-        const current = [...blocks].reverse().find((block) => block.getBoundingClientRect().top <= top) ?? blocks[0]!;
+        const center = viewportCenter(container.getBoundingClientRect());
+        const current = [...blocks].reverse().find((block) => block.getBoundingClientRect().top <= center) ?? blocks[0]!;
         const index = blocks.indexOf(current);
         const next = blocks[index + 1];
         const start = current.getBoundingClientRect().top;
         const span = Math.max(1, (next?.getBoundingClientRect().top ?? current.getBoundingClientRect().bottom) - start);
-        latestOnScroll.current(current.dataset.blockId!, Math.max(0, Math.min(1, (top - start) / span)));
+        latestOnScroll.current(current.dataset.blockId!, Math.max(0, Math.min(1, (center - start) / span)));
       });
     };
     const beginPointer = () => scrollIntent.current.beginPointer();
@@ -180,6 +181,7 @@ const previewStyle = `
   .citation a { color: var(--accent-strong); text-decoration: none; border-bottom: 1px dotted currentColor; }
   .doi-link { overflow-wrap: anywhere; font-size: .86em; }
   .references { margin-top: 3em; padding-top: 1em; border-top: 1px solid var(--line); }
+  .references.references-explicit { margin-top: 0; padding-top: 0; border-top: 0; }
   .references ol { padding-left: 1.4em; }
   .references li { margin: .7em 0; padding-left: .35em; }
   table { width: 100%; margin: 1.4em 0; border-collapse: collapse; font-size: .94em; }
@@ -191,6 +193,17 @@ const previewStyle = `
   @media (max-width: 640px) { .figure-layout { grid-template-columns: 1fr !important; } }
 `;
 
+function centerPoint(container: HTMLElement, target: HTMLElement, next: HTMLElement | undefined, progress: number): boolean {
+  const viewport = container.getBoundingClientRect();
+  const rect = target.getBoundingClientRect();
+  const span = Math.max(0, (next?.getBoundingClientRect().top ?? rect.bottom) - rect.top);
+  const point = rect.top + span * Math.max(0, Math.min(1, progress));
+  const nextScrollTop = centeredScrollTop(container.scrollTop, point - viewport.top, viewport.height, container.scrollHeight);
+  if (Math.abs(nextScrollTop - container.scrollTop) <= 1) return false;
+  container.scrollTop = nextScrollTop;
+  return true;
+}
+
 function revealPoint(container: HTMLElement, target: HTMLElement, next: HTMLElement | undefined, progress: number): boolean {
   const viewport = container.getBoundingClientRect();
   const rect = target.getBoundingClientRect();
@@ -198,7 +211,9 @@ function revealPoint(container: HTMLElement, target: HTMLElement, next: HTMLElem
   const point = rect.top + span * Math.max(0, Math.min(1, progress));
   const margin = Math.min(48, viewport.height * .12);
   if (point >= viewport.top + margin && point <= viewport.bottom - margin) return false;
-  container.scrollTop += point - (viewport.top + viewport.height / 2);
+  const nextScrollTop = centeredScrollTop(container.scrollTop, point - viewport.top, viewport.height, container.scrollHeight);
+  if (Math.abs(nextScrollTop - container.scrollTop) <= 1) return false;
+  container.scrollTop = nextScrollTop;
   return true;
 }
 

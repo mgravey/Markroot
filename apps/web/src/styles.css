@@ -86,17 +86,23 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .panel-heading button { width: 25px; height: 25px; }
 .panel-heading-actions { display: flex; align-items: center; gap: 2px; }
 .panel-heading-actions button.selected { color: var(--accent-strong); background: var(--accent-soft); }
-.outline-overlay { position: absolute; z-index: 8; inset: 38px 0 37px 0; display: grid; grid-template-rows: 38px minmax(0, 1fr); color: var(--ink); background: color-mix(in srgb, var(--surface) 96%, transparent); border-right: 1px solid var(--line); box-shadow: var(--shadow); backdrop-filter: blur(8px); }
-.outline-overlay > header { display: flex; align-items: center; gap: 8px; padding: 0 9px 0 14px; border-bottom: 1px solid var(--line); font-size: 12px; }
-.outline-overlay > header strong { flex: 1; }
-.outline-overlay > header button { display: grid; place-items: center; width: 27px; height: 27px; color: var(--muted); background: transparent; border-radius: 4px; }
+.outline-overlay { position: absolute; z-index: 8; inset: 38px 0 37px 0; display: grid; grid-template-rows: auto minmax(0, 1fr); color: var(--ink); background: color-mix(in srgb, var(--surface) 96%, transparent); border-right: 1px solid var(--line); box-shadow: var(--shadow); backdrop-filter: blur(8px); }
+.outline-overlay > header { display: grid; gap: 5px; padding: 6px 9px 7px 12px; border-bottom: 1px solid var(--line); font-size: 12px; }
+.outline-title { display: flex; min-height: 27px; align-items: center; gap: 8px; }
+.outline-title strong { flex: 1; }
+.outline-title button { display: grid; place-items: center; width: 27px; height: 27px; color: var(--muted); background: transparent; border-radius: 4px; }
+.outline-filters { display: flex; min-width: 0; align-items: center; gap: 6px; }
+.outline-filters label { display: flex; min-width: 0; flex: 1; align-items: center; gap: 5px; color: var(--muted); }
+.outline-filters select { min-width: 0; flex: 1; height: 27px; padding: 0 5px; color: var(--ink); background: var(--surface-strong); border: 1px solid var(--line); border-radius: 4px; font: inherit; }
+.outline-filters button { display: inline-flex; height: 27px; align-items: center; gap: 4px; padding: 0 7px; color: var(--muted); background: transparent; border: 1px solid var(--line); border-radius: 4px; font: inherit; }
+.outline-filters button.selected { color: var(--accent-strong); background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); }
 .outline-overlay nav { min-height: 0; overflow: auto; padding: 7px 5px; }
 .outline-overlay ul { margin: 0; padding: 0; list-style: none; }
 .outline-overlay li { padding-left: calc(var(--outline-depth) * 11px); }
-.outline-overlay li button { display: grid; grid-template-columns: 15px 30px minmax(0, 1fr); align-items: center; gap: 4px; width: 100%; min-height: 30px; padding: 4px 7px; color: var(--ink); background: transparent; border-radius: 5px; text-align: left; }
-.outline-overlay li button:hover, .outline-overlay li button:focus-visible { color: var(--accent-strong); background: var(--accent-soft); }
-.outline-overlay li button > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.outline-overlay .outline-number { color: var(--muted); font: 10px 'IBM Plex Mono', monospace; }
+.outline-overlay li button { display: grid; grid-template-columns: 15px max-content minmax(0, 1fr); align-items: center; column-gap: 6px; width: 100%; min-height: 30px; padding: 4px 7px; color: var(--ink); background: transparent; border-radius: 5px; text-align: left; }
+.outline-overlay li button:hover, .outline-overlay li button:focus-visible, .outline-overlay li button.active { color: var(--accent-strong); background: var(--accent-soft); }
+.outline-overlay .outline-entry-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.outline-overlay .outline-number { min-width: 3ch; color: var(--muted); font: 11px 'IBM Plex Mono', monospace; text-align: right; white-space: nowrap; }
 .outline-overlay nav > p { padding: 18px 12px; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .file-tree { flex: 1; min-height: 0; overflow: auto; padding: 7px 5px; }
 .file-tree ul { margin: 0; padding: 0; list-style: none; }

@@ -32,12 +32,14 @@ export interface DocumentEngine {
 }
 
 const markdown = new MarkdownIt({ html: false, linkify: true, typographer: true, breaks: false });
+const REFERENCES_PLACEHOLDER = '<div data-markroot-references-placeholder="true"></div>';
 
 export class BasicDocumentEngine implements DocumentEngine {
   readonly id = 'markroot-basic';
   async render(request: RenderRequest, context?: OperationContext): Promise<RenderArtifact> {
     throwIfAborted(context);
     const clean = stripCommentMarkup(request.snapshot.source);
+    const renderSource = maskMarkdownHtmlComments(clean);
     const blocks = request.snapshot.blocks;
     const resources = createResourceUrls(request.dependencies ?? []);
     const citationMap = new Map((request.citations ?? []).map((citation) => [citation.key, citation]));
@@ -47,21 +49,29 @@ export class BasicDocumentEngine implements DocumentEngine {
       equation: 0,
       sections: [0, 0, 0, 0, 0, 0],
       citations: new Set(),
-      crossrefs: buildCrossReferences(clean),
+      crossrefs: buildCrossReferences(renderSource),
       outline: [],
       usedIds: new Set(),
-      numberSections: frontMatterBoolean(clean, 'number-sections') !== false,
+      numberSections: frontMatterBoolean(renderSource, 'number-sections') !== false,
     };
-    const html = blocks
+    const bodyHtml = blocks
       .filter((block) => block.kind !== 'frontmatter')
-      .map((block) => `<section class="mr-block mr-${block.kind}" data-block-id="${block.id}" data-source-from="${block.from}" data-source-to="${block.to}">${renderBlock(block.kind, stripCommentMarkup(block.text), block.from, block.id, citationMap, resources.urls, state)}</section>`)
-      .join('\n') + renderReferences(state.citations, citationMap);
+      .map((block) => {
+        const blockSource = stripCommentMarkup(block.text);
+        const renderableBlock = block.kind === 'code' ? blockSource : maskMarkdownHtmlComments(blockSource);
+        return `<section class="mr-block mr-${block.kind}" data-block-id="${block.id}" data-source-from="${block.from}" data-source-to="${block.to}">${renderBlock(block.kind, renderableBlock, block.from, block.id, citationMap, resources.urls, state)}</section>`;
+      })
+      .join('\n');
+    const references = renderReferences(state.citations, citationMap, bodyHtml.includes(REFERENCES_PLACEHOLDER));
+    const html = bodyHtml.includes(REFERENCES_PLACEHOLDER)
+      ? bodyHtml.replace(REFERENCES_PLACEHOLDER, references).replaceAll(REFERENCES_PLACEHOLDER, '')
+      : bodyHtml + references;
     return {
       revision: request.snapshot.revision,
       html,
       warnings: [
-        ...(request.snapshot.path.endsWith('.qmd') ? findExecutableWarnings(clean) : []),
-        ...findMissingImageWarnings(clean, request.dependencies ?? []),
+        ...(request.snapshot.path.endsWith('.qmd') ? findExecutableWarnings(renderSource) : []),
+        ...findMissingImageWarnings(renderSource, request.dependencies ?? []),
       ],
       anchors: blocks.map(({ id, from, to }) => ({ id, from, to })),
       engine: this.id,
@@ -78,7 +88,7 @@ export class PandocDocumentEngine implements DocumentEngine {
     try {
       const { convert } = await import('pandoc-wasm');
       const files = Object.fromEntries((request.dependencies ?? []).map((file) => [file.path, file.content]));
-      const clean = stripCommentMarkup(request.snapshot.source);
+      const clean = maskMarkdownHtmlComments(stripCommentMarkup(request.snapshot.source));
       const result = await convert({ from: 'markdown+fenced_divs+tex_math_dollars', to: 'html5', citeproc: true, standalone: false }, clean, files);
       throwIfAborted(context);
       return {
@@ -106,10 +116,71 @@ interface ScholarlyState {
   numberSections: boolean;
 }
 
+/**
+ * Replaces Markdown HTML comments with whitespace while preserving length and
+ * line endings. Literal comment syntax inside inline or fenced code is kept.
+ */
+export function maskMarkdownHtmlComments(source: string): string {
+  const lines = source.match(/.*(?:\r?\n|$)/g)?.filter(Boolean) ?? [];
+  let fence: { marker: '`' | '~'; length: number } | undefined;
+  let inlineTicks = 0;
+  let inComment = false;
+  let output = '';
+
+  for (const line of lines) {
+    const fenceMatch = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (!inComment && inlineTicks === 0 && fence) {
+      output += line;
+      if (fenceMatch?.[1]?.[0] === fence.marker && fenceMatch[1].length >= fence.length) fence = undefined;
+      continue;
+    }
+    if (!inComment && inlineTicks === 0 && fenceMatch?.[1]) {
+      fence = { marker: fenceMatch[1][0] as '`' | '~', length: fenceMatch[1].length };
+      output += line;
+      continue;
+    }
+
+    for (let index = 0; index < line.length;) {
+      if (inComment) {
+        if (line.startsWith('-->', index)) {
+          output += '   ';
+          index += 3;
+          inComment = false;
+        } else {
+          const character = line[index]!;
+          output += character === '\n' || character === '\r' ? character : ' ';
+          index += 1;
+        }
+        continue;
+      }
+      if (line[index] === '`') {
+        let end = index + 1;
+        while (line[end] === '`') end += 1;
+        const run = end - index;
+        if (inlineTicks === 0) inlineTicks = run;
+        else if (run === inlineTicks) inlineTicks = 0;
+        output += line.slice(index, end);
+        index = end;
+        continue;
+      }
+      if (inlineTicks === 0 && line.startsWith('<!--', index)) {
+        output += '    ';
+        index += 4;
+        inComment = true;
+        continue;
+      }
+      output += line[index]!;
+      index += 1;
+    }
+  }
+  return output;
+}
+
 function renderBlock(kind: string, source: string, blockFrom: number, blockId: string, citations: ReadonlyMap<string, RenderCitation>, resources: ReadonlyMap<string, string>, state: ScholarlyState): string {
   if (kind === 'heading') return renderHeading(source, blockFrom, blockId, citations, state);
   if (kind === 'table') return renderTableBlock(source, blockFrom, blockId, citations, resources, state);
   if (kind === 'div') {
+    if (isReferencesPlaceholder(source)) return REFERENCES_PLACEHOLDER;
     const layout = /^:::\s*\{[^}]*layout-ncol\s*=\s*([2-4])[^}]*\}\s*\n([\s\S]*?)\n:::\s*$/m.exec(source.trim());
     if (layout) return `<div class="figure-layout layout-cols-${layout[1]}">${renderScholarlyMarkdown(layout[2]!, blockFrom + source.indexOf(layout[2]!), blockId, citations, resources, state)}</div>`;
     const match = /^:::\s*\{?\.?callout-([\w-]+)[^\n]*\}?\s*\n([\s\S]*?)\n:::\s*$/m.exec(source.trim());
@@ -288,13 +359,23 @@ function replaceResourceUrls(html: string, resources: ReadonlyMap<string, string
   });
 }
 
-function renderReferences(keys: ReadonlySet<string>, citations: ReadonlyMap<string, RenderCitation>): string {
+function renderReferences(keys: ReadonlySet<string>, citations: ReadonlyMap<string, RenderCitation>, explicitPlacement = false): string {
   const entries = [...keys].map((key) => citations.get(key)).filter((citation): citation is RenderCitation => Boolean(citation));
   if (!entries.length) return '';
-  return `<section class="references" aria-label="References"><h2>References</h2><ol>${entries.map((citation) => {
+  const list = `<ol>${entries.map((citation) => {
     const url = doiUrl(citation.doi);
     return `<li id="ref-${escapeAttribute(citation.key)}">${escapeHtml(referenceLabel(citation))}${url ? ` <a class="doi-link" href="${escapeHtml(url)}">https://doi.org/${escapeHtml(citation.doi!)}</a>` : ''}</li>`;
-  }).join('')}</ol></section>`;
+  }).join('')}</ol>`;
+  return explicitPlacement
+    ? `<div class="references references-explicit" id="refs" aria-label="References">${list}</div>`
+    : `<section class="references" aria-label="References"><h2>References</h2>${list}</section>`;
+}
+
+function isReferencesPlaceholder(source: string): boolean {
+  const lines = source.trim().split(/\r?\n/);
+  const opening = /^:::\s*\{([^}]*)\}\s*$/.exec(lines[0] ?? '');
+  const closing = /^:::\s*$/.test(lines.at(-1) ?? '');
+  return Boolean(opening && closing && lines.length >= 2 && parsePandocAttributes(opening[1]).id === 'refs' && !lines.slice(1, -1).join('\n').trim());
 }
 
 function buildCrossReferences(source: string): ReadonlyMap<string, string> {

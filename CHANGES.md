@@ -29,4 +29,10 @@
 - Expanded BibTeX year extraction to bare year and date-style fields, avoiding incorrect `n.d.` labels.
 - Added validated Ctrl/Cmd-click DOI navigation for citations while preserving normal bibliography navigation and citation typography.
 - Added persistent drag and keyboard resizing for the file tree, source editor, and rendered viewer.
+- Changed synchronized scrolling to continuously align the semantic points at both panes' vertical center, using the actively scrolled pane as the sole reference.
+- Kept the document outline open during navigation, added persistent depth and figure controls, defaulted to two heading levels, and prevented long numbers from colliding with labels.
+- Hid ordinary Markdown HTML comments from rendered and visual prose while preserving literal comment syntax in code and retaining source mappings.
+- Replaced explicit `::: {#refs}` placeholders with the generated bibliography at that exact location, avoiding visible marker syntax and duplicate appended References sections.
+- Added local PDF.js first-page rasterization so PDF-backed figures display like PNG/SVG figures in the browser viewer, with versioned caching and no network access.
+- Improved dark-mode source readability with a dedicated high-contrast style for Markdown link and image paths.
 - Added workspace dependency-boundary and cycle enforcement.

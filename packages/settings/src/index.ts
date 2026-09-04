@@ -2,6 +2,7 @@ import type { AuthorIdentity } from '@markroot/core';
 
 export type ThemePreference = 'system' | 'light' | 'dark';
 export type PaneFont = 'serif' | 'sans' | 'mono';
+export type OutlineDepth = 2 | 3 | 6;
 export interface MarkrootSettings {
   readonly theme: ThemePreference;
   readonly autosave: boolean;
@@ -13,6 +14,8 @@ export interface MarkrootSettings {
   readonly viewerJustified: boolean;
   readonly filesPaneWidth: number;
   readonly sourcePaneRatio: number;
+  readonly outlineDepth: OutlineDepth;
+  readonly outlineShowFigures: boolean;
   readonly profile: AuthorIdentity;
 }
 
@@ -41,6 +44,8 @@ export function defaultSettings(): MarkrootSettings {
     viewerJustified: false,
     filesPaneWidth: 250,
     sourcePaneRatio: 0.5,
+    outlineDepth: 2,
+    outlineShowFigures: false,
     profile: { actorId: crypto.randomUUID(), displayName: 'Local author' },
   };
 }
@@ -56,6 +61,7 @@ export async function loadSettings(): Promise<MarkrootSettings> {
     viewerFontSize: clampFontSize(stored.viewerFontSize, defaults.viewerFontSize),
     filesPaneWidth: clampNumber(stored.filesPaneWidth, 180, 420, defaults.filesPaneWidth),
     sourcePaneRatio: clampNumber(stored.sourcePaneRatio, 0.25, 0.75, defaults.sourcePaneRatio),
+    outlineDepth: normalizeOutlineDepth(stored.outlineDepth),
     profile: { ...defaults.profile, ...stored.profile },
   };
 }
@@ -116,3 +122,4 @@ function clampFontSize(value: number | undefined, fallback: number): number {
 function clampNumber(value: number | undefined, min: number, max: number, fallback: number): number {
   return Number.isFinite(value) ? Math.max(min, Math.min(max, value!)) : fallback;
 }
+function normalizeOutlineDepth(value: number | undefined): OutlineDepth { return value === 3 || value === 6 ? value : 2; }

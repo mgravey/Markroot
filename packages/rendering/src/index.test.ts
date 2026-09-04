@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFile } from 'node:fs/promises';
 import { workspacePath } from '@markroot/core';
 import { DocumentSession } from '@markroot/document';
-import { BasicDocumentEngine } from './index.js';
+import { BasicDocumentEngine, maskMarkdownHtmlComments } from './index.js';
 
 describe('BasicDocumentEngine', () => {
   it('renders mapped blocks and warns without executing QMD code', async () => {
@@ -98,5 +98,65 @@ describe('BasicDocumentEngine', () => {
     expect(result.html).not.toContain('section-number');
     expect(result.outline?.[0]).toMatchObject({ label: 'Introduction' });
     expect(result.outline?.[0]?.number).toBeUndefined();
+  });
+
+  it('hides Markdown HTML comments without changing code literals or source length', async () => {
+    const source = `# Visible title <!-- private heading note -->
+
+Visible <!-- private prose note --> text.
+
+<!-- private block note -->
+
+\`<!-- inline code -->\`
+
+~~~html
+<!-- fenced code -->
+~~~
+`;
+    const masked = maskMarkdownHtmlComments(source);
+    const result = await new BasicDocumentEngine().render({ snapshot: new DocumentSession(workspacePath('comments.md'), source).snapshot() });
+
+    expect(masked).toHaveLength(source.length);
+    expect(masked.split('\n')).toHaveLength(source.split('\n').length);
+    expect(result.html).toContain('Visible title');
+    expect(result.html).toMatch(/Visible\s+text\./);
+    expect(result.html).not.toContain('private heading note');
+    expect(result.html).not.toContain('private prose note');
+    expect(result.html).not.toContain('private block note');
+    expect(result.html).toContain('&lt;!-- inline code --&gt;');
+    expect(result.html).toContain('&lt;!-- fenced code --&gt;');
+  });
+
+  it('inserts the bibliography at an explicit refs div instead of appending a duplicate section', async () => {
+    const source = `# Findings
+
+Evidence supports the result [@doe2026].
+
+# References {.unnumbered}
+
+::: {#refs}
+:::
+
+# Appendix {.unnumbered}
+`;
+    const result = await new BasicDocumentEngine().render({
+      snapshot: new DocumentSession(workspacePath('references.qmd'), source).snapshot(),
+      citations: [{ key: 'doe2026', author: 'Doe, Jane', year: '2026', title: 'Placed bibliography' }],
+    });
+
+    expect(result.html).not.toContain(':::');
+    expect(result.html).toContain('<div class="references references-explicit" id="refs"');
+    expect(result.html).not.toContain('<h2>References</h2>');
+    expect(result.html.indexOf('id="ref-doe2026"')).toBeLessThan(result.html.indexOf('id="appendix"'));
+  });
+
+  it('retains an automatic references section when no refs placeholder exists', async () => {
+    const result = await new BasicDocumentEngine().render({
+      snapshot: new DocumentSession(workspacePath('references.md'), 'Evidence [@doe2026].\n').snapshot(),
+      citations: [{ key: 'doe2026', author: 'Doe, Jane', year: '2026', title: 'Fallback bibliography' }],
+    });
+
+    expect(result.html).toContain('<section class="references"');
+    expect(result.html).toContain('<h2>References</h2>');
   });
 });

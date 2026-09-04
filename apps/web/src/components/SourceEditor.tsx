@@ -1,12 +1,14 @@
 import { useEffect, useRef } from 'react';
 import { basicSetup } from 'codemirror';
 import { markdown } from '@codemirror/lang-markdown';
+import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
 import { SearchQuery, setSearchQuery } from '@codemirror/search';
 import { Compartment, EditorState, StateEffect, StateField, type Extension, type Text } from '@codemirror/state';
 import { Decoration, EditorView, keymap, type DecorationSet } from '@codemirror/view';
+import { tags } from '@lezer/highlight';
 import type { DocumentBlock } from '@markroot/document';
 import { relativeWorkspaceReference, type SourceRange, type WorkspacePath } from '@markroot/core';
-import { isScrollKey, ScrollIntentGate } from './scroll-sync.js';
+import { isScrollKey, ScrollIntentGate, viewportCenter } from './scroll-sync.js';
 
 interface Props {
   path: WorkspacePath;
@@ -21,6 +23,7 @@ interface Props {
   activeBlock?: string | undefined;
   scrollTarget?: string | undefined;
   scrollProgress?: number | undefined;
+  scrollAlignment: 'center' | 'reveal';
   cursorTarget?: number | undefined;
   goToLine?: number | undefined;
   onChange(value: string): void;
@@ -76,7 +79,7 @@ export function SourceEditor(props: Props) {
         },
       }),
       activeBlockField,
-      appearance.current.of(editorTheme(props.dark, props.fontFamily, props.fontSize)),
+      appearance.current.of(editorAppearance(props.dark, props.fontFamily, props.fontSize)),
     ];
     const editor = new EditorView({ state: EditorState.create({ doc: props.value, extensions }), parent: host.current });
     let frame = 0;
@@ -86,7 +89,7 @@ export function SourceEditor(props: Props) {
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(() => {
         const viewport = editor.scrollDOM.getBoundingClientRect();
-        const position = editor.posAtCoords({ x: viewport.left + 24, y: viewport.top + Math.min(32, viewport.height / 3) }) ?? editor.viewport.from;
+        const position = editor.posAtCoords({ x: viewport.left + Math.min(80, viewport.width / 2), y: viewportCenter(viewport) }) ?? editor.viewport.from;
         const block = latest.current.blocks.find((candidate) => position >= candidate.from && position <= candidate.to) ?? latest.current.blocks.at(-1);
         if (!block) return;
         latest.current.onScroll(block.id, Math.max(0, Math.min(1, (position - block.from) / Math.max(1, block.to - block.from))));
@@ -117,7 +120,7 @@ export function SourceEditor(props: Props) {
   }, []);
 
   useEffect(() => {
-    view.current?.dispatch({ effects: appearance.current.reconfigure(editorTheme(props.dark, props.fontFamily, props.fontSize)) });
+    view.current?.dispatch({ effects: appearance.current.reconfigure(editorAppearance(props.dark, props.fontFamily, props.fontSize)) });
   }, [props.dark, props.fontFamily, props.fontSize]);
 
   useEffect(() => {
@@ -140,14 +143,14 @@ export function SourceEditor(props: Props) {
     if (editor && block) {
       const progress = Math.max(0, Math.min(1, props.scrollProgress ?? 0));
       const position = Math.min(block.to, block.from + Math.round((block.to - block.from) * progress));
-      const moved = !positionVisible(editor, position);
       scrollIntent.current.beginProgrammatic();
-      if (moved) {
+      const aligned = props.scrollAlignment === 'center' ? positionCentered(editor, position) : positionVisible(editor, position);
+      if (!aligned) {
         editor.dispatch({ effects: EditorView.scrollIntoView(position, { y: 'center' }) });
       }
       requestAnimationFrame(() => scrollIntent.current.endProgrammatic());
     }
-  }, [props.scrollTarget, props.scrollProgress, props.blocks]);
+  }, [props.scrollTarget, props.scrollProgress, props.scrollAlignment, props.blocks]);
 
   useEffect(() => {
     const editor = view.current;
@@ -218,12 +221,31 @@ function editorTheme(dark: boolean, fontFamily: Props['fontFamily'], fontSize: n
   }, { dark });
 }
 
+function editorAppearance(dark: boolean, fontFamily: Props['fontFamily'], fontSize: number): Extension {
+  return [
+    editorTheme(dark, fontFamily, fontSize),
+    syntaxHighlighting(HighlightStyle.define([{
+      tag: tags.url,
+      color: dark ? '#8fd8ff' : '#075f82',
+      textDecoration: 'underline',
+    }])),
+  ];
+}
+
 function positionVisible(editor: EditorView, position: number): boolean {
   const coords = editor.coordsAtPos(position);
   const viewport = editor.scrollDOM.getBoundingClientRect();
   if (!coords) return false;
   const margin = Math.min(48, viewport.height * .12);
   return coords.top >= viewport.top + margin && coords.bottom <= viewport.bottom - margin;
+}
+
+function positionCentered(editor: EditorView, position: number): boolean {
+  const coords = editor.coordsAtPos(position);
+  if (!coords) return false;
+  const viewport = editor.scrollDOM.getBoundingClientRect();
+  const positionCenter = (coords.top + coords.bottom) / 2;
+  return Math.abs(positionCenter - viewportCenter(viewport)) <= 1;
 }
 
 function fontStack(font: Props['fontFamily']): string {

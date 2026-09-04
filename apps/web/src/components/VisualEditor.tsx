@@ -3,13 +3,15 @@ import { defaultMarkdownParser, defaultMarkdownSerializer } from 'prosemirror-ma
 import { EditorState } from 'prosemirror-state';
 import { EditorView } from 'prosemirror-view';
 import type { DocumentBlock, DocumentSnapshot } from '@markroot/document';
-import { isScrollKey, ScrollIntentGate } from './scroll-sync.js';
+import { maskMarkdownHtmlComments } from '@markroot/rendering';
+import { centeredScrollTop, isScrollKey, ScrollIntentGate, viewportCenter } from './scroll-sync.js';
 
 interface Props {
   snapshot: DocumentSnapshot;
   activeBlock?: string | undefined;
   scrollTarget?: string | undefined;
   scrollProgress?: number | undefined;
+  scrollAlignment: 'center' | 'reveal';
   fontFamily: 'serif' | 'sans' | 'mono';
   fontSize: number;
   justified: boolean;
@@ -18,7 +20,7 @@ interface Props {
   onScroll(blockId: string, progress: number): void;
 }
 
-export function VisualEditor({ snapshot, activeBlock, scrollTarget, scrollProgress, fontFamily, fontSize, justified, onApply, onNavigate, onScroll }: Props) {
+export function VisualEditor({ snapshot, activeBlock, scrollTarget, scrollProgress, scrollAlignment, fontFamily, fontSize, justified, onApply, onNavigate, onScroll }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const scrollIntent = useRef(new ScrollIntentGate());
   const latestOnScroll = useRef(onScroll);
@@ -29,10 +31,10 @@ export function VisualEditor({ snapshot, activeBlock, scrollTarget, scrollProgre
     const container = host.current?.parentElement;
     const next = target.nextElementSibling instanceof HTMLElement ? target.nextElementSibling : undefined;
     scrollIntent.current.beginProgrammatic();
-    const moved = container ? revealPoint(container, target, next, scrollProgress ?? 0) : (target.scrollIntoView({ block: 'center' }), true);
+    const moved = container ? (scrollAlignment === 'center' ? centerPoint : revealPoint)(container, target, next, scrollProgress ?? 0) : (target.scrollIntoView({ block: 'center' }), true);
     if (!moved) scrollIntent.current.endProgrammatic();
     else requestAnimationFrame(() => scrollIntent.current.endProgrammatic());
-  }, [scrollTarget, scrollProgress]);
+  }, [scrollTarget, scrollProgress, scrollAlignment]);
   useEffect(() => {
     const container = host.current?.parentElement;
     if (!container) return;
@@ -44,13 +46,13 @@ export function VisualEditor({ snapshot, activeBlock, scrollTarget, scrollProgre
       frame = requestAnimationFrame(() => {
         const blocks = [...(host.current?.querySelectorAll<HTMLElement>('[data-block-id]') ?? [])];
         if (!blocks.length) return;
-        const top = container.getBoundingClientRect().top + 16;
-        const current = [...blocks].reverse().find((block) => block.getBoundingClientRect().top <= top) ?? blocks[0]!;
+        const center = viewportCenter(container.getBoundingClientRect());
+        const current = [...blocks].reverse().find((block) => block.getBoundingClientRect().top <= center) ?? blocks[0]!;
         const index = blocks.indexOf(current);
         const next = blocks[index + 1];
         const start = current.getBoundingClientRect().top;
         const span = Math.max(1, (next?.getBoundingClientRect().top ?? current.getBoundingClientRect().bottom) - start);
-        latestOnScroll.current(current.dataset.blockId!, Math.max(0, Math.min(1, (top - start) / span)));
+        latestOnScroll.current(current.dataset.blockId!, Math.max(0, Math.min(1, (center - start) / span)));
       });
     };
     const beginPointer = () => scrollIntent.current.beginPointer();
@@ -116,7 +118,7 @@ function VisualBlock({ block, active, onApply, onNavigate }: { block: DocumentBl
 }
 
 function lightweight(block: DocumentBlock): string {
-  const escaped = escapeHtml(block.text.trim());
+  const escaped = escapeHtml(maskMarkdownHtmlComments(block.text).trim());
   if (block.kind === 'heading') return `<h${block.level ?? 2}>${escaped.replace(/^#{1,6}\s+/, '')}</h${block.level ?? 2}>`;
   if (block.kind === 'quote') return `<blockquote>${escaped.replace(/^&gt;\s?/gm, '')}</blockquote>`;
   if (block.kind === 'list') return `<div class="visual-list">${escaped.replace(/^(?:[-*+] |\d+[.)] )/gm, '• ')}</div>`;
@@ -127,6 +129,17 @@ function lightweight(block: DocumentBlock): string {
 function stripFence(value: string): string { return value.replace(/^(```+|~~~+)[^\n]*\n?/, '').replace(/\n?(```+|~~~+)\s*$/, ''); }
 function escapeHtml(value: string): string { return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;'); }
 
+function centerPoint(container: HTMLElement, target: HTMLElement, next: HTMLElement | undefined, progress: number): boolean {
+  const viewport = container.getBoundingClientRect();
+  const rect = target.getBoundingClientRect();
+  const span = Math.max(0, (next?.getBoundingClientRect().top ?? rect.bottom) - rect.top);
+  const point = rect.top + span * Math.max(0, Math.min(1, progress));
+  const nextScrollTop = centeredScrollTop(container.scrollTop, point - viewport.top, viewport.height, container.scrollHeight);
+  if (Math.abs(nextScrollTop - container.scrollTop) <= 1) return false;
+  container.scrollTop = nextScrollTop;
+  return true;
+}
+
 function revealPoint(container: HTMLElement, target: HTMLElement, next: HTMLElement | undefined, progress: number): boolean {
   const viewport = container.getBoundingClientRect();
   const rect = target.getBoundingClientRect();
@@ -134,7 +147,9 @@ function revealPoint(container: HTMLElement, target: HTMLElement, next: HTMLElem
   const point = rect.top + span * Math.max(0, Math.min(1, progress));
   const margin = Math.min(48, viewport.height * .12);
   if (point >= viewport.top + margin && point <= viewport.bottom - margin) return false;
-  container.scrollTop += point - (viewport.top + viewport.height / 2);
+  const nextScrollTop = centeredScrollTop(container.scrollTop, point - viewport.top, viewport.height, container.scrollHeight);
+  if (Math.abs(nextScrollTop - container.scrollTop) <= 1) return false;
+  container.scrollTop = nextScrollTop;
   return true;
 }
 
