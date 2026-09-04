@@ -5,6 +5,7 @@ import { isScrollKey, ScrollIntentGate } from './scroll-sync.js';
 
 interface Props {
   html: string;
+  objectUrls: readonly string[];
   warnings: readonly string[];
   blocks: readonly DocumentBlock[];
   search: string;
@@ -12,6 +13,7 @@ interface Props {
   activeBlock?: string | undefined;
   scrollTarget?: string | undefined;
   scrollProgress?: number | undefined;
+  anchorTarget?: Readonly<{ id: string; request: number }> | undefined;
   allowRemoteResources: boolean;
   fontFamily: 'serif' | 'sans' | 'mono';
   fontSize: number;
@@ -20,11 +22,13 @@ interface Props {
   onScroll(id: string, progress: number): void;
 }
 
-export function Preview({ html, warnings, blocks, search, regularExpression, activeBlock, scrollTarget, scrollProgress, allowRemoteResources, fontFamily, fontSize, justified, onNavigate, onScroll }: Props) {
+export function Preview({ html, objectUrls, warnings, blocks, search, regularExpression, activeBlock, scrollTarget, scrollProgress, anchorTarget, allowRemoteResources, fontFamily, fontSize, justified, onNavigate, onScroll }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const scrollIntent = useRef(new ScrollIntentGate());
   const latestOnScroll = useRef(onScroll);
+  const latestOnNavigate = useRef(onNavigate);
   latestOnScroll.current = onScroll;
+  latestOnNavigate.current = onNavigate;
   useEffect(() => {
     if (!host.current) return;
     const shadow = host.current.shadowRoot ?? host.current.attachShadow({ mode: 'open' });
@@ -32,7 +36,8 @@ export function Preview({ html, warnings, blocks, search, regularExpression, act
     style.textContent = previewStyle;
     const article = document.createElement('article');
     article.classList.toggle('justified', justified);
-    article.innerHTML = DOMPurify.sanitize(html, { FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed'], FORBID_ATTR: ['style'] });
+    article.innerHTML = DOMPurify.sanitize(protectLocalObjectUrls(html, objectUrls), { FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed'], FORBID_ATTR: ['style'] });
+    restoreLocalObjectUrls(article, objectUrls);
     secureLinks(article);
     if (!allowRemoteResources) blockRemoteResources(article);
     prepareFigureImages(article);
@@ -42,7 +47,7 @@ export function Preview({ html, warnings, blocks, search, regularExpression, act
     shadow.host instanceof HTMLElement && shadow.host.style.setProperty('--viewer-font', fontStack(fontFamily));
     shadow.host instanceof HTMLElement && shadow.host.style.setProperty('--viewer-size', `${fontSize}px`);
     shadow.replaceChildren(style, article);
-  }, [html, warnings, search, regularExpression, allowRemoteResources, fontFamily, fontSize, justified]);
+  }, [html, objectUrls, warnings, search, regularExpression, allowRemoteResources, fontFamily, fontSize, justified]);
   useEffect(() => {
     const shadow = host.current?.shadowRoot;
     shadow?.querySelectorAll('.active-block').forEach((element) => element.classList.remove('active-block'));
@@ -59,6 +64,9 @@ export function Preview({ html, warnings, blocks, search, regularExpression, act
       else requestAnimationFrame(() => scrollIntent.current.endProgrammatic());
     }
   }, [scrollTarget, scrollProgress]);
+  useEffect(() => {
+    if (anchorTarget) navigatePreviewAnchor(host.current, anchorTarget.id, blocks, scrollIntent.current, latestOnNavigate.current);
+  }, [anchorTarget, blocks, html]);
   useEffect(() => {
     const container = host.current?.parentElement;
     if (!container) return;
@@ -101,6 +109,20 @@ export function Preview({ html, warnings, blocks, search, regularExpression, act
   }, [html]);
   return <div className="preview" ref={host} onClick={(event) => {
     const path = event.nativeEvent.composedPath();
+    const doiLink = path.find((item): item is HTMLElement => item instanceof HTMLElement && item.hasAttribute('data-doi-url'));
+    if (doiLink && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      openTrustedDoi(doiLink.dataset.doiUrl);
+      return;
+    }
+    const link = path.find((item): item is HTMLAnchorElement => item instanceof HTMLAnchorElement);
+    const href = link?.getAttribute('href') ?? '';
+    if (href.startsWith('#')) {
+      event.preventDefault();
+      navigatePreviewAnchor(host.current, decodeFragment(href.slice(1)), blocks, scrollIntent.current, onNavigate);
+      return;
+    }
+    if (link) return;
     const block = path.find((item): item is HTMLElement => item instanceof HTMLElement && item.hasAttribute('data-block-id'));
     if (!block?.dataset.blockId) return;
     const mapped = path.find((item): item is HTMLElement => item instanceof HTMLElement && item.hasAttribute('data-source-offset'));
@@ -134,6 +156,11 @@ const previewStyle = `
   figcaption { max-width: 68ch; margin: .65em auto 0; color: var(--muted); font-size: .88em; line-height: 1.45; text-align: center; }
   figure[data-caption-location="top"] figcaption { margin-top: 0; margin-bottom: .65em; }
   .figure-label { color: var(--ink); font-weight: 600; }
+  .section-number { margin-right: .18em; color: var(--accent-strong); font-variant-numeric: tabular-nums; }
+  .table-figure { text-align: left; }
+  .table-figure figcaption { max-width: none; margin: 0 0 .55em; text-align: left; }
+  .table-label { color: var(--ink); font-weight: 600; }
+  .table-scroll { overflow-x: auto; }
   .image-missing { display: grid; place-items: center; min-height: 150px; padding: 22px; color: var(--muted); background: color-mix(in srgb, var(--surface-strong) 76%, transparent); border: 1px dashed var(--line-strong); border-radius: 6px; font-family: 'Manrope', sans-serif; text-align: center; }
   .image-missing strong { color: var(--ink); font-size: .86em; }
   .image-missing code { max-width: 100%; margin-top: .4em; overflow-wrap: anywhere; color: var(--muted); background: transparent; }
@@ -151,6 +178,7 @@ const previewStyle = `
   .equation-number { color: var(--muted); font-size: .86em; font-variant-numeric: tabular-nums; }
   math { font-size: 1.06em; }
   .citation a { color: var(--accent-strong); text-decoration: none; border-bottom: 1px dotted currentColor; }
+  .doi-link { overflow-wrap: anywhere; font-size: .86em; }
   .references { margin-top: 3em; padding-top: 1em; border-top: 1px solid var(--line); }
   .references ol { padding-left: 1.4em; }
   .references li { margin: .7em 0; padding-left: .35em; }
@@ -283,6 +311,22 @@ function prepareFigureImages(root: HTMLElement): void {
   }
 }
 
+export function protectLocalObjectUrls(html: string, objectUrls: readonly string[]): string {
+  return objectUrls.reduce(
+    (protectedHtml, url, index) => protectedHtml.replaceAll(`src="${url}"`, `data-markroot-object-url="${index}"`),
+    html,
+  );
+}
+
+function restoreLocalObjectUrls(root: HTMLElement, objectUrls: readonly string[]): void {
+  for (const element of root.querySelectorAll<HTMLElement>('[data-markroot-object-url]')) {
+    const index = Number.parseInt(element.dataset.markrootObjectUrl ?? '', 10);
+    element.removeAttribute('data-markroot-object-url');
+    if (!(element instanceof HTMLImageElement) || !Number.isInteger(index) || index < 0 || index >= objectUrls.length) continue;
+    element.src = objectUrls[index]!;
+  }
+}
+
 function appendViewerWarnings(root: HTMLElement, warnings: readonly string[]): void {
   if (!warnings.length) return;
   const details = document.createElement('details');
@@ -303,11 +347,54 @@ function safeCssLength(value?: string): boolean { return Boolean(value && /^(?:a
 
 function secureLinks(root: HTMLElement): void {
   for (const link of root.querySelectorAll<HTMLAnchorElement>('a[href]')) {
-    if (/^https?:/i.test(link.href)) {
+    const href = link.getAttribute('href') ?? '';
+    if (opensExternalPage(href)) {
       link.target = '_blank';
       link.rel = 'noopener noreferrer';
+    } else {
+      link.removeAttribute('target');
+      link.removeAttribute('rel');
     }
   }
+}
+
+export function opensExternalPage(href: string): boolean { return /^https?:\/\//i.test(href); }
+
+export function trustedDoiUrl(value?: string): string | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && url.hostname === 'doi.org' && /^\/10\.\d{4,9}\//i.test(url.pathname) ? url.href : undefined;
+  } catch { return undefined; }
+}
+
+function openTrustedDoi(value?: string): void {
+  const url = trustedDoiUrl(value);
+  if (!url) return;
+  window.open(url, '_blank', 'noopener,noreferrer');
+}
+
+function navigatePreviewAnchor(host: HTMLDivElement | null, id: string, blocks: readonly DocumentBlock[], gate: ScrollIntentGate, onNavigate: Props['onNavigate']): void {
+  if (!host || !id) return;
+  const target = host.shadowRoot?.querySelector<HTMLElement>(`#${CSS.escape(id)}`);
+  if (!target) return;
+  const container = host.parentElement;
+  if (container) {
+    gate.beginProgrammatic();
+    const moved = revealPoint(container, target, undefined, 0);
+    if (!moved) gate.endProgrammatic();
+    else requestAnimationFrame(() => gate.endProgrammatic());
+  }
+  const block = target.closest<HTMLElement>('[data-block-id]');
+  if (!block?.dataset.blockId) return;
+  const sourceBlock = blocks.find((candidate) => candidate.id === block.dataset.blockId);
+  const exact = Number(target.dataset.sourceOffset ?? block.dataset.sourceFrom);
+  onNavigate(block.dataset.blockId, Number.isFinite(exact) ? exact : sourceBlock?.from);
+}
+
+function decodeFragment(value: string): string {
+  try { return decodeURIComponent(value); }
+  catch { return value; }
 }
 
 function blockRemoteResources(root: HTMLElement): void {

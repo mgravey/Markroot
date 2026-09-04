@@ -7,6 +7,7 @@ export interface CitationRecord {
   readonly title?: string;
   readonly author?: string;
   readonly year?: string;
+  readonly doi?: string;
   readonly source: WorkspacePath;
   readonly raw: string;
 }
@@ -71,22 +72,81 @@ export function parseBibTeX(source: string, path: WorkspacePath): readonly Citat
       if (char === '}' && --depth === 0) { to = index + 1; break; }
     }
     const raw = source.slice(from, to);
-    const fields = new Map<string, string>();
-    for (const field of raw.matchAll(/(?:^|,)\s*([\w-]+)\s*=\s*(?:\{((?:[^{}]|\{[^{}]*\})*)\}|"([^"]*)")/gm)) {
-      fields.set(field[1]!.toLowerCase(), (field[2] ?? field[3] ?? '').replace(/\s+/g, ' ').trim());
-    }
+    const fields = parseBibFields(raw);
     const title = fields.get('title');
     const author = fields.get('author');
-    const year = fields.get('year');
+    const year = citationYear(fields);
+    const doi = normalizeDoi(fields.get('doi'));
     records.push({
       key: match[2]!,
       type: match[1]!.toLowerCase(),
       ...(title ? { title } : {}),
       ...(author ? { author } : {}),
       ...(year ? { year } : {}),
+      ...(doi ? { doi } : {}),
       source: path,
       raw,
     });
   }
   return records;
+}
+
+export function normalizeDoi(value?: string): string | undefined {
+  const doi = value?.trim()
+    .replace(/^doi:\s*/i, '')
+    .replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, '')
+    .trim();
+  return doi && /^10\.\d{4,9}\/\S+$/i.test(doi) ? doi : undefined;
+}
+
+function parseBibFields(raw: string): ReadonlyMap<string, string> {
+  const fields = new Map<string, string>();
+  let cursor = raw.indexOf(',') + 1;
+  while (cursor > 0 && cursor < raw.length) {
+    while (cursor < raw.length && /[\s,]/.test(raw[cursor]!)) cursor += 1;
+    const keyMatch = /^[\w-]+/.exec(raw.slice(cursor));
+    if (!keyMatch) break;
+    const key = keyMatch[0].toLowerCase();
+    cursor += keyMatch[0].length;
+    while (/\s/.test(raw[cursor] ?? '')) cursor += 1;
+    if (raw[cursor] !== '=') break;
+    cursor += 1;
+    while (/\s/.test(raw[cursor] ?? '')) cursor += 1;
+    const parsed = parseBibValue(raw, cursor);
+    if (!parsed) break;
+    fields.set(key, parsed.value.replace(/\s+/g, ' ').trim());
+    cursor = parsed.to;
+  }
+  return fields;
+}
+
+function parseBibValue(raw: string, from: number): { readonly value: string; readonly to: number } | undefined {
+  const opener = raw[from];
+  if (opener === '{') {
+    let depth = 1;
+    for (let index = from + 1; index < raw.length; index += 1) {
+      if (raw[index] === '{') depth += 1;
+      else if (raw[index] === '}' && --depth === 0) return { value: raw.slice(from + 1, index), to: index + 1 };
+    }
+    return undefined;
+  }
+  if (opener === '"') {
+    for (let index = from + 1; index < raw.length; index += 1) {
+      if (raw[index] === '"' && raw[index - 1] !== '\\') return { value: raw.slice(from + 1, index), to: index + 1 };
+    }
+    return undefined;
+  }
+  let to = from;
+  while (to < raw.length && raw[to] !== ',' && raw[to] !== '}') to += 1;
+  const value = raw.slice(from, to).trim();
+  return value ? { value, to } : undefined;
+}
+
+function citationYear(fields: ReadonlyMap<string, string>): string | undefined {
+  for (const key of ['year', 'date', 'issued', 'eventdate', 'urldate']) {
+    const value = fields.get(key);
+    const year = value?.match(/(?:^|\D)((?:1[5-9]|20|21)\d{2})(?:\D|$)/)?.[1];
+    if (year) return year;
+  }
+  return undefined;
 }

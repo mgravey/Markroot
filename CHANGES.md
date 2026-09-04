@@ -22,4 +22,11 @@
 - Fixed circular pane synchronization that could make the Markdown source jump while scrolling; only user-originated scroll interactions now drive the other pane.
 - Replaced the flat document list with an expandable folder tree, added copy-path actions and document-relative path insertion, and fixed nested/local image resolution including `..`, encoded names, spaces, and image MIME types.
 - Added Pandoc figure width/height, alignment, alternate text, caption-position handling, runtime image failure placeholders, and collapsible viewer diagnostics for missing local assets.
+- Fixed local figures disappearing when preview sanitization removed Markroot-created blob URLs.
+- Made the workspace tree compact by default, emphasized Markdown/QMD documents, and muted branches without writing documents.
+- Added hierarchical section numbering with `.unnumbered` and `number-sections: false`, numbered tables, and an overlay outline for sections, figures, and tables.
+- Fixed internal viewer links opening duplicate app pages; fragment links now navigate inside the rendered document and synchronize the source.
+- Expanded BibTeX year extraction to bare year and date-style fields, avoiding incorrect `n.d.` labels.
+- Added validated Ctrl/Cmd-click DOI navigation for citations while preserving normal bibliography navigation and citation typography.
+- Added persistent drag and keyboard resizing for the file tree, source editor, and rendered viewer.
 - Added workspace dependency-boundary and cycle enforcement.

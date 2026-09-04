@@ -11,6 +11,8 @@ export interface MarkrootSettings {
   readonly viewerFont: PaneFont;
   readonly viewerFontSize: number;
   readonly viewerJustified: boolean;
+  readonly filesPaneWidth: number;
+  readonly sourcePaneRatio: number;
   readonly profile: AuthorIdentity;
 }
 
@@ -37,6 +39,8 @@ export function defaultSettings(): MarkrootSettings {
     viewerFont: 'serif',
     viewerFontSize: 17,
     viewerJustified: false,
+    filesPaneWidth: 250,
+    sourcePaneRatio: 0.5,
     profile: { actorId: crypto.randomUUID(), displayName: 'Local author' },
   };
 }
@@ -50,6 +54,8 @@ export async function loadSettings(): Promise<MarkrootSettings> {
     ...stored,
     sourceFontSize: clampFontSize(stored.sourceFontSize, defaults.sourceFontSize),
     viewerFontSize: clampFontSize(stored.viewerFontSize, defaults.viewerFontSize),
+    filesPaneWidth: clampNumber(stored.filesPaneWidth, 180, 420, defaults.filesPaneWidth),
+    sourcePaneRatio: clampNumber(stored.sourcePaneRatio, 0.25, 0.75, defaults.sourcePaneRatio),
     profile: { ...defaults.profile, ...stored.profile },
   };
 }
@@ -106,4 +112,7 @@ async function deleteValue(key: string): Promise<void> {
 function pendingKey(workspaceName: string, path: string): string { return `pending:${workspaceName}:${path}`; }
 function clampFontSize(value: number | undefined, fallback: number): number {
   return Number.isFinite(value) ? Math.max(12, Math.min(28, Math.round(value!))) : fallback;
+}
+function clampNumber(value: number | undefined, min: number, max: number, fallback: number): number {
+  return Number.isFinite(value) ? Math.max(min, Math.min(max, value!)) : fallback;
 }

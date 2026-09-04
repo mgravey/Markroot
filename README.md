@@ -5,13 +5,15 @@ Markroot is a fully static, browser-only Markdown and non-executable Quarto work
 ## Current implementation (0.1 technical preview)
 
 - Chromium directory opening with direct text and binary file access
-- Expandable folder tree with copyable workspace paths and document-relative path insertion on paste
+- Compact-by-default folder tree that emphasizes Markdown/QMD files, mutes unrelated branches, and supports copyable workspace paths with document-relative insertion on paste
 - Modular workspace, document, rendering, citation, Git, review, comment, and export packages
 - CodeMirror source editing with line numbers, syntax highlighting, find, regex search, go-to-line, and guarded save
 - A source-backed ProseMirror visual editor that edits recognized blocks without rewriting untouched source
-- A scholarly rendered view with semantic equations, numbered figures/captions, document-relative local images, Pandoc figure sizing/alignment/caption placement, citations, references, cross-references, callouts, tables, and figure layouts
+- A scholarly rendered view with numbered sections/tables/figures, `.unnumbered` headings, semantic equations, securely restored document-relative local images, citations, cross-references, callouts, and figure layouts
+- An overlay document outline for direct section, figure, and table navigation, plus in-view navigation for internal links and unobtrusive Ctrl/Cmd-click DOI access on citations
 - Bidirectional block/character navigation, paired active-paragraph highlighting, shared search highlighting, and visibility-aware centered reveal
 - Persistent font-family and font-size controls for both panes, plus optional justified viewer text
+- Persisted drag handles for resizing the file tree and balancing the source and viewer panes
 - Intent-locked pane synchronization that keeps automatic viewer alignment from moving the source editor back
 - Embedded, Git-friendly comment threads
 - Local Git status/diff, staging, commits, history, branch create/rename/delete, checkout, branch review, and clean-merge preview through isomorphic-git

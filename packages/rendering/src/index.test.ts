@@ -19,7 +19,7 @@ describe('BasicDocumentEngine', () => {
     const result = await new BasicDocumentEngine().render({
       snapshot,
       dependencies: [{ path: 'figure.svg', content: new Blob(['<svg xmlns="http://www.w3.org/2000/svg"/>'], { type: 'image/svg+xml' }) }],
-      citations: [{ key: 'doe2026', author: 'Doe, Jane and Roe, Richard', year: '2026', title: 'A Local-First Scholarly Workflow' }],
+      citations: [{ key: 'doe2026', author: 'Doe, Jane and Roe, Richard', year: '2026', title: 'A Local-First Scholarly Workflow', doi: '10.1234/markroot.2026' }],
     });
     expect(result.anchors.length).toBe(snapshot.blocks.length);
     expect(new Set(result.anchors.map((anchor) => anchor.id)).size).toBe(result.anchors.length);
@@ -34,6 +34,8 @@ describe('BasicDocumentEngine', () => {
     expect(result.html).toContain('data-source-offset');
     expect(result.html).toContain('blob:');
     expect(result.html).toContain('Doe &amp; Roe, 2026');
+    expect(result.html).toContain('data-doi-url="https://doi.org/10.1234/markroot.2026"');
+    expect(result.html).toContain('class="doi-link"');
     expect(result.html).toContain('aria-label="References"');
     expect(result.html).toContain('class="crossref"');
     expect(result.warnings).toContain('Code cells are shown as source and are never executed in Markroot.');
@@ -61,5 +63,40 @@ describe('BasicDocumentEngine', () => {
     expect(result.warnings).toContain('Local image not found: figures/missing.png');
     expect(result.html).toContain('class="image-missing"');
     expect(result.html).not.toContain('src="figures/missing.png"');
+  });
+
+  it('numbers sections and tables while respecting unnumbered headings', async () => {
+    const source = `# Abstract {.unnumbered}
+
+# Results {#sec-results}
+
+## Measurements
+
+| Sample | Value |
+|:-------|------:|
+| A      | 2     |
+: Measurements {#tbl-measurements}
+`;
+    const snapshot = new DocumentSession(workspacePath('paper.qmd'), source).snapshot();
+    const result = await new BasicDocumentEngine().render({ snapshot });
+
+    expect(result.html).toContain('<h1 id="abstract" class="unnumbered"');
+    expect(result.html).toContain('<span class="section-number">1</span> Results');
+    expect(result.html).toContain('<span class="section-number">1.1</span> Measurements');
+    expect(result.html).toContain('<span class="table-label">Table 1.</span> Measurements');
+    expect(result.outline?.map(({ kind, label, number }) => ({ kind, label, number }))).toEqual([
+      { kind: 'section', label: 'Abstract', number: undefined },
+      { kind: 'section', label: 'Results', number: '1' },
+      { kind: 'section', label: 'Measurements', number: '1.1' },
+      { kind: 'table', label: 'Measurements', number: '1' },
+    ]);
+  });
+
+  it('allows section numbering to be disabled in front matter', async () => {
+    const snapshot = new DocumentSession(workspacePath('paper.qmd'), '---\nnumber-sections: false\n---\n\n# Introduction\n').snapshot();
+    const result = await new BasicDocumentEngine().render({ snapshot });
+    expect(result.html).not.toContain('section-number');
+    expect(result.outline?.[0]).toMatchObject({ label: 'Introduction' });
+    expect(result.outline?.[0]?.number).toBeUndefined();
   });
 });

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { useMemo, useState, type CSSProperties } from 'react';
 import { ChevronDown, ChevronRight, Copy, File, FileCode2, Folder, FolderOpen, Image as ImageIcon } from 'lucide-react';
 import type { WorkspacePath } from '@markroot/core';
 import type { GitFileStatus } from '@markroot/git';
@@ -12,23 +12,15 @@ interface Props {
   onCopy(path: WorkspacePath): void;
 }
 
-interface TreeNode extends WorkspaceEntry {
+export interface TreeNode extends WorkspaceEntry {
   readonly name: string;
   readonly children: readonly TreeNode[];
+  readonly containsMarkdown: boolean;
 }
 
 export function WorkspaceTree({ entries, activePath, gitStatus, onOpen, onCopy }: Props) {
   const roots = useMemo(() => buildTree(entries), [entries]);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
-
-  useEffect(() => {
-    setExpanded((current) => {
-      const next = new Set(current);
-      for (const entry of entries) if (entry.kind === 'directory' && !entry.path.includes('/')) next.add(entry.path);
-      if (activePath) for (const ancestor of ancestors(activePath)) next.add(ancestor);
-      return next;
-    });
-  }, [entries, activePath]);
 
   const changed = useMemo(() => new Set(gitStatus.filter((status) => status.state !== 'unmodified').map((status) => status.path)), [gitStatus]);
   return <nav className="file-tree" aria-label="Workspace files">
@@ -49,9 +41,11 @@ function TreeItem({ node, depth, activePath, expanded, changed, onOpen, onCopy, 
   const open = node.kind === 'directory' && expanded.has(node.path);
   const modified = changed.has(node.path) || (node.kind === 'directory' && [...changed].some((path) => path.startsWith(`${node.path}/`)));
   const editable = node.kind === 'file' && isTextFile(node.path);
+  const markdownDocument = node.kind === 'file' && isMarkdown(node.path);
+  const emphasis = markdownDocument ? 'markdown-document' : node.containsMarkdown ? 'markdown-branch' : 'muted';
   const Icon = node.kind === 'directory' ? (open ? FolderOpen : Folder) : isImage(node.path) ? ImageIcon : editable ? FileCode2 : File;
   return <li>
-    <div className={`tree-row ${activePath === node.path ? 'active' : ''}`} style={{ '--tree-depth': depth } as CSSProperties}>
+    <div className={`tree-row ${emphasis} ${activePath === node.path ? 'active' : ''}`} style={{ '--tree-depth': depth } as CSSProperties}>
       {node.kind === 'directory'
         ? <button className="tree-main" onClick={() => onToggle(node.path)} aria-expanded={open} title={node.path}><span className="tree-chevron">{open ? <ChevronDown size={13}/> : <ChevronRight size={13}/>}</span><Icon size={15}/><span>{node.name}</span>{modified && <i/>}</button>
         : <button className="tree-main" disabled={!editable} onClick={() => editable && onOpen(node.path)} title={editable ? node.path : `${node.path} — copy its path to reference it`}><span className="tree-chevron"/><Icon size={15}/><span>{node.name}</span>{modified && <i/>}</button>}
@@ -61,7 +55,7 @@ function TreeItem({ node, depth, activePath, expanded, changed, onOpen, onCopy, 
   </li>;
 }
 
-function buildTree(entries: readonly WorkspaceEntry[]): readonly TreeNode[] {
+export function buildTree(entries: readonly WorkspaceEntry[]): readonly TreeNode[] {
   const children = new Map<string, WorkspaceEntry[]>();
   for (const entry of entries) {
     const slash = entry.path.lastIndexOf('/');
@@ -72,15 +66,18 @@ function buildTree(entries: readonly WorkspaceEntry[]): readonly TreeNode[] {
   }
   const visit = (parent: string): readonly TreeNode[] => (children.get(parent) ?? [])
     .sort((a, b) => Number(a.kind === 'file') - Number(b.kind === 'file') || a.path.localeCompare(b.path))
-    .map((entry) => ({ ...entry, name: entry.path.split('/').at(-1)!, children: entry.kind === 'directory' ? visit(entry.path) : [] }));
+    .map((entry) => {
+      const nested = entry.kind === 'directory' ? visit(entry.path) : [];
+      return {
+        ...entry,
+        name: entry.path.split('/').at(-1)!,
+        children: nested,
+        containsMarkdown: entry.kind === 'file' ? isMarkdown(entry.path) : nested.some((child) => child.containsMarkdown),
+      };
+    });
   return visit('');
 }
 
-function ancestors(path: WorkspacePath): readonly string[] {
-  const parts = path.split('/');
-  parts.pop();
-  return parts.map((_part, index) => parts.slice(0, index + 1).join('/'));
-}
-
 function isImage(path: string): boolean { return /\.(?:avif|gif|jpe?g|png|svg|webp)$/i.test(path); }
+function isMarkdown(path: string): boolean { return /\.(?:md|qmd)$/i.test(path); }
 function isTextFile(path: string): boolean { return /\.(?:bib|bibtex|csl|css|csv|html?|js|json|jsx|md|mjs|qmd|scss|toml|ts|tsx|txt|ya?ml)$/i.test(path); }

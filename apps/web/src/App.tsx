@@ -1,12 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import {
   AlignJustify, BookOpen, Check, ChevronRight, CircleDot, Code2, Columns2, Download, FileCode2,
-  Files, GitBranch, GitCommitHorizontal, GitCompare, MessageSquare, Moon, PanelRight,
+  Files, GitBranch, GitCommitHorizontal, GitCompare, ListTree, MessageSquare, Moon, PanelRight,
   RefreshCw, Save, Search, Settings2, Sun, Undo2, X,
 } from 'lucide-react';
 import { resolveWorkspaceReference, workspacePath, type SourceRange, type WorkspacePath } from '@markroot/core';
 import { DocumentSession, searchDocument, type DocumentBlock, type DocumentSnapshot } from '@markroot/document';
-import { BasicDocumentEngine, type RenderArtifact } from '@markroot/rendering';
+import { BasicDocumentEngine, type DocumentOutlineItem, type RenderArtifact } from '@markroot/rendering';
 import { FileSystemAccessWorkspace, ensureDirectoryPermission, type GuardedWorkspace, type WorkspaceEntry } from '@markroot/workspace';
 import { createThread, deleteThread, parseComments, recoverOrphan, replyToThread, setThreadStatus } from '@markroot/comments';
 import { IsomorphicGitRepository, type GitCommitSummary, type GitFileStatus } from '@markroot/git';
@@ -18,6 +18,8 @@ import { SourceEditor } from './components/SourceEditor.js';
 import { VisualEditor } from './components/VisualEditor.js';
 import { Preview } from './components/Preview.js';
 import { WorkspaceTree } from './components/WorkspaceTree.js';
+import { DocumentOutline } from './components/DocumentOutline.js';
+import { PaneResizer } from './components/PaneResizer.js';
 import { WorkerExporter } from './workers/export-client.js';
 
 type Inspector = 'git' | 'review' | 'comments' | 'citations' | 'export' | 'settings' | undefined;
@@ -59,8 +61,12 @@ export function App() {
   const [citations, setCitations] = useState<readonly CitationRecord[]>([]);
   const [citationQuery, setCitationQuery] = useState('');
   const [exportBusy, setExportBusy] = useState(false);
+  const [outlineOpen, setOutlineOpen] = useState(false);
+  const [previewAnchor, setPreviewAnchor] = useState<Readonly<{ id: string; request: number }>>();
   const sessionSubscription = useRef<(() => void) | undefined>(undefined);
   const snapshotRef = useRef<DocumentSnapshot | undefined>(undefined);
+  const settingsRef = useRef(settings);
+  const workspacePane = useRef<HTMLElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
   const exportController = useRef<AbortController | undefined>(undefined);
   const renderedRef = useRef<RenderArtifact | undefined>(undefined);
@@ -70,6 +76,7 @@ export function App() {
   const matches = snapshot ? searchDocument(snapshot, search, { regularExpression }) : [];
   const dark = resolvedDark(settings.theme);
   snapshotRef.current = snapshot;
+  settingsRef.current = settings;
   renderedRef.current = rendered;
 
   useEffect(() => {
@@ -227,6 +234,8 @@ export function App() {
       setScrollProgress(0);
       setScrollOrigin('command');
       setSourceCursorTarget(undefined);
+      setOutlineOpen(false);
+      setPreviewAnchor(undefined);
       setNotice(undefined);
     } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
   }
@@ -261,6 +270,24 @@ export function App() {
     setScrollProgress(block && position !== undefined ? (position - block.from) / Math.max(1, block.to - block.from) : 0);
     setSourceCursorTarget(undefined);
     if (position !== undefined) window.setTimeout(() => setSourceCursorTarget(position), 0);
+  }, []);
+
+  const resizeLayout = useCallback((patch: Pick<MarkrootSettings, 'filesPaneWidth'> | Pick<MarkrootSettings, 'sourcePaneRatio'>, finished: boolean) => {
+    const next = { ...settingsRef.current, ...patch };
+    settingsRef.current = next;
+    setSettings(next);
+    if (finished) void saveSettings(next).catch(() => setNotice('Could not save the workspace layout.'));
+  }, []);
+
+  const navigateOutline = useCallback((item: DocumentOutlineItem) => {
+    setRightMode('preview');
+    setOutlineOpen(false);
+    setScrollOrigin('right');
+    setScrollTarget(item.blockId);
+    setScrollProgress(0);
+    setSourceCursorTarget(undefined);
+    window.setTimeout(() => setSourceCursorTarget(item.from), 0);
+    setPreviewAnchor((current) => ({ id: item.id, request: (current?.request ?? 0) + 1 }));
   }, []);
 
   const applyVisualBlock = useCallback((block: DocumentBlock, replacement: string) => {
@@ -467,7 +494,7 @@ export function App() {
 
   if (!('showDirectoryPicker' in window)) return <main className="unsupported-browser"><div className="welcome-symbol">¶</div><h1>Markroot needs Chromium desktop</h1><p>This browser cannot grant direct access to a real local folder. Use a current Chromium-based desktop browser over HTTPS or localhost; Markroot does not offer an upload fallback.</p></main>;
 
-  return <div className={`app ${inspector ? 'with-inspector' : ''}`}>
+  return <div className={`app ${inspector ? 'with-inspector' : ''}`} style={{ '--files-width': `${settings.filesPaneWidth}px` } as CSSProperties}>
     <header className="topbar">
       <div className="brand" aria-label="Markroot"><span className="brand-mark">M</span><strong>Markroot</strong></div>
       <button className="workspace-button" onClick={() => void chooseFolder()}><Files size={16}/><span>{rootName}</span><ChevronRight size={14}/></button>
@@ -486,17 +513,20 @@ export function App() {
     {notice && <div className="notice" role="status"><span>{notice}</span><button onClick={() => setNotice(undefined)}><X size={14}/></button></div>}
 
     <aside className="files-panel">
-      <div className="panel-heading"><span>Workspace</span><button onClick={() => void refreshWorkspace()} title="Refresh"><RefreshCw size={14}/></button></div>
+      <div className="panel-heading"><span>Workspace</span><div className="panel-heading-actions"><button className={outlineOpen ? 'selected' : ''} disabled={!rendered?.outline?.length} onClick={() => setOutlineOpen((open) => !open)} title="Document outline"><ListTree size={14}/></button><button onClick={() => void refreshWorkspace()} title="Refresh"><RefreshCw size={14}/></button></div></div>
+      {outlineOpen && <DocumentOutline items={rendered?.outline ?? []} onSelect={navigateOutline} onClose={() => setOutlineOpen(false)}/>}
       {!workspace ? <div className="empty-files"><div className="folder-illustration"><Files size={28}/></div><h2>Open a working folder</h2><p>Markroot reads and writes the folder directly. Nothing is uploaded.</p><button className="primary" onClick={() => void chooseFolder()}>Choose folder</button></div>
-      : <WorkspaceTree entries={entries} activePath={snapshot?.path} gitStatus={gitStatus} onOpen={(path) => void openFile(path)} onCopy={(path) => void copyWorkspacePath(path)}/>}
+      : <WorkspaceTree key={rootName} entries={entries} activePath={snapshot?.path} gitStatus={gitStatus} onOpen={(path) => void openFile(path)} onCopy={(path) => void copyWorkspacePath(path)}/>}
       <div className="side-footer"><button onClick={() => toggleInspector('citations')}><BookOpen size={15}/>Citations</button><span>Local only</span></div>
+      <PaneResizer className="files-resizer" label="Resize workspace tree" value={settings.filesPaneWidth} min={180} max={420} keyboardStep={12} onChange={(value, finished) => resizeLayout({ filesPaneWidth: Math.round(value) }, finished)}/>
     </aside>
 
-    <main className="workspace">
+    <main className="workspace" ref={workspacePane} style={{ '--source-width': `${settings.sourcePaneRatio * 100}%` } as CSSProperties}>
       {!snapshot ? <div className="welcome"><div className="welcome-symbol">¶</div><h1>Your local writing workspace</h1><p>Choose a folder, then open a Markdown or QMD file. Source, preview, comments, and Git stay together on this device.</p>{!workspace && <button className="primary" onClick={() => void chooseFolder()}>Open folder</button>}</div>
       : <>
         <section className="pane source-pane"><div className="pane-title"><Code2 size={15}/><span>Source</span><span className="spacer"/><span>{settings.sourceFontSize}px · Ln {lineAt(snapshot.source, selection.from)}</span></div><SourceEditor path={snapshot.path} workspacePaths={entries.map((entry) => entry.path)} value={snapshot.source} blocks={snapshot.blocks} search={search} regularExpression={regularExpression} dark={dark} fontFamily={settings.sourceFont} fontSize={settings.sourceFontSize} activeBlock={scrollTarget} scrollTarget={scrollOrigin === 'source' ? undefined : scrollTarget} scrollProgress={scrollProgress} cursorTarget={sourceCursorTarget} goToLine={goToLine} onChange={applySource} onSelection={selectSource} onScroll={(id, progress) => { setSourceCursorTarget(undefined); setScrollOrigin('source'); setScrollProgress(progress); setScrollTarget(id); }} onSave={() => void save()} onFind={() => setFindOpen(true)}/></section>
-        <section className="pane right-pane"><div className="pane-title"><div className="segmented"><button className={rightMode === 'visual' ? 'active' : ''} onClick={() => setRightMode('visual')}>Visual</button><button className={rightMode === 'preview' ? 'active' : ''} onClick={() => setRightMode('preview')}>Rendered</button></div><button className={settings.viewerJustified ? 'viewer-option active' : 'viewer-option'} onClick={() => updateSettings({ ...settings, viewerJustified: !settings.viewerJustified })} title="Justify viewer text" aria-pressed={settings.viewerJustified}><AlignJustify size={14}/></button><span className="spacer"/><span>{settings.viewerFontSize}px · {rendered?.engine ?? 'source model'}</span></div><div className="right-scroll">{rightMode === 'visual' ? <VisualEditor snapshot={snapshot} activeBlock={scrollTarget} scrollTarget={scrollOrigin === 'right' ? undefined : scrollTarget} scrollProgress={scrollProgress} fontFamily={settings.viewerFont} fontSize={settings.viewerFontSize} justified={settings.viewerJustified} onApply={applyVisualBlock} onNavigate={navigateFromRight} onScroll={(id, progress) => { setSourceCursorTarget(undefined); setScrollOrigin('right'); setScrollProgress(progress); setScrollTarget(id); }}/> : <Preview html={rendered?.html ?? ''} warnings={rendered?.warnings ?? EMPTY_WARNINGS} blocks={snapshot.blocks} search={search} regularExpression={regularExpression} activeBlock={scrollTarget} scrollTarget={scrollOrigin === 'right' ? undefined : scrollTarget} scrollProgress={scrollProgress} allowRemoteResources={settings.allowRemoteResources} fontFamily={settings.viewerFont} fontSize={settings.viewerFontSize} justified={settings.viewerJustified} onNavigate={navigateFromRight} onScroll={(id, progress) => { setSourceCursorTarget(undefined); setScrollOrigin('right'); setScrollProgress(progress); setScrollTarget(id); }}/>}</div></section>
+        <PaneResizer label="Resize source and viewer panes" value={settings.sourcePaneRatio} min={0.25} max={0.75} keyboardStep={0.02} pixelsPerUnit={() => workspacePane.current?.clientWidth ?? 1} onChange={(value, finished) => resizeLayout({ sourcePaneRatio: value }, finished)}/>
+        <section className="pane right-pane"><div className="pane-title"><div className="segmented"><button className={rightMode === 'visual' ? 'active' : ''} onClick={() => setRightMode('visual')}>Visual</button><button className={rightMode === 'preview' ? 'active' : ''} onClick={() => setRightMode('preview')}>Rendered</button></div><button className={settings.viewerJustified ? 'viewer-option active' : 'viewer-option'} onClick={() => updateSettings({ ...settings, viewerJustified: !settings.viewerJustified })} title="Justify viewer text" aria-pressed={settings.viewerJustified}><AlignJustify size={14}/></button><span className="spacer"/><span>{settings.viewerFontSize}px · {rendered?.engine ?? 'source model'}</span></div><div className="right-scroll">{rightMode === 'visual' ? <VisualEditor snapshot={snapshot} activeBlock={scrollTarget} scrollTarget={scrollOrigin === 'right' ? undefined : scrollTarget} scrollProgress={scrollProgress} fontFamily={settings.viewerFont} fontSize={settings.viewerFontSize} justified={settings.viewerJustified} onApply={applyVisualBlock} onNavigate={navigateFromRight} onScroll={(id, progress) => { setSourceCursorTarget(undefined); setScrollOrigin('right'); setScrollProgress(progress); setScrollTarget(id); }}/> : <Preview html={rendered?.html ?? ''} objectUrls={rendered?.objectUrls ?? EMPTY_WARNINGS} warnings={rendered?.warnings ?? EMPTY_WARNINGS} blocks={snapshot.blocks} search={search} regularExpression={regularExpression} activeBlock={scrollTarget} scrollTarget={scrollOrigin === 'right' ? undefined : scrollTarget} scrollProgress={scrollProgress} anchorTarget={previewAnchor} allowRemoteResources={settings.allowRemoteResources} fontFamily={settings.viewerFont} fontSize={settings.viewerFontSize} justified={settings.viewerJustified} onNavigate={navigateFromRight} onScroll={(id, progress) => { setSourceCursorTarget(undefined); setScrollOrigin('right'); setScrollProgress(progress); setScrollTarget(id); }}/>}</div></section>
       </>}
     </main>
 
