@@ -30,7 +30,7 @@ vite.config.*.timestamp-*
 *.markroot-export.tmp
 # Local visual-regression artifacts
 .visual-regression/
-# Local tracked-changes and editor-gutter captures
+# Local synchronized tracked-changes captures
 .markroot-ui-captures/
 # Optional local Chrome profile for on-device AI testing
 .chromium-ai-profile/

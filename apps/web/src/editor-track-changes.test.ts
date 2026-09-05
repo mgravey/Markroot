@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { editorTrackChanges } from './editor-track-changes.js';
+import { displayDeletedText } from './rendered-track-changes.js';
 
 describe('editor track changes', () => {
   it('places inserted and deleted words in the current document', () => {
@@ -18,5 +19,9 @@ describe('editor track changes', () => {
   it('returns no annotations without a Git base or a change', () => {
     expect(editorTrackChanges(undefined, 'Draft')).toEqual([]);
     expect(editorTrackChanges('Same', 'Same')).toEqual([]);
+  });
+
+  it('makes removed rendered line breaks visible without exposing atomic placeholders', () => {
+    expect(displayDeletedText('old\ntext\uFFFC')).toBe('old ↵ text');
   });
 });

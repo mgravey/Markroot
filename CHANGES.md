@@ -2,7 +2,7 @@
 
 ## 0.1.0 - unreleased
 
-- Added a source-toolbar action that shows word-level changes against `HEAD` directly inside the editor, with green additions and red struck-through deletions, plus live added, modified, and deleted-line gutter markers.
+- Added synchronized toolbar actions that show word-level changes against `HEAD` in both the source editor and rendered document at once, with green additions and red struck-through deletions, plus live added, modified, and deleted-line gutter markers.
 - Added opt-in, on-device Gemini Nano Conventional Commit proposals after explicit saves, including an immediate browser-managed model-download trigger, inline readiness status, and prominent red alert cards/toasts for actual Chrome API failures without timing out slow model downloads, editable review, bounded large-diff summaries, and guarded commits of the staged set plus the open file.
 - Added the rooted-pilcrow identity across the application, detached viewer, browser favicon, touch/install metadata, documentation, motion previews, and a Lottie-friendly After Effects composition generator.
 - Kept the deployed logo fully visible while animating only its orange cursor, with a static reduced-motion fallback.

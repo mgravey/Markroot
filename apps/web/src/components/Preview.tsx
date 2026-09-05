@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import DOMPurify from 'dompurify';
 import type { DocumentBlock } from '@markroot/document';
 import { centeredScrollTop, isScrollKey, ScrollIntentGate, viewportCenter } from './scroll-sync.js';
+import { applyRenderedTrackChanges } from '../rendered-track-changes.js';
 
 interface Props {
   html: string;
@@ -19,11 +20,12 @@ interface Props {
   fontFamily: 'serif' | 'sans' | 'mono';
   fontSize: number;
   justified: boolean;
+  trackChangesBaseHtml?: string | undefined;
   onNavigate(id: string, sourceOffset?: number): void;
   onScroll(id: string, progress: number): void;
 }
 
-export function Preview({ html, objectUrls, warnings, blocks, search, regularExpression, activeBlock, scrollTarget, scrollProgress, scrollAlignment, anchorTarget, allowRemoteResources, fontFamily, fontSize, justified, onNavigate, onScroll }: Props) {
+export function Preview({ html, objectUrls, warnings, blocks, search, regularExpression, activeBlock, scrollTarget, scrollProgress, scrollAlignment, anchorTarget, allowRemoteResources, fontFamily, fontSize, justified, trackChangesBaseHtml, onNavigate, onScroll }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const scrollIntent = useRef(new ScrollIntentGate());
   const latestOnScroll = useRef(onScroll);
@@ -43,6 +45,11 @@ export function Preview({ html, objectUrls, warnings, blocks, search, regularExp
     secureLinks(article);
     if (!allowRemoteResources) blockRemoteResources(article);
     prepareFigureImages(article);
+    if (trackChangesBaseHtml) {
+      const baseArticle = ownerDocument.createElement('article');
+      baseArticle.innerHTML = DOMPurify.sanitize(trackChangesBaseHtml, { FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed'], FORBID_ATTR: ['style'] });
+      applyRenderedTrackChanges(article, baseArticle);
+    }
     appendViewerWarnings(article, warnings);
     if (search) highlight(article, search, regularExpression);
     if (activeBlock) article.querySelector(`[data-block-id="${CSS.escape(activeBlock)}"]`)?.classList.add('active-block');
@@ -51,7 +58,7 @@ export function Preview({ html, objectUrls, warnings, blocks, search, regularExp
       shadow.host.style.setProperty('--viewer-size', `${fontSize}px`);
     }
     shadow.replaceChildren(style, article);
-  }, [html, objectUrls, warnings, search, regularExpression, allowRemoteResources, fontFamily, fontSize, justified]);
+  }, [html, objectUrls, warnings, search, regularExpression, allowRemoteResources, fontFamily, fontSize, justified, trackChangesBaseHtml]);
   useEffect(() => {
     const shadow = host.current?.shadowRoot;
     shadow?.querySelectorAll('.active-block').forEach((element) => element.classList.remove('active-block'));
@@ -194,6 +201,8 @@ const previewStyle = `
   th { font-family: 'Manrope', sans-serif; font-size: .86em; letter-spacing: .02em; }
   tbody tr:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
   mark { color: inherit; background: #ffd76a; border-radius: .118em; }
+  ins.render-track-insert { color: var(--accent-strong); background: var(--accent-soft); text-decoration: underline; text-decoration-color: var(--accent); text-underline-offset: .12em; border-radius: .12em; }
+  del.render-track-delete { margin-inline: .06em; padding-inline: .08em; color: var(--danger); background: var(--danger-soft); text-decoration: line-through; text-decoration-thickness: .09em; border-radius: .12em; white-space: pre-wrap; }
   .remote-resource-placeholder { display: block; padding: 1.333em; color: var(--muted); background: var(--surface-strong); border: max(1px, .083em) dashed var(--line-strong); border-radius: .5em; font-family: 'Manrope', sans-serif; font-size: .706em; text-align: center; }
   @media (max-width: 640px) { .figure-layout { grid-template-columns: 1fr !important; } }
 `;
