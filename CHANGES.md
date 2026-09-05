@@ -2,6 +2,7 @@
 
 ## 0.1.0 - unreleased
 
+- Added an automated GitHub Pages deployment for the `/markroot/` project path, including subpath-safe install metadata and platform setup documentation.
 - Added rendered-document text selection for creating source-anchored comments without switching to the Source pane.
 - Added a Word-style rendered comment gutter with scroll-anchored thread cards, active-range highlighting, reply counts, and direct access to the full thread panel.
 - Changed rendered comment cards to a non-reflowing right-side lane that redistributes existing page margins, keeping cards off the prose without narrowing the document or altering paragraph wrapping.

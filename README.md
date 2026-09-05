@@ -50,6 +50,14 @@ For a browser-level export check during development, open `/export-smoke.html` f
 
 `pnpm build` writes a relocatable static application to `apps/web/dist`. Serve that directory over HTTPS or localhost; opening `index.html` directly does not provide the secure context required by the File System Access API.
 
+## GitHub Pages deployment
+
+The repository includes a GitHub Actions workflow that checks, builds, and deploys `apps/web/dist` whenever `master` is pushed. The static app and its install manifest are configured to work below the `/markroot/` project path.
+
+For `https://www.mgravey.com/markroot/`, create or use a repository named `markroot` under the same GitHub account that owns the GitHub Pages user site for `www.mgravey.com`. In that repository, open **Settings → Pages** and select **GitHub Actions** as the source. Leave the Markroot repository's **Custom domain** field empty: the custom domain belongs to the user site and GitHub applies it to project sites as `/<repository-name>/`. No extra `CNAME` file or DNS record is required for Markroot.
+
+Push `master`, then follow the **Actions → Deploy Markroot to GitHub Pages** run. The workflow can also be started manually with **Run workflow**. See [DOCUMENTATION.md](./DOCUMENTATION.md#github-pages) for the full checklist and troubleshooting notes.
+
 See [DOCUMENTATION.md](./DOCUMENTATION.md) for architecture, formats, limitations, and test guidance.
 
 ## License

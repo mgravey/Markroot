@@ -103,6 +103,23 @@ Export customization follows document YAML when a local file is explicitly selec
 
 `pnpm check` runs strict type checking, unit tests, and the production build. The fixture suite includes a QMD compatibility corpus. While the Vite development server is running, `/export-smoke.html` performs a browser-level HTML/DOCX/PDF worker check and reports non-empty output sizes. Real-folder and native-Git interoperability must additionally be tested manually in Chromium on a disposable repository before release. AI commit testing requires a current desktop Chrome profile with the Prompt API and Gemini Nano available; test model download, cancellation, regeneration, edited acceptance, unavailable fallback, and stale-candidate rejection.
 
+## GitHub Pages
+
+The deployment target is `https://www.mgravey.com/markroot/`. This arrangement depends on `www.mgravey.com` already being the custom domain of the GitHub Pages user site owned by the same GitHub account. GitHub then exposes a project repository named `markroot` below that domain automatically.
+
+Repository-side deployment is defined in `.github/workflows/deploy-pages.yml`. A push to `master`, or a manual workflow dispatch, installs the pinned pnpm version on Node.js 22, runs `pnpm check`, uploads only `apps/web/dist`, and deploys it through the `github-pages` environment. The Vite build uses relative asset URLs, and the web-app manifest uses a relative start URL, scope, and icon URLs so installation stays within `/markroot/`.
+
+Complete these steps on GitHub:
+
+1. Create or use a repository named exactly `markroot` under the account that owns the `www.mgravey.com` user site, and push this repository's `master` branch.
+2. Open the Markroot repository's **Settings → Pages** page.
+3. Under **Build and deployment**, set **Source** to **GitHub Actions**.
+4. Leave **Custom domain** empty for the Markroot project repository. Do not add a `CNAME` file and do not change DNS for this project path.
+5. Open **Actions → Deploy Markroot to GitHub Pages** and run the workflow if the initial push did not already start it.
+6. After the deploy job succeeds, verify `https://www.mgravey.com/markroot/` in a current Chromium desktop browser. Check that the app shell, icons, local-folder picker, Pandoc HTML/DOCX export, and Typst PDF export load successfully.
+
+If the repository uses a default branch other than `master`, either keep `master` as the deployment branch or update the workflow's `on.push.branches` value. If `www.mgravey.com` is hosted outside the same account's GitHub Pages user site, a separate project-site deployment cannot claim that URL path; the root site's host or reverse proxy must serve the Markroot build instead.
+
 ## Release gates still open
 
 - Repeat the direct `.git` corruption/interruption matrix against native Git on Windows, macOS, and Linux.

@@ -1,6 +1,8 @@
 node_modules/
 .pnpm-store/
+# Build and local GitHub Pages staging outputs
 dist/
+.pages-artifact/
 coverage/
 *.lcov
 .nyc_output/
