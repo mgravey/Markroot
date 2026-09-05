@@ -1,9 +1,17 @@
 import { editorTrackChanges } from './editor-track-changes.js';
+import type { SourceRange } from '@markroot/core';
 
 interface RenderedTextRun {
   readonly node?: Text;
   readonly from: number;
   readonly to: number;
+}
+
+export interface RenderedReviewChange {
+  readonly id: string;
+  readonly baseText: string;
+  readonly compareText: string;
+  readonly compareRange: SourceRange;
 }
 
 const ATOMIC_SELECTOR = [
@@ -22,7 +30,8 @@ export function applyRenderedTrackChanges(currentRoot: HTMLElement, baseRoot: HT
   const deletions = new Map<Text, Array<{ at: number; value: string }>>();
   const textRuns = current.runs.filter((run): run is RenderedTextRun & { readonly node: Text } => Boolean(run.node));
 
-  for (const change of changes) {
+  for (let index = 0; index < changes.length; index += 1) {
+    const change = changes[index]!;
     if (change.kind !== 'delete') continue;
     const run = textRunAt(textRuns, change.at);
     if (!run) continue;
@@ -33,10 +42,15 @@ export function applyRenderedTrackChanges(currentRoot: HTMLElement, baseRoot: HT
     deletions.set(run.node, events);
   }
 
+  let insertionIndex = 0;
   for (const run of textRuns) {
-    const ranges = insertions
-      .map((change) => ({ from: Math.max(0, change.from - run.from), to: Math.min(run.node.length, change.to - run.from) }))
-      .filter((range) => range.from < range.to);
+    while (insertionIndex < insertions.length && insertions[insertionIndex]!.to <= run.from) insertionIndex += 1;
+    const ranges: Array<{ from: number; to: number }> = [];
+    for (let index = insertionIndex; index < insertions.length && insertions[index]!.from < run.to; index += 1) {
+      const change = insertions[index]!;
+      const range = { from: Math.max(0, change.from - run.from), to: Math.min(run.node.length, change.to - run.from) };
+      if (range.from < range.to) ranges.push(range);
+    }
     const events = deletions.get(run.node) ?? [];
     if (!ranges.length && !events.length) continue;
     decorateTextRun(run.node, ranges, events);
@@ -68,9 +82,16 @@ function renderedText(root: HTMLElement): { readonly value: string; readonly run
 }
 
 function textRunAt(runs: readonly (RenderedTextRun & { readonly node: Text })[], offset: number): (RenderedTextRun & { readonly node: Text }) | undefined {
-  return runs.find((run) => offset >= run.from && offset < run.to)
-    ?? runs.find((run) => run.from > offset)
-    ?? runs.at(-1);
+  let low = 0;
+  let high = runs.length - 1;
+  while (low <= high) {
+    const middle = (low + high) >>> 1;
+    const run = runs[middle]!;
+    if (offset < run.from) high = middle - 1;
+    else if (offset >= run.to) low = middle + 1;
+    else return run;
+  }
+  return runs[Math.min(low, runs.length - 1)];
 }
 
 function decorateTextRun(node: Text, insertions: readonly { from: number; to: number }[], deletions: readonly { at: number; value: string }[]) {
@@ -93,7 +114,8 @@ function decorateTextRun(node: Text, insertions: readonly { from: number; to: nu
     const to = ordered[index + 1];
     if (to === undefined || from === to) continue;
     const text = node.data.slice(from, to);
-    if (insertions.some((range) => from >= range.from && to <= range.to)) {
+    const insertion = insertions.find((range) => from >= range.from && to <= range.to);
+    if (insertion) {
       const element = ownerDocument.createElement('ins');
       element.className = 'render-track-insert';
       element.title = 'Added text';

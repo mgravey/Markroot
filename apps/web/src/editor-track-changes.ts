@@ -1,8 +1,8 @@
 import { diffWordsWithSpace } from 'diff';
 
 export type EditorTrackChange =
-  | { readonly kind: 'insert'; readonly from: number; readonly to: number }
-  | { readonly kind: 'delete'; readonly at: number; readonly value: string };
+  | { readonly kind: 'insert'; readonly from: number; readonly to: number; readonly changeId?: string }
+  | { readonly kind: 'delete'; readonly at: number; readonly value: string; readonly changeId?: string };
 
 export function editorTrackChanges(base: string | undefined, current: string): readonly EditorTrackChange[] {
   if (base === undefined || base === current) return [];

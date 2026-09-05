@@ -2,6 +2,11 @@
 
 ## 0.1.0 - unreleased
 
+- Changed branch comparison from one inspector card per diff fragment to a read-only, document-level tracked-changes view in both Source and Rendered panes, with a bold active revision, next/previous navigation, and per-change or bulk accept/reject decisions that update the displayed document immediately.
+- Made per-change review decisions automatically advance to the next pending revision, removed repeated whole-document diffing and preview reconstruction from that interaction, and separated Preview utilities from the React component to preserve Vite Fast Refresh compatibility.
+- Moved initial branch-review diffing to a dedicated worker, made history-based author attribution non-blocking and line-diff scoped, reused the original rendered comparison for every decision, indexed rendered diff decoration work, and reduced Source updates to the smallest changed range.
+- Fixed rendered review decisions after the first change by resolving each accepted or rejected fragment from its source block and range instead of guessing IDs from rendered text.
+- Fixed review navigation after decisions by mapping offsets between the compared branch and live presentation, selecting the following block at boundaries, making Source-side change marks directly clickable, preserving the rendered scroll anchor while a decision changes layout, and reapplying navigation after asynchronous preview HTML arrives.
 - Added an automated GitHub Pages deployment for the `/markroot/` project path, including subpath-safe install metadata and platform setup documentation.
 - Added rendered-document text selection for creating source-anchored comments without switching to the Source pane.
 - Added a Word-style rendered comment gutter with scroll-anchored thread cards, active-range highlighting, reply counts, and direct access to the full thread panel.

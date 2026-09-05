@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mapRenderedOffset, mapSourceOffset, opensExternalPage, protectLocalObjectUrls, trustedDoiUrl } from './Preview.js';
+import { mapRenderedOffset, mapSourceOffset, opensExternalPage, protectLocalObjectUrls, trustedDoiUrl } from './preview-utils.js';
 
 describe('preview local resources', () => {
   it('protects only Markroot-created object URLs while HTML is sanitized', () => {

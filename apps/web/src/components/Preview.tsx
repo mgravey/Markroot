@@ -2,9 +2,10 @@ import { useEffect, useRef } from 'react';
 import DOMPurify from 'dompurify';
 import type { ParsedComments } from '@markroot/comments';
 import type { SourceRange } from '@markroot/core';
-import type { DocumentBlock } from '@markroot/document';
+import { documentBlockAt, type DocumentBlock } from '@markroot/document';
 import { centeredScrollTop, isScrollKey, ScrollIntentGate, viewportCenter } from './scroll-sync.js';
-import { applyRenderedTrackChanges } from '../rendered-track-changes.js';
+import { mapRenderedOffset, mapSourceOffset, opensExternalPage, protectLocalObjectUrls, trustedDoiUrl } from './preview-utils.js';
+import { applyRenderedTrackChanges, type RenderedReviewChange } from '../rendered-track-changes.js';
 
 interface Props {
   html: string;
@@ -23,6 +24,9 @@ interface Props {
   fontSize: number;
   justified: boolean;
   trackChangesBaseHtml?: string | undefined;
+  activeTrackChange?: Readonly<{ id: string; range: SourceRange; baseText: string }> | undefined;
+  reviewChanges?: readonly RenderedReviewChange[] | undefined;
+  reviewDecisions?: readonly Readonly<{ id: string; decision: 'pending' | 'accept' | 'reject' }>[] | undefined;
   comments?: ParsedComments | undefined;
   activeCommentId?: string | undefined;
   onNavigate(id: string, sourceOffset?: number): void;
@@ -31,12 +35,13 @@ interface Props {
   onScroll(id: string, progress: number): void;
 }
 
-export function Preview({ html, objectUrls, warnings, blocks, search, regularExpression, activeBlock, scrollTarget, scrollProgress, scrollAlignment, anchorTarget, allowRemoteResources, fontFamily, fontSize, justified, trackChangesBaseHtml, comments, activeCommentId, onNavigate, onSelect, onCommentActivate, onScroll }: Props) {
+export function Preview({ html, objectUrls, warnings, blocks, search, regularExpression, activeBlock, scrollTarget, scrollProgress, scrollAlignment, anchorTarget, allowRemoteResources, fontFamily, fontSize, justified, trackChangesBaseHtml, activeTrackChange, reviewChanges, reviewDecisions, comments, activeCommentId, onNavigate, onSelect, onCommentActivate, onScroll }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const preservedSelection = useRef<Range | undefined>(undefined);
   const preservedSourceSelection = useRef<SourceRange | undefined>(undefined);
   const pointerSelectionStart = useRef<{ offset: number; x: number; y: number; blockId: string } | undefined>(undefined);
   const pendingNavigation = useRef<(() => void) | undefined>(undefined);
+  const appliedReviewDecisions = useRef<{ article?: HTMLElement; decisions: Map<string, string> }>({ decisions: new Map() });
   const scrollIntent = useRef(new ScrollIntentGate());
   const latestOnScroll = useRef(onScroll);
   const latestOnNavigate = useRef(onNavigate);
@@ -70,7 +75,30 @@ export function Preview({ html, objectUrls, warnings, blocks, search, regularExp
       shadow.host.style.setProperty('--viewer-size', `${fontSize}px`);
     }
     shadow.replaceChildren(style, article);
-  }, [html, objectUrls, warnings, search, regularExpression, allowRemoteResources, fontFamily, fontSize, justified, trackChangesBaseHtml]);
+  }, [html, objectUrls, warnings, search, regularExpression, allowRemoteResources, fontFamily, fontSize, justified, trackChangesBaseHtml, reviewChanges]);
+  useEffect(() => {
+    const article = host.current?.shadowRoot?.querySelector<HTMLElement>('article');
+    if (!article || !reviewDecisions || !reviewChanges) return;
+    if (appliedReviewDecisions.current.article !== article) appliedReviewDecisions.current = { article, decisions: new Map() };
+    const previous = appliedReviewDecisions.current.decisions;
+    const changes = new Map(reviewChanges.map((change) => [change.id, change]));
+    const restoreScroll = captureRenderedScrollAnchor(host.current?.parentElement, article, blocks, activeTrackChange);
+    let changed = false;
+    for (const { id, decision } of reviewDecisions) {
+      if (previous.get(id) === decision) continue;
+      const change = changes.get(id);
+      if (change && decision !== 'pending') {
+        applyRenderedReviewDecision(article, blocks, change, decision);
+        changed = true;
+      }
+      previous.set(id, decision);
+    }
+    if (changed) restoreScroll();
+  }, [html, trackChangesBaseHtml, blocks, activeTrackChange, reviewChanges, reviewDecisions]);
+  useEffect(() => {
+    const article = host.current?.shadowRoot?.querySelector<HTMLElement>('article');
+    if (article) updateRenderedActiveChange(article, blocks, activeTrackChange);
+  }, [html, trackChangesBaseHtml, blocks, activeTrackChange]);
   useEffect(() => {
     const shadow = host.current?.shadowRoot;
     shadow?.querySelectorAll('.active-block').forEach((element) => element.classList.remove('active-block'));
@@ -107,7 +135,7 @@ export function Preview({ html, objectUrls, warnings, blocks, search, regularExp
       if (!moved) scrollIntent.current.endProgrammatic();
       else eventWindow.requestAnimationFrame(() => scrollIntent.current.endProgrammatic());
     }
-  }, [scrollTarget, scrollProgress, scrollAlignment]);
+  }, [scrollTarget, scrollProgress, scrollAlignment, html, trackChangesBaseHtml]);
   useEffect(() => {
     if (anchorTarget) navigatePreviewAnchor(host.current, anchorTarget.id, blocks, scrollIntent.current, latestOnNavigate.current);
   }, [anchorTarget, blocks, html]);
@@ -239,7 +267,7 @@ export function Preview({ html, objectUrls, warnings, blocks, search, regularExp
 
 const previewStyle = `
   :host { color: var(--ink); }
-  article { position: relative; min-height: 100%; font-family: var(--viewer-font); font-size: var(--viewer-size); line-height: 1.72; }
+  article { position: relative; min-height: 100%; overflow-anchor: none; font-family: var(--viewer-font); font-size: var(--viewer-size); line-height: 1.72; }
   .comment-gutter { position: absolute; inset: 0 0 auto 0; pointer-events: none; font-family: 'Manrope', sans-serif; font-size: max(11px, .68em); line-height: 1.4; }
   .preserved-selection-layer { position: absolute; inset: 0 0 auto 0; pointer-events: none; }
   .preserved-selection-highlight { position: absolute; z-index: 1; border-radius: .18em; background: color-mix(in srgb, var(--accent) 22%, transparent); box-shadow: inset 0 -.12em 0 color-mix(in srgb, var(--accent) 62%, transparent); }
@@ -306,6 +334,11 @@ const previewStyle = `
   mark { color: inherit; background: #ffd76a; border-radius: .118em; }
   ins.render-track-insert { color: var(--accent-strong); background: var(--accent-soft); text-decoration: underline; text-decoration-color: var(--accent); text-underline-offset: .12em; border-radius: .12em; }
   del.render-track-delete { margin-inline: .06em; padding-inline: .08em; color: var(--danger); background: var(--danger-soft); text-decoration: line-through; text-decoration-thickness: .09em; border-radius: .12em; white-space: pre-wrap; }
+  ins.render-track-insert[data-review-decision="accept"] { color: inherit; background: transparent; text-decoration: none; }
+  del.render-track-delete[data-review-decision="accept"] { display: none; }
+  ins.render-track-insert[data-review-decision="reject"] { display: none; }
+  del.render-track-delete[data-review-decision="reject"] { margin-inline: 0; padding-inline: 0; color: inherit; background: transparent; text-decoration: none; }
+  .render-review-active { font-weight: 700; }
   .remote-resource-placeholder { display: block; padding: 1.333em; color: var(--muted); background: var(--surface-strong); border: max(1px, .083em) dashed var(--line-strong); border-radius: .5em; font-family: 'Manrope', sans-serif; font-size: .706em; text-align: center; }
   @media (max-width: 640px) { .figure-layout { grid-template-columns: 1fr !important; } }
 `;
@@ -494,43 +527,6 @@ function pointDistance(rect: DOMRect, x: number, y: number): number {
   return horizontal * horizontal + vertical * vertical;
 }
 
-export function mapRenderedOffset(source: string, rendered: string, renderedOffset: number): number {
-  const isWord = (value: string) => /[\p{L}\p{N}'’_-]/u.test(value);
-  let start = Math.max(0, Math.min(renderedOffset, rendered.length));
-  let end = start;
-  while (start > 0 && isWord(rendered[start - 1]!)) start -= 1;
-  while (end < rendered.length && isWord(rendered[end]!)) end += 1;
-  const word = rendered.slice(start, end);
-  if (word.length >= 2) {
-    const candidates: number[] = [];
-    const lowerSource = source.toLocaleLowerCase();
-    const lowerWord = word.toLocaleLowerCase();
-    let index = lowerSource.indexOf(lowerWord);
-    while (index >= 0) { candidates.push(index); index = lowerSource.indexOf(lowerWord, index + lowerWord.length); }
-    if (candidates.length) {
-      const expected = source.length * (renderedOffset / Math.max(1, rendered.length));
-      const match = candidates.reduce((best, candidate) => Math.abs(candidate - expected) < Math.abs(best - expected) ? candidate : best);
-      return Math.min(source.length, match + Math.max(0, renderedOffset - start));
-    }
-  }
-  return Math.round(source.length * (renderedOffset / Math.max(1, rendered.length)));
-}
-
-export function mapSourceOffset(source: string, rendered: string, sourceOffset: number): number {
-  const target = Math.max(0, Math.min(sourceOffset, source.length));
-  let bestOffset = 0;
-  let bestDistance = Number.POSITIVE_INFINITY;
-  for (let offset = 0; offset <= rendered.length; offset += 1) {
-    const distance = Math.abs(mapRenderedOffset(source, rendered, offset) - target);
-    if (distance < bestDistance) {
-      bestOffset = offset;
-      bestDistance = distance;
-      if (distance === 0) break;
-    }
-  }
-  return bestOffset;
-}
-
 function drawCommentGutter(shadow: ShadowRoot, comments: ParsedComments | undefined, blocks: readonly DocumentBlock[], activeCommentId: string | undefined, onActivate: (id: string) => void): void {
   shadow.querySelector('.comment-gutter')?.remove();
   const article = shadow.querySelector<HTMLElement>('article');
@@ -602,18 +598,170 @@ function drawCommentGutter(shadow: ShadowRoot, comments: ParsedComments | undefi
   article.style.minHeight = `${Math.max(baseHeight, nextTop)}px`;
 }
 
-function renderedDomRanges(shadow: ShadowRoot, blocks: readonly DocumentBlock[], sourceRange: SourceRange): Range[] {
+function markRenderedSourceRange(root: ParentNode, blocks: readonly DocumentBlock[], sourceRange: SourceRange): void {
+  for (const range of renderedDomRanges(root, blocks, sourceRange)) {
+    const container = elementForNode(range.commonAncestorContainer);
+    if (!container) continue;
+    const ownerDocument = container.ownerDocument;
+    const showText = ownerDocument.defaultView?.NodeFilter.SHOW_TEXT ?? 4;
+    const walker = ownerDocument.createTreeWalker(container, showText);
+    const portions: Array<{ node: Text; from: number; to: number }> = [];
+    while (walker.nextNode()) {
+      const node = walker.currentNode as Text;
+      if (!node.length || !range.intersectsNode(node)) continue;
+      const from = node === range.startContainer ? range.startOffset : 0;
+      const to = node === range.endContainer ? range.endOffset : node.length;
+      if (from < to) portions.push({ node, from, to });
+    }
+    for (const { node, from, to } of portions) {
+      const fragment = ownerDocument.createDocumentFragment();
+      if (from > 0) fragment.append(node.data.slice(0, from));
+      const strong = ownerDocument.createElement('strong');
+      strong.className = 'render-review-active';
+      strong.textContent = node.data.slice(from, to);
+      fragment.append(strong);
+      if (to < node.length) fragment.append(node.data.slice(to));
+      node.replaceWith(fragment);
+    }
+  }
+}
+
+function updateRenderedActiveChange(article: HTMLElement, blocks: readonly DocumentBlock[], active: Props['activeTrackChange']): void {
+  const wrappers = article.querySelectorAll<HTMLElement>('strong.render-review-active');
+  for (const wrapper of wrappers) wrapper.replaceWith(...wrapper.childNodes);
+  if (wrappers.length) article.normalize();
+  article.querySelectorAll('.render-review-active').forEach((element) => element.classList.remove('render-review-active'));
+  if (!active) return;
+  if (active.range.from < active.range.to) {
+    markRenderedSourceRange(article, blocks, active.range);
+    return;
+  }
+  const block = documentBlockAt(blocks, active.range.from);
+  const blockElement = block ? article.querySelector<HTMLElement>(`[data-block-id="${CSS.escape(block.id)}"]`) : undefined;
+  if (!block || !blockElement) return;
+  const normalizedBase = normalizeReviewText(active.baseText);
+  const candidates = [...blockElement.querySelectorAll<HTMLElement>('del.render-track-delete')]
+    .filter((element) => normalizedBase.includes(normalizeReviewText(element.textContent ?? '')));
+  for (const deletion of nearestRenderedDeletions(blockElement, block, active.range.from, candidates)) {
+    deletion.classList.add('render-review-active');
+  }
+}
+
+function captureRenderedScrollAnchor(container: HTMLElement | null | undefined, article: HTMLElement, blocks: readonly DocumentBlock[], active: Props['activeTrackChange']): () => void {
+  if (!container) return () => undefined;
+  let anchor: Range | HTMLElement | undefined;
+  if (active?.range.from !== undefined && active.range.from < active.range.to) {
+    anchor = renderedDomRanges(article, blocks, active.range)[0];
+  } else if (active) {
+    const block = documentBlockAt(blocks, active.range.from);
+    const blockElement = block ? article.querySelector<HTMLElement>(`[data-block-id="${CSS.escape(block.id)}"]`) : undefined;
+    const normalizedBase = normalizeReviewText(active.baseText);
+    const candidates = [...(blockElement?.querySelectorAll<HTMLElement>('del.render-track-delete') ?? [])]
+      .filter((element) => normalizedBase.includes(normalizeReviewText(element.textContent ?? '')));
+    anchor = block && blockElement ? nearestRenderedDeletions(blockElement, block, active.range.from, candidates)[0] : undefined;
+  }
+  if (!anchor) {
+    const viewport = container.getBoundingClientRect();
+    anchor = [...article.querySelectorAll<HTMLElement>('[data-block-id]')]
+      .find((element) => element.getBoundingClientRect().bottom >= viewport.top);
+  }
+  if (!anchor) return () => undefined;
+  const scrollTop = container.scrollTop;
+  const top = anchor.getBoundingClientRect().top;
+  return () => {
+    const nextTop = anchor?.getBoundingClientRect().top;
+    if (nextTop === undefined || !Number.isFinite(nextTop) || !Number.isFinite(top)) return;
+    container.scrollTop = scrollTop + nextTop - top;
+  };
+}
+
+function applyRenderedReviewDecision(article: HTMLElement, blocks: readonly DocumentBlock[], change: RenderedReviewChange, decision: 'accept' | 'reject'): void {
+  const domRanges = change.compareRange.from < change.compareRange.to ? renderedDomRanges(article, blocks, change.compareRange) : [];
+  const affected = new Set<HTMLElement>();
+  if (change.compareText) {
+    for (const element of article.querySelectorAll<HTMLElement>('ins.render-track-insert')) {
+      if (domRanges.some((range) => safelyIntersects(range, element))) affected.add(element);
+    }
+  }
+  const candidateBlocks = change.compareRange.from === change.compareRange.to
+    ? [documentBlockAt(blocks, change.compareRange.from)].filter((block): block is DocumentBlock => Boolean(block))
+    : blocks.filter((block) => change.compareRange.to > block.from && change.compareRange.from < block.to);
+  if (!change.baseText) {
+    for (const element of affected) {
+      element.dataset.reviewChangeId = change.id;
+      element.dataset.reviewDecision = decision;
+    }
+    return;
+  }
+  const normalizedBase = normalizeReviewText(change.baseText);
+  for (const block of candidateBlocks) {
+    const blockElement = article.querySelector<HTMLElement>(`[data-block-id="${CSS.escape(block.id)}"]`);
+    if (!blockElement) continue;
+    const deletions = [...blockElement.querySelectorAll<HTMLElement>('del.render-track-delete')];
+    const matching = normalizedBase
+      ? deletions.filter((element) => {
+        const value = normalizeReviewText(element.textContent ?? '');
+        return value && (normalizedBase.includes(value) || value.includes(normalizedBase));
+      })
+      : deletions;
+    for (const deletion of nearestRenderedDeletions(blockElement, block, change.compareRange.from, matching)) affected.add(deletion);
+  }
+  for (const element of affected) {
+    element.dataset.reviewChangeId = change.id;
+    element.dataset.reviewDecision = decision;
+  }
+}
+
+function safelyIntersects(range: Range, element: HTMLElement): boolean {
+  try { return range.intersectsNode(element); }
+  catch { return false; }
+}
+
+function nearestRenderedDeletions(blockElement: HTMLElement, block: DocumentBlock, sourceOffset: number, candidates: readonly HTMLElement[]): HTMLElement[] {
+  if (!candidates.length) return [];
+  const rendered = currentRenderedText(blockElement);
+  const target = mapSourceOffset(block.text, rendered, Math.max(0, Math.min(block.text.length, sourceOffset - block.from)));
+  let shortestDistance = Number.POSITIVE_INFINITY;
+  const nearest: HTMLElement[] = [];
+  for (const element of candidates) {
+    const offset = visibleTextOffsetBefore(blockElement, element);
+    const distance = Math.abs(offset - target);
+    if (distance < shortestDistance) {
+      shortestDistance = distance;
+      nearest.splice(0, nearest.length, element);
+    } else if (distance === shortestDistance) {
+      nearest.push(element);
+    }
+  }
+  return nearest;
+}
+
+function visibleTextOffsetBefore(root: HTMLElement, target: HTMLElement): number {
+  const showText = root.ownerDocument.defaultView?.NodeFilter.SHOW_TEXT ?? 4;
+  const walker = root.ownerDocument.createTreeWalker(root, showText);
+  let offset = 0;
+  while (walker.nextNode()) {
+    const node = walker.currentNode as Text;
+    if (target.contains(node)) return offset;
+    if (!node.parentElement?.closest('del.render-track-delete')) offset += node.length;
+  }
+  return offset;
+}
+
+function normalizeReviewText(value: string): string { return value.replace(/[^\p{L}\p{N}]+/gu, '').toLocaleLowerCase(); }
+
+function renderedDomRanges(root: ParentNode, blocks: readonly DocumentBlock[], sourceRange: SourceRange): Range[] {
   const ranges: Range[] = [];
   for (const block of blocks) {
     if (sourceRange.to <= block.from || sourceRange.from >= block.to) continue;
-    const element = shadow.querySelector<HTMLElement>(`[data-block-id="${CSS.escape(block.id)}"]`);
+    const element = root.querySelector<HTMLElement>(`[data-block-id="${CSS.escape(block.id)}"]`);
     if (!element) continue;
-    const rendered = element.textContent ?? '';
+    const rendered = currentRenderedText(element);
     if (!rendered) continue;
     const from = mapSourceOffset(block.text, rendered, Math.max(0, sourceRange.from - block.from));
     const to = mapSourceOffset(block.text, rendered, Math.min(block.text.length, sourceRange.to - block.from));
-    const start = textPositionAt(element, Math.min(from, to));
-    const end = textPositionAt(element, Math.max(from, to));
+    const start = textPositionAt(element, Math.min(from, to), true);
+    const end = textPositionAt(element, Math.max(from, to), true);
     if (!start || !end || from === to) continue;
     const range = element.ownerDocument.createRange();
     try {
@@ -625,7 +773,19 @@ function renderedDomRanges(shadow: ShadowRoot, blocks: readonly DocumentBlock[],
   return ranges;
 }
 
-function textPositionAt(root: HTMLElement, targetOffset: number): { node: Text; offset: number } | undefined {
+function currentRenderedText(root: HTMLElement): string {
+  const ownerDocument = root.ownerDocument;
+  const showText = ownerDocument.defaultView?.NodeFilter.SHOW_TEXT ?? 4;
+  const walker = ownerDocument.createTreeWalker(root, showText);
+  let value = '';
+  while (walker.nextNode()) {
+    const node = walker.currentNode as Text;
+    if (!node.parentElement?.closest('del.render-track-delete')) value += node.data;
+  }
+  return value;
+}
+
+function textPositionAt(root: HTMLElement, targetOffset: number, ignoreDeleted = false): { node: Text; offset: number } | undefined {
   const ownerDocument = root.ownerDocument;
   const showText = ownerDocument.defaultView?.NodeFilter.SHOW_TEXT ?? 4;
   const walker = ownerDocument.createTreeWalker(root, showText);
@@ -633,6 +793,7 @@ function textPositionAt(root: HTMLElement, targetOffset: number): { node: Text; 
   let last: Text | undefined;
   while (walker.nextNode()) {
     const node = walker.currentNode as Text;
+    if (ignoreDeleted && node.parentElement?.closest('del.render-track-delete')) continue;
     last = node;
     if (targetOffset <= consumed + node.length) return { node, offset: Math.max(0, targetOffset - consumed) };
     consumed += node.length;
@@ -667,13 +828,6 @@ function prepareFigureImages(root: HTMLElement): void {
       image.replaceWith(placeholder);
     }, { once: true });
   }
-}
-
-export function protectLocalObjectUrls(html: string, objectUrls: readonly string[]): string {
-  return objectUrls.reduce(
-    (protectedHtml, url, index) => protectedHtml.replaceAll(`src="${url}"`, `data-markroot-object-url="${index}"`),
-    html,
-  );
 }
 
 function restoreLocalObjectUrls(root: HTMLElement, objectUrls: readonly string[]): void {
@@ -715,16 +869,6 @@ function secureLinks(root: HTMLElement): void {
       link.removeAttribute('rel');
     }
   }
-}
-
-export function opensExternalPage(href: string): boolean { return /^https?:\/\//i.test(href); }
-
-export function trustedDoiUrl(value?: string): string | undefined {
-  if (!value) return undefined;
-  try {
-    const url = new URL(value);
-    return url.protocol === 'https:' && url.hostname === 'doi.org' && /^\/10\.\d{4,9}\//i.test(url.pathname) ? url.href : undefined;
-  } catch { return undefined; }
 }
 
 function openTrustedDoi(value: string | undefined, targetWindow: Window): void {

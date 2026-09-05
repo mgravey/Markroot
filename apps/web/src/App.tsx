@@ -1,17 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
+import { diffLines } from 'diff';
 import {
   AlignJustify, BookOpen, Check, ChevronRight, CircleAlert, CircleDot, Code2, Columns2, Download, FileCode2,
   ExternalLink, Files, GitBranch, GitCommitHorizontal, GitCompare, ListTree, MessageSquare, Moon, PanelRight,
   RefreshCw, Save, Search, Settings2, Sun, Undo2, X,
 } from 'lucide-react';
 import { resolveWorkspaceReference, throwIfAborted, workspacePath, type OperationContext, type ProgressEvent, type SourceRange, type WorkspacePath } from '@markroot/core';
-import { DocumentSession, searchDocument, type DocumentBlock, type DocumentSnapshot } from '@markroot/document';
+import { documentBlockAt, DocumentSession, searchDocument, type DocumentBlock, type DocumentSnapshot } from '@markroot/document';
 import { BasicDocumentEngine, type DocumentOutlineItem, type RenderArtifact } from '@markroot/rendering';
 import { FileSystemAccessWorkspace, ensureDirectoryPermission, type GuardedWorkspace, type WorkspaceEntry } from '@markroot/workspace';
 import { createThread, deleteThread, parseComments, recoverOrphan, replyToThread, setThreadStatus } from '@markroot/comments';
 import { IsomorphicGitRepository, type GitCommitCandidate, type GitCommitSummary, type GitFileStatus } from '@markroot/git';
-import { createReviewDraft, decideChange, materializeReview, type ReviewDraft } from '@markroot/review';
+import { decideChange, mapReviewCompareOffset, mapReviewCurrentOffset, materializeReview, materializeReviewPresentation, type ReviewDraft } from '@markroot/review';
 import { parseExportOptions, type ExportFormat, type ExportResource } from '@markroot/export';
 import { LocalCitationProvider, type CitationRecord } from '@markroot/citations';
 import { defaultSettings, deletePendingSession, loadPendingSession, loadRecentWorkspace, loadSettings, savePendingSession, saveRecentWorkspace, saveSettings, type MarkrootSettings } from '@markroot/settings';
@@ -25,8 +26,10 @@ import { BrandMark } from './components/BrandMark.js';
 import { CommitProposalDialog } from './components/CommitProposalDialog.js';
 import { ChromeCommitMessageGenerator, type CommitGenerationProgress, type CommitProposal, type PreparedCommitMessageGenerator } from './commit-message.js';
 import { WorkerExporter } from './workers/export-client.js';
+import { createReviewDraftInWorker } from './workers/review-client.js';
 import { isPdfFigurePath, renderPdfFigurePreview } from './pdf-preview.js';
 import { detachedViewerTitle, prepareDetachedViewerDocument } from './detached-viewer.js';
+import type { EditorTrackChange } from './editor-track-changes.js';
 
 type Inspector = 'git' | 'review' | 'comments' | 'citations' | 'export' | 'settings' | undefined;
 type RightMode = 'visual' | 'preview';
@@ -79,6 +82,8 @@ export function App() {
   const [currentBranch, setCurrentBranch] = useState<string>();
   const [history, setHistory] = useState<readonly GitCommitSummary[]>([]);
   const [review, setReview] = useState<ReviewDraft>();
+  const [reviewAttributionBusy, setReviewAttributionBusy] = useState(false);
+  const [activeReviewChangeId, setActiveReviewChangeId] = useState<string>();
   const [commitMessage, setCommitMessage] = useState('');
   const [commitDialog, setCommitDialog] = useState<CommitDialogState>();
   const [aiModelSetup, setAiModelSetup] = useState<AiModelSetupState>();
@@ -94,6 +99,8 @@ export function App() {
   const [detachedViewerRoot, setDetachedViewerRoot] = useState<HTMLElement>();
   const sessionSubscription = useRef<(() => void) | undefined>(undefined);
   const snapshotRef = useRef<DocumentSnapshot | undefined>(undefined);
+  const reviewRef = useRef<ReviewDraft | undefined>(undefined);
+  const reviewPreviewSnapshotRef = useRef<DocumentSnapshot | undefined>(undefined);
   const settingsRef = useRef(settings);
   const workspacePane = useRef<HTMLElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
@@ -103,13 +110,56 @@ export function App() {
   const preparedCommitGenerator = useRef<PreparedCommitMessageGenerator | undefined>(undefined);
   const renderedRef = useRef<RenderArtifact | undefined>(undefined);
   const detachedViewerWindow = useRef<Window | undefined>(undefined);
+  const reviewAttributionRequest = useRef(0);
   const engine = useMemo(() => new BasicDocumentEngine(), []);
   const exporter = useMemo(() => new WorkerExporter(), []);
   const commitMessageGenerator = useMemo(() => new ChromeCommitMessageGenerator(), []);
+  const reviewPresentation = useMemo(() => review ? materializeReviewPresentation(review) : undefined, [review]);
+  const presentedSnapshot = useMemo(() => reviewPresentation && snapshot ? new DocumentSession(snapshot.path, reviewPresentation.current).snapshot() : snapshot, [reviewPresentation?.current, snapshot]);
+  const reviewPreviewSnapshot = useMemo(() => review && snapshot ? new DocumentSession(snapshot.path, review.compare).snapshot() : undefined, [review?.compare, snapshot?.path]);
+  const previewSnapshot = reviewPreviewSnapshot ?? presentedSnapshot;
+  const comparisonBaseSource = reviewPresentation?.base ?? (gitBase?.path === presentedSnapshot?.path ? gitBase?.source : undefined);
+  const renderedComparisonBaseSource = review?.base ?? comparisonBaseSource;
+  const trackedChangesVisible = Boolean(review) || trackChangesOpen;
+  const activeReviewChange = review?.changes.find((change) => change.id === activeReviewChangeId) ?? review?.changes[0];
+  const activeReviewRange = activeReviewChange ? reviewPresentation?.ranges.get(activeReviewChange.id) : undefined;
+  const reviewTrackChanges = useMemo<readonly EditorTrackChange[] | undefined>(() => {
+    if (!review || !reviewPresentation) return undefined;
+    return review.changes.flatMap((change): readonly EditorTrackChange[] => {
+      if (change.decision !== 'pending') return [];
+      const range = reviewPresentation.ranges.get(change.id);
+      if (!range) return [];
+      const tracked: EditorTrackChange[] = [];
+      let offset = range.from;
+      for (const segment of change.segments) {
+        if (segment.kind === 'insert') { tracked.push({ kind: 'insert', from: offset, to: offset + segment.value.length, changeId: change.id }); offset += segment.value.length; }
+        else if (segment.kind === 'delete') tracked.push({ kind: 'delete', at: offset, value: segment.value, changeId: change.id });
+        else offset += segment.value.length;
+      }
+      return tracked;
+    });
+  }, [review, reviewPresentation]);
+  const activeTrackChange = useMemo(() => activeReviewChange ? { id: activeReviewChange.id, range: activeReviewChange.compareRange, baseText: activeReviewChange.baseText } : undefined, [activeReviewChange?.id, activeReviewChange?.baseText, activeReviewChange?.compareRange.from, activeReviewChange?.compareRange.to]);
+  const activeSourceTrackChange = useMemo(() => activeReviewChange && activeReviewRange ? { from: activeReviewRange.from, to: activeReviewRange.to, baseText: activeReviewChange.baseText } : undefined, [activeReviewChange?.id, activeReviewChange?.baseText, activeReviewRange?.from, activeReviewRange?.to]);
+  const renderedReviewChanges = useMemo(() => review?.changes.map(({ id, baseText, compareText, compareRange }) => ({ id, baseText, compareText, compareRange })), [review?.base, review?.compare]);
+  const renderedReviewDecisions = useMemo(() => review?.changes.map(({ id, decision }) => ({ id, decision })), [review]);
+  const sourceScrollLocation = useMemo(() => {
+    if (!review || !reviewPreviewSnapshot || !presentedSnapshot || !scrollTarget) return { target: scrollTarget, progress: scrollProgress };
+    const compareBlock = reviewPreviewSnapshot.blocks.find((block) => block.id === scrollTarget);
+    if (!compareBlock) return { target: scrollTarget, progress: scrollProgress };
+    const compareOffset = compareBlock.from + Math.round((compareBlock.to - compareBlock.from) * scrollProgress);
+    const currentOffset = mapReviewCompareOffset(review, compareOffset);
+    const currentBlock = documentBlockAt(presentedSnapshot.blocks, currentOffset);
+    return currentBlock
+      ? { target: currentBlock.id, progress: Math.max(0, Math.min(1, (currentOffset - currentBlock.from) / Math.max(1, currentBlock.to - currentBlock.from))) }
+      : { target: undefined, progress: 0 };
+  }, [review, reviewPreviewSnapshot, presentedSnapshot, scrollTarget, scrollProgress]);
   const comments = useMemo(() => snapshot ? parseComments(snapshot.source) : undefined, [snapshot?.source]);
-  const matches = snapshot ? searchDocument(snapshot, search, { regularExpression }) : [];
+  const matches = presentedSnapshot ? searchDocument(presentedSnapshot, search, { regularExpression }) : [];
   const dark = resolvedDark(settings.theme);
-  snapshotRef.current = snapshot;
+  snapshotRef.current = presentedSnapshot;
+  reviewRef.current = review;
+  reviewPreviewSnapshotRef.current = reviewPreviewSnapshot;
   settingsRef.current = settings;
   renderedRef.current = rendered;
 
@@ -140,10 +190,10 @@ export function App() {
   }, [detachedViewerRoot, snapshot?.path]);
 
   useEffect(() => {
-    if (!snapshot || !/\.(?:md|qmd)$/i.test(snapshot.path)) { setRendered((current) => { revokeArtifact(current); return undefined; }); return; }
+    if (!previewSnapshot || !/\.(?:md|qmd)$/i.test(previewSnapshot.path)) { setRendered((current) => { revokeArtifact(current); return undefined; }); return; }
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
-      void collectPreviewResources(workspace, snapshot, controller.signal).then((dependencies) => engine.render({ snapshot, dependencies, citations, allowRemoteResources: settings.allowRemoteResources }, { signal: controller.signal }))
+      void collectPreviewResources(workspace, previewSnapshot, controller.signal).then((dependencies) => engine.render({ snapshot: previewSnapshot, dependencies, citations, allowRemoteResources: settings.allowRemoteResources }, { signal: controller.signal }))
         .then((artifact) => {
           if (controller.signal.aborted) { revokeArtifact(artifact); return; }
           setRendered((current) => { revokeArtifact(current); return artifact; });
@@ -151,17 +201,17 @@ export function App() {
         .catch((error) => { if (!controller.signal.aborted) setNotice(error instanceof Error ? error.message : String(error)); });
     }, 120);
     return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [snapshot, engine, settings.allowRemoteResources, workspace, citations]);
+  }, [previewSnapshot, engine, settings.allowRemoteResources, workspace, citations]);
 
   useEffect(() => {
-    if (!trackChangesOpen || !snapshot || gitBase?.path !== snapshot.path) { setRenderedBaseHtml(undefined); return; }
+    if (!trackedChangesVisible || !previewSnapshot || renderedComparisonBaseSource === undefined) { setRenderedBaseHtml(undefined); return; }
     const controller = new AbortController();
-    const baseSnapshot = new DocumentSession(snapshot.path, gitBase.source).snapshot();
+    const baseSnapshot = new DocumentSession(previewSnapshot.path, renderedComparisonBaseSource).snapshot();
     void engine.render({ snapshot: baseSnapshot, citations, allowRemoteResources: settings.allowRemoteResources }, { signal: controller.signal })
       .then((artifact) => { if (!controller.signal.aborted) setRenderedBaseHtml(artifact.html); })
       .catch((error) => { if (!controller.signal.aborted) setNotice(error instanceof Error ? error.message : String(error)); });
     return () => controller.abort();
-  }, [trackChangesOpen, snapshot?.path, gitBase?.path, gitBase?.source, engine, citations, settings.allowRemoteResources]);
+  }, [trackedChangesVisible, previewSnapshot?.path, renderedComparisonBaseSource, engine, citations, settings.allowRemoteResources]);
 
   useEffect(() => {
     if (!settings.autosave || !snapshot?.dirty) return;
@@ -192,11 +242,13 @@ export function App() {
   }, [findOpen]);
 
   useEffect(() => {
-    if (!snapshot || (scrollTarget && snapshot.blocks.some((block) => block.id === scrollTarget))) return;
-    const block = snapshot.blocks.find((candidate) => selection.from >= candidate.from && selection.from <= candidate.to)
-      ?? snapshot.blocks.find((candidate) => candidate.kind !== 'frontmatter');
+    const navigationSnapshot = reviewPreviewSnapshot ?? snapshot;
+    if (!navigationSnapshot || (scrollTarget && navigationSnapshot.blocks.some((block) => block.id === scrollTarget))) return;
+    const navigationOffset = review ? mapReviewCurrentOffset(review, selection.from) : selection.from;
+    const block = documentBlockAt(navigationSnapshot.blocks, navigationOffset)
+      ?? navigationSnapshot.blocks.find((candidate) => candidate.kind !== 'frontmatter');
     if (block) setScrollTarget(block.id);
-  }, [snapshot, scrollTarget, selection.from]);
+  }, [snapshot, review, reviewPreviewSnapshot, scrollTarget, selection.from]);
 
   useEffect(() => {
     const context = document.modelContext;
@@ -329,6 +381,10 @@ export function App() {
       setFileVersion(stat.version);
       setGitBase(base === undefined ? undefined : { path, source: base });
       setTrackChangesOpen(false);
+      reviewAttributionRequest.current += 1;
+      setReviewAttributionBusy(false);
+      setReview(undefined);
+      setActiveReviewChangeId(undefined);
       setScrollTarget(firstBlock?.id);
       setScrollProgress(0);
       setScrollOrigin('command');
@@ -356,34 +412,62 @@ export function App() {
   const selectSource = useCallback((range: SourceRange) => {
     setSelection(range);
     setSourceCursorTarget(undefined);
-    const block = snapshotRef.current?.blocks.find((candidate) => range.from >= candidate.from && range.from <= candidate.to);
+    const draft = reviewRef.current;
+    const navigationSnapshot = draft ? reviewPreviewSnapshotRef.current : snapshotRef.current;
+    const navigationOffset = draft ? mapReviewCurrentOffset(draft, range.from) : range.from;
+    const block = navigationSnapshot ? documentBlockAt(navigationSnapshot.blocks, navigationOffset) : undefined;
     if (!block) return;
     setScrollOrigin('source');
     setScrollAlignment('reveal');
     setScrollTarget(block.id);
-    setScrollProgress(Math.max(0, Math.min(1, (range.from - block.from) / Math.max(1, block.to - block.from))));
+    setScrollProgress(Math.max(0, Math.min(1, (navigationOffset - block.from) / Math.max(1, block.to - block.from))));
   }, []);
 
   const navigateFromRight = useCallback((blockId: string, sourceOffset?: number) => {
-    const block = snapshotRef.current?.blocks.find((candidate) => candidate.id === blockId);
-    const position = block ? Math.max(block.from, Math.min(sourceOffset ?? block.from, block.to)) : sourceOffset;
+    const draft = reviewRef.current;
+    const navigationSnapshot = draft ? reviewPreviewSnapshotRef.current : snapshotRef.current;
+    const block = navigationSnapshot?.blocks.find((candidate) => candidate.id === blockId);
+    const comparePosition = block ? Math.max(block.from, Math.min(sourceOffset ?? block.from, block.to)) : sourceOffset;
+    const position = draft && comparePosition !== undefined ? mapReviewCompareOffset(draft, comparePosition) : comparePosition;
     setScrollOrigin('right');
     setScrollAlignment('reveal');
     setScrollTarget(blockId);
-    setScrollProgress(block && position !== undefined ? (position - block.from) / Math.max(1, block.to - block.from) : 0);
+    setScrollProgress(block && comparePosition !== undefined ? (comparePosition - block.from) / Math.max(1, block.to - block.from) : 0);
     setSourceCursorTarget(undefined);
     if (position !== undefined) window.setTimeout(() => setSourceCursorTarget(position), 0);
   }, []);
 
   const selectFromRight = useCallback((range: SourceRange) => {
-    setSelection(range);
+    const draft = reviewRef.current;
+    const currentRange = draft
+      ? { from: mapReviewCompareOffset(draft, range.from), to: mapReviewCompareOffset(draft, range.to) }
+      : range;
+    setSelection(currentRange);
     setSourceCursorTarget(undefined);
-    const block = snapshotRef.current?.blocks.find((candidate) => range.from >= candidate.from && range.from <= candidate.to);
+    const navigationSnapshot = draft ? reviewPreviewSnapshotRef.current : snapshotRef.current;
+    const block = navigationSnapshot ? documentBlockAt(navigationSnapshot.blocks, range.from) : undefined;
     if (!block) return;
     setScrollOrigin('right');
     setScrollAlignment('reveal');
     setScrollTarget(block.id);
     setScrollProgress(Math.max(0, Math.min(1, (range.from - block.from) / Math.max(1, block.to - block.from))));
+  }, []);
+
+  const navigateFromSourceScroll = useCallback((blockId: string, progress: number) => {
+    const currentSnapshot = snapshotRef.current;
+    const sourceBlock = currentSnapshot?.blocks.find((block) => block.id === blockId);
+    const currentOffset = sourceBlock
+      ? sourceBlock.from + Math.round((sourceBlock.to - sourceBlock.from) * progress)
+      : undefined;
+    const draft = reviewRef.current;
+    const compareOffset = draft && currentOffset !== undefined ? mapReviewCurrentOffset(draft, currentOffset) : currentOffset;
+    const navigationSnapshot = draft ? reviewPreviewSnapshotRef.current : currentSnapshot;
+    const block = navigationSnapshot && compareOffset !== undefined ? documentBlockAt(navigationSnapshot.blocks, compareOffset) : undefined;
+    setSourceCursorTarget(undefined);
+    setScrollOrigin('source');
+    setScrollAlignment('center');
+    setScrollProgress(block && compareOffset !== undefined ? Math.max(0, Math.min(1, (compareOffset - block.from) / Math.max(1, block.to - block.from))) : progress);
+    setScrollTarget(block?.id ?? blockId);
   }, []);
 
   const resizeLayout = useCallback((patch: Pick<MarkrootSettings, 'filesPaneWidth'> | Pick<MarkrootSettings, 'sourcePaneRatio'>, finished: boolean) => {
@@ -605,15 +689,42 @@ export function App() {
   async function compareBranch(ref: string) {
     if (!git || !snapshot) return;
     if (snapshot.dirty) { setNotice('Save the open document before starting branch review.'); return; }
+    const request = ++reviewAttributionRequest.current;
+    setNotice('Computing branch changes…');
     try {
-      const [base, compare] = await Promise.all([
+      const [base, compare, fingerprint] = await Promise.all([
         git.readFileAtRef(snapshot.path, 'HEAD'),
         git.readFileAtRef(snapshot.path, ref),
+        git.fingerprint(),
       ]);
-      const initial = createReviewDraft(base, compare, await git.fingerprint());
-      const attribution = await attributeReviewChanges(git, snapshot.path, ref, initial);
-      setReview(createReviewDraft(base, compare, initial.baseFingerprint, attribution));
+      const nextReview = await createReviewDraftInWorker(base, compare, fingerprint);
+      if (reviewAttributionRequest.current !== request) return;
+      if (!nextReview.changes.length) { setNotice(`${ref} has no changes for ${snapshot.path}.`); return; }
+      const firstChange = nextReview.changes[0]!;
+      const firstRange = materializeReviewPresentation(nextReview).ranges.get(firstChange.id) ?? firstChange.compareRange;
+      const reviewSnapshot = new DocumentSession(snapshot.path, compare).snapshot();
+      const block = documentBlockAt(reviewSnapshot.blocks, firstChange.compareRange.from);
+      setReview(nextReview);
+      setActiveReviewChangeId(firstChange.id);
+      setRightMode('preview');
+      setScrollOrigin('command');
+      setScrollAlignment('reveal');
+      setScrollProgress(block ? Math.max(0, Math.min(1, (firstChange.compareRange.from - block.from) / Math.max(1, block.to - block.from))) : 0);
+      setScrollTarget(block?.id);
+      setSourceCursorTarget(firstRange.from);
       setInspector('review');
+      setReviewAttributionBusy(true);
+      setNotice('Review ready. Finding change authors in the background…');
+      void attributeReviewChanges(git, snapshot.path, ref, nextReview, () => reviewAttributionRequest.current !== request)
+        .then((attribution) => {
+          if (reviewAttributionRequest.current !== request) return;
+          setReview((current) => current && current.base === base && current.compare === compare
+            ? { ...current, changes: current.changes.map((change) => ({ ...change, authors: attribution.get(change.id) ?? change.authors })) }
+            : current);
+          setNotice('Branch review ready.');
+        })
+        .catch((error: unknown) => { if (reviewAttributionRequest.current === request) setNotice(`Review ready; author lookup failed: ${error instanceof Error ? error.message : String(error)}`); })
+        .finally(() => { if (reviewAttributionRequest.current === request) setReviewAttributionBusy(false); });
     } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
   }
 
@@ -622,7 +733,7 @@ export function App() {
     try {
       if (await git.fingerprint() !== review.baseFingerprint) throw new Error('Repository state changed after this review started. Reopen the comparison.');
       if (await workspace.readFile(snapshot.path) !== review.base) throw new Error('The working file changed after this review started. Reopen the comparison.');
-      applySource(materializeReview(review), 'review'); setInspector(undefined); setReview(undefined); setNotice('Review decisions applied to the working document. Save to write them.');
+      reviewAttributionRequest.current += 1; setReviewAttributionBusy(false); applySource(materializeReview(review), 'review'); setInspector(undefined); setReview(undefined); setActiveReviewChangeId(undefined); setNotice('Review decisions applied to the working document. Save to write them.');
     }
     catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
   }
@@ -639,7 +750,12 @@ export function App() {
     setSourceCursorTarget(undefined);
     window.setTimeout(() => setSourceCursorTarget(range.from), 0);
     const block = snapshot.blocks.find((candidate) => range.from >= candidate.from && range.from <= candidate.to);
-    if (block) { setScrollOrigin('command'); setScrollAlignment('reveal'); setScrollProgress(0); setScrollTarget(block.id); }
+    if (block) {
+      setScrollOrigin('command');
+      setScrollAlignment('reveal');
+      setScrollProgress(Math.max(0, Math.min(1, (range.from - block.from) / Math.max(1, block.to - block.from))));
+      setScrollTarget(block.id);
+    }
   }
 
   function navigateMatch(direction: -1 | 1) {
@@ -721,10 +837,53 @@ export function App() {
   }
 
   const toggleInspector = (next: Exclude<Inspector, undefined>) => {
+    if (review && next !== 'review') { reviewAttributionRequest.current += 1; setReviewAttributionBusy(false); setReview(undefined); setActiveReviewChangeId(undefined); }
     setInspector((current) => current === next ? undefined : next);
     if (next === 'citations') void loadCitations();
     if (next === 'git') void refreshGit();
   };
+
+  function navigateReviewChange(draft: ReviewDraft, changeId: string) {
+    if (!snapshot) return;
+    const change = draft.changes.find((candidate) => candidate.id === changeId);
+    if (!change) return;
+    const presentation = materializeReviewPresentation(draft);
+    const range = presentation.ranges.get(change.id) ?? change.compareRange;
+    const reviewSnapshot = new DocumentSession(snapshot.path, draft.compare).snapshot();
+    const block = documentBlockAt(reviewSnapshot.blocks, change.compareRange.from);
+    setActiveReviewChangeId(change.id);
+    setSelection(range);
+    setSourceCursorTarget(undefined);
+    window.setTimeout(() => setSourceCursorTarget(range.from), 0);
+    if (block) {
+      setScrollOrigin('command');
+      setScrollAlignment('reveal');
+      setScrollProgress(Math.max(0, Math.min(1, (change.compareRange.from - block.from) / Math.max(1, block.to - block.from))));
+      setScrollTarget(block.id);
+    }
+  }
+
+  function selectReviewChange(changeId: string) {
+    if (review) navigateReviewChange(review, changeId);
+  }
+
+  function decideReviewChange(changeId: string, decision: 'accept' | 'reject') {
+    if (!review) return;
+    const decided = decideChange(review, changeId, decision);
+    setReview(decided);
+    const currentIndex = decided.changes.findIndex((change) => change.id === changeId);
+    const next = [...decided.changes.slice(currentIndex + 1), ...decided.changes.slice(0, currentIndex)]
+      .find((change) => change.decision === 'pending');
+    if (next) {
+      setActiveReviewChangeId(next.id);
+      window.requestAnimationFrame(() => navigateReviewChange(decided, next.id));
+    }
+    else setActiveReviewChangeId(changeId);
+  }
+
+  function decideAllReviewChanges(decision: 'accept' | 'reject') {
+    setReview((current) => current ? { ...current, changes: current.changes.map((change) => ({ ...change, decision })) } : current);
+  }
 
   const detachViewer = () => {
     const existing = detachedViewerWindow.current;
@@ -762,14 +921,14 @@ export function App() {
     setScrollTarget(id);
   }, []);
 
-  const viewerContent = snapshot ? (rightMode === 'visual'
-    ? <VisualEditor snapshot={snapshot} activeBlock={scrollTarget} scrollTarget={scrollOrigin === 'right' ? undefined : scrollTarget} scrollProgress={scrollProgress} scrollAlignment={scrollAlignment} fontFamily={settings.viewerFont} fontSize={settings.viewerFontSize} justified={settings.viewerJustified} onApply={applyVisualBlock} onNavigate={navigateFromRight} onScroll={handleViewerScroll}/>
-    : <Preview html={rendered?.html ?? ''} objectUrls={rendered?.objectUrls ?? EMPTY_WARNINGS} warnings={rendered?.warnings ?? EMPTY_WARNINGS} blocks={snapshot.blocks} search={search} regularExpression={regularExpression} activeBlock={scrollTarget} scrollTarget={scrollOrigin === 'right' ? undefined : scrollTarget} scrollProgress={scrollProgress} scrollAlignment={scrollAlignment} anchorTarget={previewAnchor} allowRemoteResources={settings.allowRemoteResources} fontFamily={settings.viewerFont} fontSize={settings.viewerFontSize} justified={settings.viewerJustified} trackChangesBaseHtml={trackChangesOpen ? renderedBaseHtml : undefined} comments={comments} activeCommentId={activeCommentId} onNavigate={navigateFromRight} onSelect={selectFromRight} onCommentActivate={(id) => { setInspector('comments'); navigateComment(id); }} onScroll={handleViewerScroll}/>) : null;
+  const viewerContent = presentedSnapshot ? (rightMode === 'visual' && !review
+    ? <VisualEditor snapshot={presentedSnapshot} activeBlock={scrollTarget} scrollTarget={scrollOrigin === 'right' ? undefined : scrollTarget} scrollProgress={scrollProgress} scrollAlignment={scrollAlignment} fontFamily={settings.viewerFont} fontSize={settings.viewerFontSize} justified={settings.viewerJustified} onApply={applyVisualBlock} onNavigate={navigateFromRight} onScroll={handleViewerScroll}/>
+    : <Preview html={rendered?.html ?? ''} objectUrls={rendered?.objectUrls ?? EMPTY_WARNINGS} warnings={rendered?.warnings ?? EMPTY_WARNINGS} blocks={previewSnapshot?.blocks ?? presentedSnapshot.blocks} search={search} regularExpression={regularExpression} activeBlock={scrollTarget} scrollTarget={scrollOrigin === 'right' ? undefined : scrollTarget} scrollProgress={scrollProgress} scrollAlignment={scrollAlignment} anchorTarget={previewAnchor} allowRemoteResources={settings.allowRemoteResources} fontFamily={settings.viewerFont} fontSize={settings.viewerFontSize} justified={settings.viewerJustified} trackChangesBaseHtml={trackedChangesVisible ? renderedBaseHtml : undefined} activeTrackChange={activeTrackChange} reviewChanges={renderedReviewChanges} reviewDecisions={renderedReviewDecisions} comments={review ? undefined : comments} activeCommentId={review ? undefined : activeCommentId} onNavigate={navigateFromRight} onSelect={selectFromRight} onCommentActivate={(id) => { setInspector('comments'); navigateComment(id); }} onScroll={handleViewerScroll}/>) : null;
 
   const viewerToolbar = (detached: boolean) => <div className="pane-title viewer-toolbar">
-    <div className="segmented"><button className={rightMode === 'visual' ? 'active' : ''} onClick={() => { setScrollOrigin('command'); setScrollAlignment('reveal'); setRightMode('visual'); }}>Visual</button><button className={rightMode === 'preview' ? 'active' : ''} onClick={() => { setScrollOrigin('command'); setScrollAlignment('reveal'); setRightMode('preview'); }}>Rendered</button></div>
+    <div className="segmented"><button disabled={Boolean(review)} className={rightMode === 'visual' && !review ? 'active' : ''} onClick={() => { setScrollOrigin('command'); setScrollAlignment('reveal'); setRightMode('visual'); }}>Visual</button><button className={rightMode === 'preview' || Boolean(review) ? 'active' : ''} onClick={() => { setScrollOrigin('command'); setScrollAlignment('reveal'); setRightMode('preview'); }}>Rendered</button></div>
     <button className={settings.viewerJustified ? 'viewer-option active' : 'viewer-option'} onClick={() => updateSettings({ ...settings, viewerJustified: !settings.viewerJustified })} title="Justify viewer text" aria-pressed={settings.viewerJustified}><AlignJustify size={14}/></button>
-    {rightMode === 'preview' && <button className={trackChangesOpen ? 'viewer-option active' : 'viewer-option'} disabled={!trackChangesOpen && (gitBase?.path !== snapshot?.path || gitBase?.source === snapshot?.source)} onClick={() => setTrackChangesOpen((open) => !open)} title={trackChangesOpen ? 'Hide tracked changes in both panes' : 'Show tracked changes in both panes'} aria-label={trackChangesOpen ? 'Hide tracked changes in both panes' : 'Show tracked changes in both panes'} aria-pressed={trackChangesOpen}><GitCompare size={14}/></button>}
+    {(rightMode === 'preview' || review) && <button className={trackedChangesVisible ? 'viewer-option active' : 'viewer-option'} disabled={Boolean(review) || (!trackChangesOpen && (gitBase?.path !== snapshot?.path || gitBase?.source === snapshot?.source))} onClick={() => setTrackChangesOpen((open) => !open)} title={review ? 'Branch changes are shown inline during review' : trackChangesOpen ? 'Hide tracked changes in both panes' : 'Show tracked changes in both panes'} aria-label={review ? 'Branch changes shown in both panes' : trackChangesOpen ? 'Hide tracked changes in both panes' : 'Show tracked changes in both panes'} aria-pressed={trackedChangesVisible}><GitCompare size={14}/></button>}
     <span className="spacer"/>
     <span>{Math.round(settings.viewerFontSize / 17 * 100)}% view · {rendered?.engine ?? 'source model'}</span>
     <button className="viewer-option" onClick={detached ? reattachViewer : detachViewer} title={detached ? 'Return viewer to the main window' : 'Detach viewer to another window'} aria-label={detached ? 'Reattach viewer' : 'Detach viewer'}>{detached ? <Columns2 size={15}/> : <ExternalLink size={15}/>}</button>
@@ -806,16 +965,16 @@ export function App() {
     </aside>
 
     <main className={`workspace ${detachedViewerRoot ? 'viewer-detached' : ''}`} ref={workspacePane} style={{ '--source-width': `${settings.sourcePaneRatio * 100}%` } as CSSProperties}>
-      {!snapshot ? <div className="welcome"><BrandMark className="welcome-symbol"/><h1>Your local writing workspace</h1><p>Choose a folder, then open a Markdown or QMD file. Source, preview, comments, and Git stay together on this device.</p>{!workspace && <button className="primary" onClick={() => void chooseFolder()}>Open folder</button>}</div>
+      {!presentedSnapshot ? <div className="welcome"><BrandMark className="welcome-symbol"/><h1>Your local writing workspace</h1><p>Choose a folder, then open a Markdown or QMD file. Source, preview, comments, and Git stay together on this device.</p>{!workspace && <button className="primary" onClick={() => void chooseFolder()}>Open folder</button>}</div>
       : <>
-        <section className="pane source-pane"><div className="pane-title"><Code2 size={15}/><span>Source</span><button className={trackChangesOpen ? 'viewer-option active' : 'viewer-option'} disabled={!trackChangesOpen && (gitBase?.path !== snapshot.path || gitBase.source === snapshot.source)} onClick={() => setTrackChangesOpen((open) => !open)} title={trackChangesOpen ? 'Hide tracked changes in both panes' : 'Show tracked changes in both panes'} aria-label={trackChangesOpen ? 'Hide tracked changes in both panes' : 'Show tracked changes in both panes'} aria-pressed={trackChangesOpen}><GitCompare size={14}/></button><span className="spacer"/>{detachedViewerRoot && <><button className="detached-indicator" onClick={() => detachedViewerWindow.current?.focus()} title="Focus the detached viewer"><ExternalLink size={13}/>Viewer detached</button><button className="viewer-option" onClick={reattachViewer} title="Return viewer to this window" aria-label="Reattach viewer"><Columns2 size={15}/></button></>}<span>{settings.sourceFontSize}px · Ln {lineAt(snapshot.source, selection.from)}</span></div><SourceEditor path={snapshot.path} workspacePaths={entries.map((entry) => entry.path)} value={snapshot.source} comparisonBase={gitBase?.path === snapshot.path ? gitBase.source : undefined} showTrackChanges={trackChangesOpen} blocks={snapshot.blocks} search={search} regularExpression={regularExpression} dark={dark} fontFamily={settings.sourceFont} fontSize={settings.sourceFontSize} activeBlock={scrollTarget} scrollTarget={scrollOrigin === 'source' ? undefined : scrollTarget} scrollProgress={scrollProgress} scrollAlignment={scrollAlignment} cursorTarget={sourceCursorTarget} goToLine={goToLine} onChange={applySource} onSelection={selectSource} onScroll={(id, progress) => { setSourceCursorTarget(undefined); setScrollOrigin('source'); setScrollAlignment('center'); setScrollProgress(progress); setScrollTarget(id); }} onSave={() => void explicitSave()} onFind={() => setFindOpen(true)}/></section>
+        <section className="pane source-pane"><div className="pane-title"><Code2 size={15}/><span>{review ? 'Source · branch review' : 'Source'}</span><button className={trackedChangesVisible ? 'viewer-option active' : 'viewer-option'} disabled={Boolean(review) || (!trackChangesOpen && (gitBase?.path !== presentedSnapshot.path || gitBase?.source === presentedSnapshot.source))} onClick={() => setTrackChangesOpen((open) => !open)} title={review ? 'Branch changes are shown inline during review' : trackChangesOpen ? 'Hide tracked changes in both panes' : 'Show tracked changes in both panes'} aria-label={review ? 'Branch changes shown in both panes' : trackChangesOpen ? 'Hide tracked changes in both panes' : 'Show tracked changes in both panes'} aria-pressed={trackedChangesVisible}><GitCompare size={14}/></button><span className="spacer"/>{detachedViewerRoot && <><button className="detached-indicator" onClick={() => detachedViewerWindow.current?.focus()} title="Focus the detached viewer"><ExternalLink size={13}/>Viewer detached</button><button className="viewer-option" onClick={reattachViewer} title="Return viewer to this window" aria-label="Reattach viewer"><Columns2 size={15}/></button></>}<span>{settings.sourceFontSize}px · Ln {lineAt(presentedSnapshot.source, selection.from)}</span></div><SourceEditor path={presentedSnapshot.path} workspacePaths={entries.map((entry) => entry.path)} value={presentedSnapshot.source} comparisonBase={review ? undefined : comparisonBaseSource} trackChangesOverride={reviewTrackChanges} showTrackChanges={trackedChangesVisible} activeTrackChange={activeSourceTrackChange} readOnly={Boolean(review)} blocks={presentedSnapshot.blocks} search={search} regularExpression={regularExpression} dark={dark} fontFamily={settings.sourceFont} fontSize={settings.sourceFontSize} activeBlock={sourceScrollLocation.target} scrollTarget={scrollOrigin === 'source' ? undefined : sourceScrollLocation.target} scrollProgress={sourceScrollLocation.progress} scrollAlignment={scrollAlignment} cursorTarget={sourceCursorTarget} goToLine={goToLine} onChange={applySource} onSelection={selectSource} onTrackChangeActivate={selectReviewChange} onScroll={navigateFromSourceScroll} onSave={() => void explicitSave()} onFind={() => setFindOpen(true)}/></section>
         {!detachedViewerRoot && <><PaneResizer label="Resize source and viewer panes" value={settings.sourcePaneRatio} min={0.25} max={0.75} keyboardStep={0.02} pixelsPerUnit={() => workspacePane.current?.clientWidth ?? 1} onChange={(value, finished) => resizeLayout({ sourcePaneRatio: value }, finished)}/><section className="pane right-pane">{viewerToolbar(false)}<div className="right-scroll">{viewerContent}</div></section></>}
       </>}
     </main>
 
-    {inspector && <aside className="inspector"><div className="inspector-head"><strong>{panelTitle(inspector)}</strong><button onClick={() => setInspector(undefined)}><PanelRight size={16}/></button></div>
+    {inspector && <aside className="inspector"><div className="inspector-head"><strong>{panelTitle(inspector)}</strong><button onClick={() => { if (inspector === 'review') { reviewAttributionRequest.current += 1; setReviewAttributionBusy(false); setReview(undefined); setActiveReviewChangeId(undefined); } setInspector(undefined); }}><PanelRight size={16}/></button></div>
       {inspector === 'git' && <GitPanel git={git} error={gitError} status={gitStatus} branches={branches} currentBranch={currentBranch} history={history} dirty={snapshot?.dirty ?? false} message={commitMessage} setMessage={setCommitMessage} onStage={stage} onCommit={createCommit} onRefresh={refreshGit} onCheckout={checkoutBranch} onCreateBranch={createBranch} onRenameBranch={renameBranch} onDeleteBranch={deleteBranch} onMerge={mergeBranch} onCompare={compareBranch}/>}
-      {inspector === 'review' && <ReviewPanel draft={review} onDecide={(id, decision) => review && setReview(decideChange(review, id, decision))} onApply={applyReview}/>}
+      {inspector === 'review' && <ReviewPanel draft={review} activeChangeId={activeReviewChangeId} attributionBusy={reviewAttributionBusy} onSelect={selectReviewChange} onDecide={decideReviewChange} onDecideAll={decideAllReviewChanges} onApply={applyReview}/>}
       {inspector === 'comments' && <CommentsPanel
         parsed={comments}
         activeId={activeCommentId}
@@ -850,10 +1009,23 @@ function GitPanel({ git, error, status, branches, currentBranch, history, dirty,
   return <div className="inspector-body"><div className="section-label"><span>{currentBranch ? `Branch · ${currentBranch}` : 'Detached HEAD'}</span><button onClick={() => void onRefresh()}><RefreshCw size={13}/></button></div><div className="branch-tools"><select value={selected} onChange={(event) => setSelectedBranch(event.target.value)}>{candidates.map((branch) => <option key={branch}>{branch}</option>)}</select><button disabled={!selected || dirty} onClick={() => void onCheckout(selected)}>Checkout</button><button disabled={!selected || dirty} onClick={() => void onCompare(selected)}><GitCompare size={13}/>Compare</button><button disabled={!selected || dirty} onClick={() => void onMerge(selected)}>Merge</button><button disabled={!selected || dirty} onClick={() => void onDeleteBranch(selected)}>Delete</button></div><div className="branch-create"><input value={newBranch} onChange={(event) => setNewBranch(event.target.value)} placeholder="new-branch"/><button disabled={!newBranch.trim()} onClick={() => { void onCreateBranch(newBranch.trim()); setNewBranch(''); }}>Create</button></div>{currentBranch && <div className="branch-create"><input value={renamedBranch} onChange={(event) => setRenamedBranch(event.target.value)} placeholder={`rename ${currentBranch}`}/><button disabled={dirty || !renamedBranch.trim() || renamedBranch.trim() === currentBranch} onClick={() => { void onRenameBranch(currentBranch, renamedBranch.trim()); setRenamedBranch(''); }}>Rename</button></div>}<div className="section-label"><span>Changes · {changed.length}</span></div>{dirty && <p className="warning">Save the open document before staging.</p>}<div className="change-list">{changed.map((item) => { const staged = item.state === 'staged' || item.state === 'added'; return <div key={item.path}><span className={`status-code ${item.state}`}>{statusLetter(item.state)}</span><button className="path-button" title={`Show diff for ${item.path}`} onClick={() => void git.diff(item.path).then((text) => setDiff({ path: item.path, text }))}>{item.path}</button><button disabled={dirty} onClick={() => void onStage(item.path, staged)}>{staged ? <Undo2 size={13}/> : <Check size={13}/>}</button></div>; })}</div>{diff && <div className="git-diff"><header><span>{diff.path}</span><button onClick={() => setDiff(undefined)}><X size={12}/></button></header><pre>{diff.text}</pre></div>}<label className="field"><span>Commit message</span><textarea value={message} onChange={(event) => setMessage(event.target.value)} rows={3}/></label><button className="primary wide" disabled={!message.trim() || dirty} onClick={() => void onCommit()}><GitCommitHorizontal size={15}/>Commit staged changes</button><div className="section-label history-label"><span>History</span></div><div className="history-list">{history.slice(0, 8).map((entry) => <div key={entry.oid}><code>{entry.oid.slice(0, 7)}</code><span>{entry.message.split('\n')[0]}</span><small>{entry.author.displayName}</small></div>)}</div><p className="microcopy">Local repository only. Markroot never contacts a remote.</p></div>;
 }
 
-function ReviewPanel({ draft, onDecide, onApply }: { draft: ReviewDraft | undefined; onDecide(id: string, decision: 'accept' | 'reject'): void; onApply(): void | Promise<void> }) {
+function ReviewPanel({ draft, activeChangeId, attributionBusy, onSelect, onDecide, onDecideAll, onApply }: { draft: ReviewDraft | undefined; activeChangeId: string | undefined; attributionBusy: boolean; onSelect(id: string): void; onDecide(id: string, decision: 'accept' | 'reject'): void; onDecideAll(decision: 'accept' | 'reject'): void; onApply(): void | Promise<void> }) {
   if (!draft) return <div className="panel-empty"><GitCompare size={24}/><p>No branch comparison is open.</p></div>;
   const pending = draft.changes.filter((change) => change.decision === 'pending').length;
-  return <div className="inspector-body"><p>{draft.changes.length} tracked change(s). Accept includes the compared branch; reject retains the current branch.</p><div className="review-list">{draft.changes.map((change) => <article key={change.id} className={change.decision}><div className="tracked-text">{change.segments.map((segment, index) => <span key={index} className={segment.kind}>{segment.value || '∅'}</span>)}</div><div className="review-meta"><span>{change.authors.map((author) => author.displayName).join(', ') || 'Unknown author'}</span><div><button className={change.decision === 'accept' ? 'selected' : ''} onClick={() => onDecide(change.id, 'accept')}>Accept</button><button className={change.decision === 'reject' ? 'selected' : ''} onClick={() => onDecide(change.id, 'reject')}>Reject</button></div></div></article>)}</div><button className="primary wide" disabled={pending > 0} onClick={onApply}>Apply reviewed result</button>{pending > 0 && <p className="microcopy">{pending} change(s) still need a decision.</p>}</div>;
+  const activeIndex = Math.max(0, draft.changes.findIndex((change) => change.id === activeChangeId));
+  const active = draft.changes[activeIndex]!;
+  const selectOffset = (offset: number) => onSelect(draft.changes[(activeIndex + offset + draft.changes.length) % draft.changes.length]!.id);
+  const author = active.authors.map((identity) => identity.displayName).join(', ') || (attributionBusy ? 'Finding author…' : 'Unknown author');
+  return <div className="inspector-body review-controls">
+    <p>{draft.changes.length} tracked change(s) are shown directly in the Source and Rendered text. The selected change is bold, and each decision updates the text immediately.</p>
+    <div className="review-legend"><span><i className="insert"/>Compared branch</span><span><i className="delete"/>Current branch</span></div>
+    <div className="review-navigator"><button onClick={() => selectOffset(-1)} aria-label="Previous tracked change">←</button><strong>Change {activeIndex + 1} of {draft.changes.length}</strong><button onClick={() => selectOffset(1)} aria-label="Next tracked change">→</button></div>
+    <p className="review-author">{author} · {active.decision === 'pending' ? 'Needs decision' : active.decision === 'accept' ? 'Compared branch accepted' : 'Current branch retained'}</p>
+    <div className="review-decision"><button className={active.decision === 'accept' ? 'selected' : ''} onClick={() => onDecide(active.id, 'accept')}>Accept change</button><button className={active.decision === 'reject' ? 'selected reject' : ''} onClick={() => onDecide(active.id, 'reject')}>Reject change</button></div>
+    <div className="review-bulk"><button onClick={() => onDecideAll('accept')}>Accept all</button><button onClick={() => onDecideAll('reject')}>Reject all</button></div>
+    <button className="primary wide" disabled={pending > 0} onClick={onApply}>Apply reviewed result</button>
+    {pending > 0 && <p className="microcopy">{pending} change(s) still need a decision.</p>}
+  </div>;
 }
 
 function CommentsPanel({ parsed, activeId, selection, body, setBody, replies, setReplies, onAdd, onNavigate, onRepair, onReply, onStatus, onDelete }: { parsed: ReturnType<typeof parseComments> | undefined; activeId: string | undefined; selection: SourceRange; body: string; setBody(value: string): void; replies: Record<string, string>; setReplies(value: Record<string, string>): void; onAdd(): void; onNavigate(id: string): void; onRepair(id: string): void; onReply(id: string): void; onStatus(id: string, status: 'open' | 'resolved'): void; onDelete(id: string): void }) {
@@ -1033,19 +1205,44 @@ async function copyText(value: string): Promise<void> {
 function fileBasename(path: string): string { return (path.split('/').at(-1) ?? 'document').replace(/\.(?:md|qmd)$/i, ''); }
 function exportMime(format: ExportFormat): string { return format === 'html' ? 'text/html' : format === 'docx' ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' : 'application/pdf'; }
 
-async function attributeReviewChanges(git: IsomorphicGitRepository, path: WorkspacePath, ref: string, draft: ReviewDraft): Promise<ReadonlyMap<string, readonly GitCommitSummary['author'][]>> {
-  const commits = [...await git.history(100, ref)].reverse();
+async function attributeReviewChanges(git: IsomorphicGitRepository, path: WorkspacePath, ref: string, draft: ReviewDraft, cancelled: () => boolean): Promise<ReadonlyMap<string, readonly GitCommitSummary['author'][]>> {
+  const commits = [...await git.history(50, ref)].reverse();
   const contents = await Promise.all(commits.map((entry) => git.readFileAtRef(path, entry.oid).catch(() => '')));
   const result = new Map<string, readonly GitCommitSummary['author'][]>();
-  for (const change of draft.changes) {
-    let previous = '';
-    for (let index = 0; index < commits.length; index += 1) {
-      const current = contents[index] ?? '';
-      const insertedHere = Boolean(change.compareText) && current.includes(change.compareText) && !previous.includes(change.compareText);
-      const deletedHere = Boolean(change.baseText) && previous.includes(change.baseText) && !current.includes(change.baseText);
-      if (insertedHere || deletedHere) result.set(change.id, [commits[index]!.author]);
-      previous = current;
+  const probes = draft.changes.map((change) => ({
+    id: change.id,
+    added: change.compareText ? attributionProbe(draft.compare, change.compareRange.from, change.compareText) : '',
+    removed: change.baseText ? attributionProbe(draft.base, change.baseRange.from, change.baseText) : '',
+  }));
+  let previous = '';
+  for (let index = 0; index < commits.length; index += 1) {
+    if (cancelled()) return result;
+    const current = contents[index] ?? '';
+    const parts = diffLines(previous, current);
+    const added = parts.filter((part) => part.added).map((part) => part.value).join('\n');
+    const removed = parts.filter((part) => part.removed).map((part) => part.value).join('\n');
+    for (const probe of probes) {
+      if (changeTextAppearsIn(probe.added, added) || changeTextAppearsIn(probe.removed, removed)) result.set(probe.id, [commits[index]!.author]);
     }
+    previous = current;
+    if (index % 3 === 2) await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
   }
   return result;
+}
+
+function attributionProbe(source: string, offset: number, fallback: string): string {
+  const start = source.lastIndexOf('\n', Math.max(0, offset - 1)) + 1;
+  const endIndex = source.indexOf('\n', offset);
+  const end = endIndex < 0 ? source.length : endIndex;
+  const line = source.slice(start, end).trim();
+  if (!line) return fallback.trim();
+  if (line.length <= 240) return line;
+  const center = Math.max(0, Math.min(line.length, offset - start));
+  return line.slice(Math.max(0, center - 120), Math.min(line.length, center + 120));
+}
+
+function changeTextAppearsIn(changeText: string, changedLines: string): boolean {
+  const value = changeText.trim();
+  if (!value) return false;
+  return changedLines.includes(value);
 }

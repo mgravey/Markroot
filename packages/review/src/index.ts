@@ -21,6 +21,11 @@ export interface ReviewDraft {
   readonly changes: readonly ReviewChange[];
   readonly pieces: readonly ReviewPiece[];
 }
+export interface ReviewPresentation {
+  readonly current: string;
+  readonly base: string;
+  readonly ranges: ReadonlyMap<string, SourceRange>;
+}
 
 export function createReviewDraft(base: string, compare: string, baseFingerprint: string, attribution: ReadonlyMap<string, readonly AuthorIdentity[]> = new Map()): ReviewDraft {
   const parts = diffWordsWithSpace(base, compare);
@@ -82,6 +87,79 @@ export function materializeReview(draft: ReviewDraft): string {
     const change = changes.get(piece.changeId!)!;
     return change.decision === 'accept' ? change.compareText : change.baseText;
   }).join('');
+}
+
+export function materializeReviewPresentation(draft: ReviewDraft): ReviewPresentation {
+  const changes = new Map(draft.changes.map((change) => [change.id, change]));
+  const current: string[] = [];
+  const base: string[] = [];
+  const ranges = new Map<string, SourceRange>();
+  let currentOffset = 0;
+  for (const piece of draft.pieces) {
+    if (piece.common !== undefined) {
+      current.push(piece.common);
+      base.push(piece.common);
+      currentOffset += piece.common.length;
+      continue;
+    }
+    const change = changes.get(piece.changeId!)!;
+    const currentText = change.decision === 'reject' ? change.baseText : change.compareText;
+    const baseText = change.decision === 'pending' ? change.baseText : currentText;
+    ranges.set(change.id, { from: currentOffset, to: currentOffset + currentText.length });
+    current.push(currentText);
+    base.push(baseText);
+    currentOffset += currentText.length;
+  }
+  return { current: current.join(''), base: base.join(''), ranges };
+}
+
+/** Maps a source offset in the compared branch to the live review presentation. */
+export function mapReviewCompareOffset(draft: ReviewDraft, offset: number): number {
+  return mapReviewOffset(draft, offset, 'compare');
+}
+
+/** Maps a source offset in the live review presentation back to the compared branch. */
+export function mapReviewCurrentOffset(draft: ReviewDraft, offset: number): number {
+  return mapReviewOffset(draft, offset, 'current');
+}
+
+function mapReviewOffset(draft: ReviewDraft, requestedOffset: number, origin: 'compare' | 'current'): number {
+  const changes = new Map(draft.changes.map((change) => [change.id, change]));
+  const currentLength = draft.pieces.reduce((length, piece) => {
+    if (piece.common !== undefined) return length + piece.common.length;
+    const change = changes.get(piece.changeId!)!;
+    return length + (change.decision === 'reject' ? change.baseText.length : change.compareText.length);
+  }, 0);
+  const offset = Math.max(0, Math.min(requestedOffset, origin === 'compare' ? draft.compare.length : currentLength));
+  let compareOffset = 0;
+  let currentOffset = 0;
+
+  for (const piece of draft.pieces) {
+    if (piece.common !== undefined) {
+      const originStart = origin === 'compare' ? compareOffset : currentOffset;
+      if (offset <= originStart + piece.common.length) {
+        return (origin === 'compare' ? currentOffset : compareOffset) + offset - originStart;
+      }
+      compareOffset += piece.common.length;
+      currentOffset += piece.common.length;
+      continue;
+    }
+
+    const change = changes.get(piece.changeId!)!;
+    const compareLength = change.compareText.length;
+    const presentedLength = (change.decision === 'reject' ? change.baseText : change.compareText).length;
+    const originStart = origin === 'compare' ? compareOffset : currentOffset;
+    const originLength = origin === 'compare' ? compareLength : presentedLength;
+    if (offset <= originStart + originLength) {
+      const targetStart = origin === 'compare' ? currentOffset : compareOffset;
+      const targetLength = origin === 'compare' ? presentedLength : compareLength;
+      if (!originLength) return targetStart;
+      return targetStart + Math.round((offset - originStart) / originLength * targetLength);
+    }
+    compareOffset += compareLength;
+    currentOffset += presentedLength;
+  }
+  return origin === 'compare' ? currentOffset : compareOffset;
 }
 
 function toSegment(part: Change): ReviewSegment {

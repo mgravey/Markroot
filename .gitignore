@@ -34,6 +34,12 @@ vite.config.*.timestamp-*
 .visual-regression/
 # Local synchronized tracked-changes captures
 .markroot-ui-captures/
+# Local branch-review captures
+.markroot-branch-review-debug/
+# Local branch-review performance profiles
+.markroot-review-profile/
+# Local review navigation and scroll-anchor captures
+.markroot-review-navigation-debug/
 # Local rendered-selection debugging captures
 .markroot-comment-selection-debug/
 # Local comment-gutter layout captures

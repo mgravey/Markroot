@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { workspacePath } from '@markroot/core';
-import { DocumentSession, mapDocumentBlocks, searchDocument } from './index.js';
+import { documentBlockAt, DocumentSession, mapDocumentBlocks, searchDocument } from './index.js';
 
 describe('DocumentSession', () => {
   it('maps mixed Markdown and guards revisions', () => {
@@ -12,5 +12,13 @@ describe('DocumentSession', () => {
     expect(session.snapshot().source).toContain('Prose with');
     expect(searchDocument(session.snapshot(), 'prose')).toHaveLength(1);
     expect(() => session.apply({ from: 0, to: 0, insert: 'x', origin: 'source', baseRevision: 0 })).toThrow(/stale/i);
+  });
+
+  it('selects the following block at a source boundary or blank-line gap', () => {
+    const blocks = mapDocumentBlocks('# First\n# Second\n\nThird\n');
+    const second = blocks[1]!;
+    const third = blocks[2]!;
+    expect(documentBlockAt(blocks, second.from)?.id).toBe(second.id);
+    expect(documentBlockAt(blocks, second.to + 1)?.id).toBe(third.id);
   });
 });

@@ -6,7 +6,7 @@ import { SearchQuery, setSearchQuery } from '@codemirror/search';
 import { Compartment, EditorState, RangeSet, RangeSetBuilder, StateEffect, StateField, type Extension, type Text } from '@codemirror/state';
 import { Decoration, EditorView, GutterMarker, WidgetType, gutter, keymap, type DecorationSet } from '@codemirror/view';
 import { tags } from '@lezer/highlight';
-import type { DocumentBlock } from '@markroot/document';
+import { documentBlockAt, type DocumentBlock } from '@markroot/document';
 import { relativeWorkspaceReference, type SourceRange, type WorkspacePath } from '@markroot/core';
 import { isScrollKey, ScrollIntentGate, viewportCenter } from './scroll-sync.js';
 import { editorLineChanges, type EditorLineChange, type EditorLineChangeKind } from '../editor-line-changes.js';
@@ -17,7 +17,10 @@ interface Props {
   workspacePaths: readonly WorkspacePath[];
   value: string;
   comparisonBase?: string | undefined;
+  trackChangesOverride?: readonly EditorTrackChange[] | undefined;
   showTrackChanges: boolean;
+  activeTrackChange?: Readonly<{ from: number; to: number; baseText: string }> | undefined;
+  readOnly: boolean;
   blocks: readonly DocumentBlock[];
   search: string;
   regularExpression: boolean;
@@ -32,6 +35,7 @@ interface Props {
   goToLine?: number | undefined;
   onChange(value: string): void;
   onSelection(range: SourceRange): void;
+  onTrackChangeActivate?(changeId: string): void;
   onScroll(blockId: string, progress: number): void;
   onSave(): void;
   onFind(): void;
@@ -43,9 +47,10 @@ export function SourceEditor(props: Props) {
   const changing = useRef(false);
   const scrollIntent = useRef(new ScrollIntentGate());
   const appearance = useRef(new Compartment());
+  const editing = useRef(new Compartment());
   const latest = useRef(props);
   const lineChanges = useMemo(() => editorLineChanges(props.comparisonBase, props.value), [props.comparisonBase, props.value]);
-  const trackChanges = useMemo(() => props.showTrackChanges ? editorTrackChanges(props.comparisonBase, props.value) : [], [props.showTrackChanges, props.comparisonBase, props.value]);
+  const trackChanges = useMemo(() => props.showTrackChanges ? props.trackChangesOverride ?? editorTrackChanges(props.comparisonBase, props.value) : [], [props.showTrackChanges, props.trackChangesOverride, props.comparisonBase, props.value]);
   latest.current = props;
 
   useEffect(() => {
@@ -87,9 +92,21 @@ export function SourceEditor(props: Props) {
       activeBlockField,
       lineChangeGutter,
       trackChangesField,
+      activeTrackChangeField,
+      editing.current.of([EditorState.readOnly.of(props.readOnly), EditorView.editable.of(!props.readOnly)]),
       appearance.current.of(editorAppearance(props.dark, props.fontFamily, props.fontSize)),
     ];
     const editor = new EditorView({ state: EditorState.create({ doc: props.value, extensions }), parent: host.current });
+    const activateTrackChange = (event: MouseEvent) => {
+      const ElementClass = editor.dom.ownerDocument.defaultView?.HTMLElement;
+      const target = ElementClass
+        ? event.composedPath().find((item): item is HTMLElement => item instanceof ElementClass && Boolean(item.dataset.reviewChangeId))
+        : undefined;
+      if (!target?.dataset.reviewChangeId || !latest.current.onTrackChangeActivate) return;
+      event.preventDefault();
+      event.stopPropagation();
+      latest.current.onTrackChangeActivate(target.dataset.reviewChangeId);
+    };
     let frame = 0;
     const onScroll = () => {
       if (!scrollIntent.current.shouldPublish()) return;
@@ -98,7 +115,7 @@ export function SourceEditor(props: Props) {
       frame = requestAnimationFrame(() => {
         const viewport = editor.scrollDOM.getBoundingClientRect();
         const position = editor.posAtCoords({ x: viewport.left + Math.min(80, viewport.width / 2), y: viewportCenter(viewport) }) ?? editor.viewport.from;
-        const block = latest.current.blocks.find((candidate) => position >= candidate.from && position <= candidate.to) ?? latest.current.blocks.at(-1);
+        const block = documentBlockAt(latest.current.blocks, position);
         if (!block) return;
         latest.current.onScroll(block.id, Math.max(0, Math.min(1, (position - block.from) / Math.max(1, block.to - block.from))));
       });
@@ -111,6 +128,7 @@ export function SourceEditor(props: Props) {
     editor.scrollDOM.addEventListener('wheel', markWheel, { passive: true });
     editor.scrollDOM.addEventListener('pointerdown', beginPointer, { passive: true });
     editor.scrollDOM.addEventListener('keydown', markKeyboard);
+    editor.dom.addEventListener('click', activateTrackChange, true);
     window.addEventListener('pointerup', endPointer, { passive: true });
     window.addEventListener('pointercancel', endPointer, { passive: true });
     view.current = editor;
@@ -120,6 +138,7 @@ export function SourceEditor(props: Props) {
       editor.scrollDOM.removeEventListener('wheel', markWheel);
       editor.scrollDOM.removeEventListener('pointerdown', beginPointer);
       editor.scrollDOM.removeEventListener('keydown', markKeyboard);
+      editor.dom.removeEventListener('click', activateTrackChange, true);
       window.removeEventListener('pointerup', endPointer);
       window.removeEventListener('pointercancel', endPointer);
       editor.destroy();
@@ -132,10 +151,17 @@ export function SourceEditor(props: Props) {
   }, [props.dark, props.fontFamily, props.fontSize]);
 
   useEffect(() => {
+    view.current?.dispatch({ effects: editing.current.reconfigure([EditorState.readOnly.of(props.readOnly), EditorView.editable.of(!props.readOnly)]) });
+  }, [props.readOnly]);
+
+  useEffect(() => {
     const editor = view.current;
-    if (!editor || editor.state.doc.toString() === props.value) return;
+    if (!editor) return;
+    const previous = editor.state.doc.toString();
+    if (previous === props.value) return;
+    const change = minimalDocumentChange(previous, props.value);
     changing.current = true;
-    editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: props.value } });
+    editor.dispatch({ changes: change });
     changing.current = false;
   }, [props.value]);
 
@@ -144,8 +170,12 @@ export function SourceEditor(props: Props) {
   }, [lineChanges]);
 
   useEffect(() => {
-    view.current?.dispatch({ effects: setTrackChanges.of(trackChanges) });
-  }, [trackChanges]);
+    view.current?.dispatch({ effects: setTrackChanges.of({ changes: trackChanges, active: props.activeTrackChange }) });
+  }, [trackChanges, props.activeTrackChange]);
+
+  useEffect(() => {
+    view.current?.dispatch({ effects: setActiveTrackChange.of(props.activeTrackChange) });
+  }, [props.activeTrackChange]);
 
   useEffect(() => {
     const editor = view.current;
@@ -201,6 +231,19 @@ export function SourceEditor(props: Props) {
   return <div className="source-editor" ref={host} aria-label="Markdown source editor" />;
 }
 
+function minimalDocumentChange(previous: string, next: string): { readonly from: number; readonly to: number; readonly insert: string } {
+  let from = 0;
+  const shared = Math.min(previous.length, next.length);
+  while (from < shared && previous.charCodeAt(from) === next.charCodeAt(from)) from += 1;
+  let previousTo = previous.length;
+  let nextTo = next.length;
+  while (previousTo > from && nextTo > from && previous.charCodeAt(previousTo - 1) === next.charCodeAt(nextTo - 1)) {
+    previousTo -= 1;
+    nextTo -= 1;
+  }
+  return { from, to: previousTo, insert: next.slice(from, nextTo) };
+}
+
 const setActiveBlock = StateEffect.define<SourceRange | undefined>();
 const activeBlockField = StateField.define<DecorationSet>({
   create: () => Decoration.none,
@@ -238,16 +281,19 @@ const lineChangeGutter = [
   gutter({ class: 'cm-line-change-gutter', markers: (view) => view.state.field(lineChangeField) }),
 ];
 
-const setTrackChanges = StateEffect.define<readonly EditorTrackChange[]>();
+type ActiveTrackChange = Readonly<{ from: number; to: number; baseText: string }>;
+const setTrackChanges = StateEffect.define<Readonly<{ changes: readonly EditorTrackChange[]; active?: ActiveTrackChange | undefined }>>();
+const setActiveTrackChange = StateEffect.define<ActiveTrackChange | undefined>();
 
 class DeletedTextWidget extends WidgetType {
-  constructor(readonly value: string) { super(); }
-  eq(other: DeletedTextWidget) { return this.value === other.value; }
+  constructor(readonly value: string, readonly active: boolean, readonly changeId?: string) { super(); }
+  eq(other: DeletedTextWidget) { return this.value === other.value && this.active === other.active && this.changeId === other.changeId; }
   toDOM() {
     const deleted = document.createElement('span');
-    deleted.className = 'cm-track-delete';
+    deleted.className = `cm-track-delete${this.active ? ' cm-review-active' : ''}`;
     deleted.textContent = this.value.replaceAll('\n', ' ↵ ');
     deleted.title = 'Deleted text';
+    if (this.changeId) deleted.dataset.reviewChangeId = this.changeId;
     return deleted;
   }
   ignoreEvent() { return true; }
@@ -257,16 +303,31 @@ const trackChangesField = StateField.define<DecorationSet>({
   create: () => Decoration.none,
   update(decorations, transaction) {
     let next = decorations.map(transaction.changes);
-    for (const effect of transaction.effects) if (effect.is(setTrackChanges)) next = trackChangeDecorations(effect.value);
+    for (const effect of transaction.effects) if (effect.is(setTrackChanges)) next = trackChangeDecorations(effect.value.changes, effect.value.active);
     return next;
   },
   provide: (field) => EditorView.decorations.from(field),
 });
 
-function trackChangeDecorations(changes: readonly EditorTrackChange[]): DecorationSet {
+const activeTrackChangeField = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(decorations, transaction) {
+    let next = decorations.map(transaction.changes);
+    for (const effect of transaction.effects) if (effect.is(setActiveTrackChange)) {
+      const active = effect.value;
+      next = active && active.from < active.to
+        ? Decoration.set([Decoration.mark({ class: 'cm-review-active' }).range(active.from, active.to)])
+        : Decoration.none;
+    }
+    return next;
+  },
+  provide: (field) => EditorView.decorations.from(field),
+});
+
+function trackChangeDecorations(changes: readonly EditorTrackChange[], active?: ActiveTrackChange): DecorationSet {
   return Decoration.set(changes.map((change) => change.kind === 'insert'
-    ? Decoration.mark({ class: 'cm-track-insert', attributes: { title: 'Added text' } }).range(change.from, change.to)
-    : Decoration.widget({ widget: new DeletedTextWidget(change.value), side: -1 }).range(change.at)), true);
+    ? Decoration.mark({ class: `cm-track-insert${active && change.from < active.to && change.to > active.from ? ' cm-review-active' : ''}`, attributes: { title: 'Added text', ...(change.changeId ? { 'data-review-change-id': change.changeId } : {}) } }).range(change.from, change.to)
+    : Decoration.widget({ widget: new DeletedTextWidget(change.value, Boolean(active && change.at === active.from && active.baseText.includes(change.value)), change.changeId), side: -1 }).range(change.at)), true);
 }
 
 function lineChangeMarkers(document: Text, changes: readonly EditorLineChange[]): RangeSet<GutterMarker> {
@@ -305,6 +366,7 @@ function editorTheme(dark: boolean, fontFamily: Props['fontFamily'], fontSize: n
     '.cm-line-change-marker.deleted': { alignSelf: 'flex-start', width: `${4 * scale}px`, minHeight: `${3 * scale}px`, marginTop: `${2 * scale}px`, backgroundColor: 'var(--danger)', borderRadius: `0 ${2 * scale}px ${2 * scale}px 0` },
     '.cm-track-insert': { color: 'var(--accent-strong)', backgroundColor: 'var(--accent-soft)', textDecoration: 'underline', textDecorationColor: 'var(--accent)', textUnderlineOffset: `${2 * scale}px`, borderRadius: `${2 * scale}px` },
     '.cm-track-delete': { color: 'var(--danger)', backgroundColor: 'var(--danger-soft)', textDecoration: 'line-through', textDecorationThickness: `${1.5 * scale}px`, margin: `0 ${1 * scale}px`, padding: `0 ${1.5 * scale}px`, borderRadius: `${2 * scale}px`, whiteSpace: 'pre-wrap' },
+    '.cm-review-active': { fontWeight: '700' },
     '.cm-content': { padding: `${24 * scale}px ${12 * scale}px ${64 * scale}px` },
     '.cm-activeLine, .cm-activeLineGutter': { backgroundColor: 'var(--active-line)' },
     '.cm-current-block': { backgroundColor: 'color-mix(in srgb, var(--accent) 9%, transparent)', boxShadow: `inset ${3 * scale}px 0 0 var(--accent)` },

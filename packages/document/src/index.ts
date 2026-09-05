@@ -173,6 +173,13 @@ export function mapDocumentBlocks(source: string): readonly DocumentBlock[] {
   return Object.freeze(blocks);
 }
 
+/** Finds the block owning a source position, preferring the following block at boundaries and gaps. */
+export function documentBlockAt(blocks: readonly DocumentBlock[], position: number): DocumentBlock | undefined {
+  return blocks.find((block) => position >= block.from && position < block.to)
+    ?? blocks.find((block) => block.from >= position)
+    ?? blocks.at(-1);
+}
+
 function classify(trimmed: string): DocumentBlockKind {
   if (/^#{1,6}\s/.test(trimmed)) return 'heading';
   if (/^(?:[-*+] |\d+[.)] )/.test(trimmed)) return 'list';
