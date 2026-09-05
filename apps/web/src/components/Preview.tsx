@@ -148,7 +148,7 @@ export function Preview({ html, objectUrls, warnings, blocks, search, regularExp
       eventWindow.removeEventListener('pointercancel', endPointer);
     };
   }, [html]);
-  return <div className="preview" ref={host} onPointerUp={() => {
+  return <div className={`preview${comments?.threads.length ? ' has-comments' : ''}`} ref={host} onPointerUp={() => {
     const eventWindow = host.current?.ownerDocument.defaultView;
     eventWindow?.requestAnimationFrame(() => {
       const range = renderedSourceRange(host.current, blocks);
@@ -193,11 +193,10 @@ export function Preview({ html, objectUrls, warnings, blocks, search, regularExp
 const previewStyle = `
   :host { color: var(--ink); }
   article { position: relative; min-height: 100%; font-family: var(--viewer-font); font-size: var(--viewer-size); line-height: 1.72; }
-  article.has-comment-gutter { box-sizing: border-box; padding-right: min(13.5em, 38%); }
   .comment-gutter { position: absolute; inset: 0 0 auto 0; pointer-events: none; font-family: 'Manrope', sans-serif; font-size: max(11px, .68em); line-height: 1.4; }
   .comment-highlight { position: absolute; z-index: 1; border-radius: .18em; background: color-mix(in srgb, var(--accent) 13%, transparent); box-shadow: inset 0 -.1em 0 color-mix(in srgb, var(--accent) 48%, transparent); transition: background-color 120ms ease, box-shadow 120ms ease; }
   .comment-highlight.active, .comment-highlight.hovered { background: color-mix(in srgb, var(--accent) 30%, transparent); box-shadow: inset 0 -.14em 0 var(--accent); }
-  .comment-card { position: absolute; z-index: 2; right: 0; width: min(12.4em, 36%); padding: .7em .75em; pointer-events: auto; color: var(--ink); background: color-mix(in srgb, var(--surface-strong) 96%, transparent); border: max(1px, .07em) solid var(--line); border-left: .22em solid var(--accent); border-radius: .45em; box-shadow: 0 .3em 1.1em color-mix(in srgb, #000 12%, transparent); text-align: left; cursor: pointer; transition: border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease; }
+  .comment-card { position: absolute; z-index: 2; left: calc(100% + .65em); width: min(11em, 34%); padding: .7em .75em; pointer-events: auto; color: var(--ink); background: color-mix(in srgb, var(--surface-strong) 96%, transparent); border: max(1px, .07em) solid var(--line); border-left: .22em solid var(--accent); border-radius: .45em; box-shadow: 0 .3em 1.1em color-mix(in srgb, #000 12%, transparent); text-align: left; cursor: pointer; transition: border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease; }
   .comment-card:hover, .comment-card.active { border-color: var(--accent); box-shadow: 0 .4em 1.25em color-mix(in srgb, #000 17%, transparent); transform: translateX(-.12em); }
   .comment-card.resolved { opacity: .62; border-left-color: var(--muted); }
   .comment-card strong, .comment-card span { display: block; overflow: hidden; text-overflow: ellipsis; }
@@ -420,10 +419,8 @@ function drawCommentGutter(shadow: ShadowRoot, comments: ParsedComments | undefi
   shadow.querySelector('.comment-gutter')?.remove();
   const article = shadow.querySelector<HTMLElement>('article');
   if (!article) return;
-  article.classList.remove('has-comment-gutter');
   article.style.removeProperty('min-height');
   if (!comments?.threads.length) return;
-  article.classList.add('has-comment-gutter');
   const baseHeight = article.scrollHeight;
   const articleRect = article.getBoundingClientRect();
   const gutter = article.ownerDocument.createElement('aside');
@@ -477,7 +474,6 @@ function drawCommentGutter(shadow: ShadowRoot, comments: ParsedComments | undefi
   }
 
   if (!placements.length) {
-    article.classList.remove('has-comment-gutter');
     return;
   }
   article.append(gutter);

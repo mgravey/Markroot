@@ -20,7 +20,7 @@ The visual identity uses a rooted pilcrow, with a Lottie-ready After Effects sou
 - A live detachable visual/rendered viewer for a second window or monitor, with focus and reattach controls
 - Persisted drag handles for resizing the file tree and balancing the source and viewer panes
 - Intent-locked pane synchronization that continuously follows whichever pane the user scrolls without feedback loops
-- Embedded, Git-friendly comment threads created from preserved selections in either the source or rendered document, with scroll-anchored rendered comment cards and active-range highlighting
+- Embedded, Git-friendly comment threads created from preserved selections in either the source or rendered document, with non-reflowing scroll-anchored cards in a right-side comment lane and active-range highlighting
 - Direct-folder local Git status/diff, staging, commits, history, branch create/rename/delete, checkout, branch review, and clean-merge preview through isomorphic-git with its browser runtime initialized locally
 - Opt-in Conventional Commit suggestions from Chrome's on-device Gemini Nano model after explicit saves, with editable review, large-diff reduction, and guarded one-click local commits
 - Worker-isolated HTML/DOCX export through Pandoc WASM and PDF export through Pandoc-to-Typst plus Typst WASM, including documents and resources stored in nested folders, header-selected DOCX/HTML/Typst templates, and setting-based paragraph justification when no template styling is supplied

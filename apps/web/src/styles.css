@@ -205,7 +205,8 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .detached-viewer .viewer-toolbar { border-bottom-color: var(--line-strong); }
 .detached-viewer .right-scroll { background: var(--surface-strong); }
 
-.visual-editor, .preview { max-width: 47.059em; min-height: 100%; margin: auto; padding: 2em clamp(1.647em, 6vw, 4.235em) 5.882em; font-family: var(--viewer-font, 'Source Serif 4', Georgia, serif); font-size: var(--viewer-size, 17px); line-height: 1.72; }
+.visual-editor, .preview { --viewer-side-padding: clamp(1.647em, 6vw, 4.235em); max-width: 47.059em; min-height: 100%; margin: auto; padding: 2em var(--viewer-side-padding) 5.882em; font-family: var(--viewer-font, 'Source Serif 4', Georgia, serif); font-size: var(--viewer-size, 17px); line-height: 1.72; }
+.preview.has-comments { --comment-lane-width: min(8em, calc(var(--viewer-side-padding) + var(--viewer-side-padding) - .47em)); padding-right: var(--comment-lane-width); padding-left: max(.47em, calc(var(--viewer-side-padding) + var(--viewer-side-padding) - 8em)); }
 .visual-editor.justified .visual-block p, .visual-editor.justified .visual-block li, .visual-editor.justified .visual-block blockquote { text-align: justify; text-justify: inter-word; hyphens: auto; }
 .visual-block { position: relative; min-height: 1.06em; margin: 0 0 1.05em; border-radius: .235em; }
 .visual-block:hover { box-shadow: -.176em 0 0 var(--accent-soft); }

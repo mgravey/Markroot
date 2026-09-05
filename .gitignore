@@ -36,6 +36,8 @@ vite.config.*.timestamp-*
 .markroot-comment-selection-debug/
 # Local comment-gutter layout captures
 .markroot-comment-gutter-debug/
+# Local non-reflowing comment overlay captures
+.markroot-comment-overlay-debug/
 # Local rendered-selection timing traces
 .markroot-selection-traces/
 # Optional local Chrome profile for on-device AI testing
