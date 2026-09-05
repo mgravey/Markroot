@@ -211,13 +211,14 @@ function blockDecorations(document: Text, range: SourceRange | undefined): Decor
 }
 
 function editorTheme(dark: boolean, fontFamily: Props['fontFamily'], fontSize: number): Extension {
+  const scale = fontSize / 14;
   return EditorView.theme({
     '&': { height: '100%', fontSize: `${fontSize}px`, backgroundColor: 'transparent' },
     '.cm-scroller': { fontFamily: fontStack(fontFamily), lineHeight: '1.65' },
     '.cm-gutters': { backgroundColor: 'transparent', border: 'none' },
-    '.cm-content': { padding: '24px 12px 64px' },
+    '.cm-content': { padding: `${24 * scale}px ${12 * scale}px ${64 * scale}px` },
     '.cm-activeLine, .cm-activeLineGutter': { backgroundColor: 'var(--active-line)' },
-    '.cm-current-block': { backgroundColor: 'color-mix(in srgb, var(--accent) 9%, transparent)', boxShadow: 'inset 3px 0 0 var(--accent)' },
+    '.cm-current-block': { backgroundColor: 'color-mix(in srgb, var(--accent) 9%, transparent)', boxShadow: `inset ${3 * scale}px 0 0 var(--accent)` },
   }, { dark });
 }
 

@@ -6,6 +6,7 @@ export type OutlineDepth = 2 | 3 | 6;
 export interface MarkrootSettings {
   readonly theme: ThemePreference;
   readonly autosave: boolean;
+  readonly aiCommitSuggestions: boolean;
   readonly allowRemoteResources: boolean;
   readonly sourceFont: PaneFont;
   readonly sourceFontSize: number;
@@ -36,6 +37,7 @@ export function defaultSettings(): MarkrootSettings {
   return {
     theme: 'system',
     autosave: false,
+    aiCommitSuggestions: false,
     allowRemoteResources: false,
     sourceFont: 'mono',
     sourceFontSize: 14,

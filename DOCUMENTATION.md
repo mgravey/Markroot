@@ -72,6 +72,7 @@ Prose comments use HTML boundary markers. Thread data is stored in a terminal `m
 - External images are not loaded unless the user enables them for the session.
 - A restrictive CSP blocks object/frame/form content and arbitrary script connections.
 - QMD code is never executed.
+- Optional AI commit suggestions send only the candidate Git diff to Chrome's on-device language model. Repository contents are not sent to a Markroot service or cloud-model fallback.
 - There is no analytics, authentication, upload, remote Git, or backend API.
 
 ## Git limitations
@@ -82,13 +83,25 @@ The File System Access adapter probes both file and directory handles when deter
 
 The Git package initializes the standard browser `Buffer` implementation before evaluating isomorphic-git. This satisfies isomorphic-git's index and packed-object readers without Node.js, a backend, or a repository copy.
 
+### AI-assisted explicit-save commits
+
+The browser-local setting `aiCommitSuggestions` is disabled by default. Selecting it immediately calls `LanguageModel.create()` from the checkbox's user activation so Chrome starts downloading Gemini Nano when necessary. Settings shows checking, indeterminate download startup, measured progress, ready, and unavailable states. If Chrome emits no progress after twelve seconds, Markroot aborts the pending session creation and shows an explicit error describing the browser's minimum 22 GB free-profile-volume and unmetered-network requirements. Chrome owns this component download outside the page's normal request pipeline, so `chrome://on-device-internals`—rather than the tab's DevTools Network panel—is the diagnostic source of truth.
+
+When enabled, Ctrl/Cmd+S and the toolbar Save action first write the open document and then prepare a commit candidate. Background autosave never starts AI. A candidate contains the current saved version of the open file plus every change that was already staged; unrelated unstaged files are excluded. If the open file has no change relative to `HEAD`, no proposal is shown.
+
+Markroot uses Chrome's `LanguageModel` Prompt API with English structured output to produce an editable Conventional Commit subject and optional body. The dialog reports first-use model-download and generation progress and supports cancellation and regeneration. Oversized diffs are divided by file and hunk, summarized locally in context-sized batches, and hierarchically reduced with bounded work. Model or output failure leaves the successful file save intact, creates no commit, and opens the manual Git panel.
+
+Accepting a proposal rechecks the repository fingerprint and open-file content under the workspace Web Lock, stages the open file, verifies that the resulting staged diff is exactly the candidate summarized by the model, and then commits it. The previous index bytes are restored if validation or staging fails before the commit. Native Git processes do not participate in the browser Web Lock, so the existing last-moment fingerprint limitation still applies.
+
 ## Export
 
 HTML and DOCX use the self-hosted Pandoc WASM engine. PDF uses Pandoc-to-Typst followed by the pinned self-hosted Typst compiler WASM and bundled Source Serif 4 TrueType bytes. The font is registered before compiler initialization; Typst webfont containers are not used because the compiler does not recognize them as document fonts. Export runs in a cancellable worker that restarts after a crash. Online Typst package fetching is not used. Local images, bibliographies, and CSL files referenced by the document are passed explicitly to the worker. Because Pandoc WASM exposes a flat temporary filesystem, Markroot assigns collision-free temporary filenames and rewrites only the in-memory export source; nested workspace paths and the saved source remain untouched. PDF figures are rasterized for HTML/DOCX and remain native PDF assets for Typst. Empty Pandoc results are rejected with stderr details rather than downloaded as blank documents. Results may be downloaded, saved through the native Save As picker, or written beside the source.
 
+Export customization follows document YAML when a local file is explicitly selected: `format.docx.reference-doc` for Word styles, `format.html.template` and `format.html.css` for HTML, and `format.typst.template` for the Typst-backed PDF. Explicit template styling is authoritative. Without it, the viewer's paragraph-justification preference is applied to the export: a bundled justified Word reference is selected for DOCX, a scoped paragraph rule is inserted for HTML, and a Typst paragraph rule is inserted for PDF. `format.typst.template-partials` files are collected in preparation for fuller Quarto-compatible composition, but partial replacement remains planned because Markroot runs Pandoc and Typst directly rather than the Quarto CLI. LaTeX `format.pdf.template` files are intentionally not treated as Typst templates.
+
 ## Testing
 
-`pnpm check` runs strict type checking, unit tests, and the production build. The fixture suite includes a QMD compatibility corpus. While the Vite development server is running, `/export-smoke.html` performs a browser-level HTML/DOCX/PDF worker check and reports non-empty output sizes. Real-folder and native-Git interoperability must additionally be tested manually in Chromium on a disposable repository before release.
+`pnpm check` runs strict type checking, unit tests, and the production build. The fixture suite includes a QMD compatibility corpus. While the Vite development server is running, `/export-smoke.html` performs a browser-level HTML/DOCX/PDF worker check and reports non-empty output sizes. Real-folder and native-Git interoperability must additionally be tested manually in Chromium on a disposable repository before release. AI commit testing requires a current desktop Chrome profile with the Prompt API and Gemini Nano available; test model download, cancellation, regeneration, edited acceptance, unavailable fallback, and stale-candidate rejection.
 
 ## Release gates still open
 

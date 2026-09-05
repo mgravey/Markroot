@@ -3,6 +3,7 @@ import { stripCommentMarkup } from '@markroot/comments';
 import { MarkrootError, throwIfAborted, type OperationContext } from '@markroot/core';
 import typstCompilerWasmUrl from '@myriaddreamin/typst-ts-web-compiler/wasm?url';
 import sourceSerifUrl from './assets/SourceSerif4-Regular.ttf?url';
+import justifiedReferenceDocxUrl from './assets/JustifiedReference.docx?url';
 
 let typstConfigured = false;
 
@@ -14,8 +15,19 @@ export interface ExportRequest {
   readonly filename: string;
   readonly resources?: readonly ExportResource[];
   readonly referenceDocx?: string;
+  readonly htmlTemplate?: string;
+  readonly htmlCss?: readonly string[];
+  readonly typstTemplate?: string;
+  readonly justified?: boolean;
 }
 export interface ExportResult { readonly format: ExportFormat; readonly blob: Blob; readonly filename: string; readonly warnings: readonly string[] }
+export interface ExportOptions {
+  readonly referenceDocx?: string;
+  readonly htmlTemplate?: string;
+  readonly htmlCss: readonly string[];
+  readonly typstTemplate?: string;
+  readonly typstTemplatePartials: readonly string[];
+}
 
 interface PandocResult {
   readonly stdout: string;
@@ -40,28 +52,45 @@ export class BrowserDocumentExporter implements Exporter {
 
   async export(request: ExportRequest, context?: OperationContext): Promise<ExportResult> {
     throwIfAborted(context);
-    context?.onProgress?.({ phase: 'prepare', completed: 0, total: 3, message: 'Preparing local resources' });
+    const total = request.format === 'pdf' ? 3 : 2;
+    context?.onProgress?.({ phase: 'prepare', completed: 0, total, message: 'Loading the local Pandoc engine' });
     const source = stripCommentMarkup(request.source);
     const prepared = preparePandocInput(source, request.resources ?? []);
     try {
       const { convert } = await import('pandoc-wasm');
       if (request.format === 'html') {
-        const result = await convert({ from: 'markdown+fenced_divs+tex_math_dollars', to: 'html5', standalone: true, 'embed-resources': true, citeproc: true }, prepared.source, prepared.files) as PandocResult;
-        const html = requirePandocText(result, 'HTML');
+        context?.onProgress?.({ phase: 'pandoc', completed: 1, total, message: 'Creating HTML with Pandoc' });
+        const template = mappedPath(request.htmlTemplate, prepared);
+        const css = request.htmlCss?.map((path) => mappedPath(path, prepared)).filter((path): path is string => Boolean(path));
+        const result = await convert({ from: 'markdown+fenced_divs+tex_math_dollars', to: 'html5', standalone: true, 'embed-resources': true, citeproc: true, ...(template ? { template } : {}), ...(css?.length ? { css } : {}) }, prepared.source, prepared.files) as PandocResult;
+        const converted = requirePandocText(result, 'HTML');
+        const html = request.justified !== undefined && !template && !css?.length ? withHtmlJustification(converted, request.justified) : converted;
+        context?.onProgress?.({ phase: 'complete', completed: total, total, message: 'HTML conversion complete' });
         return finish(request, new Blob([html], { type: 'text/html;charset=utf-8' }), result.warnings);
       }
       if (request.format === 'docx') {
+        context?.onProgress?.({ phase: 'pandoc', completed: 1, total, message: 'Creating DOCX with Pandoc' });
         const output = exportFilename(request.filename, 'docx');
-        const referenceDocx = request.referenceDocx ? prepared.paths.get(request.referenceDocx) ?? request.referenceDocx : undefined;
-        const result = await convert({ from: 'markdown+fenced_divs+tex_math_dollars', to: 'docx', 'output-file': output, citeproc: true, ...(referenceDocx ? { 'reference-doc': referenceDocx } : {}) }, prepared.source, prepared.files) as PandocResult;
+        let referenceDocx = mappedPath(request.referenceDocx, prepared);
+        let files = prepared.files;
+        if (!referenceDocx && request.justified) {
+          const response = await fetch(justifiedReferenceDocxUrl);
+          if (!response.ok) throw new Error(`Bundled justified DOCX reference could not be loaded (${response.status}).`);
+          referenceDocx = 'markroot-justified-reference.docx';
+          files = { ...prepared.files, [referenceDocx]: await response.blob() };
+        }
+        const result = await convert({ from: 'markdown+fenced_divs+tex_math_dollars', to: 'docx', 'output-file': output, citeproc: true, ...(referenceDocx ? { 'reference-doc': referenceDocx } : {}) }, prepared.source, files) as PandocResult;
         const blob = await requirePandocBlob(result, output, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+        context?.onProgress?.({ phase: 'complete', completed: total, total, message: 'DOCX conversion complete' });
         return finish(request, blob, result.warnings);
       }
-      context?.onProgress?.({ phase: 'pandoc', completed: 1, total: 3, message: 'Converting Markdown to Typst' });
-      const typstResult = await convert({ from: 'markdown+fenced_divs+tex_math_dollars', to: 'typst', standalone: true, citeproc: true }, prepared.source, prepared.files) as PandocResult;
-      const typstSource = requirePandocText(typstResult, 'Typst');
+      context?.onProgress?.({ phase: 'pandoc', completed: 1, total, message: 'Converting Markdown to Typst' });
+      const typstTemplate = mappedPath(request.typstTemplate, prepared);
+      const typstResult = await convert({ from: 'markdown+fenced_divs+tex_math_dollars', to: 'typst', standalone: true, citeproc: true, ...(typstTemplate ? { template: typstTemplate } : {}) }, prepared.source, prepared.files) as PandocResult;
+      const convertedTypstSource = requirePandocText(typstResult, 'Typst');
+      const typstSource = request.justified !== undefined && !typstTemplate ? `#set par(justify: ${request.justified})\n${convertedTypstSource}` : convertedTypstSource;
       throwIfAborted(context);
-      context?.onProgress?.({ phase: 'typst', completed: 2, total: 3, message: 'Compiling PDF locally' });
+      context?.onProgress?.({ phase: 'typst', completed: 2, total, message: 'Compiling PDF locally' });
       const [{ $typst, MemoryAccessModel }, { TypstSnippet }] = await Promise.all([
         import('@myriaddreamin/typst.ts'),
         import('@myriaddreamin/typst.ts/contrib/snippet'),
@@ -92,12 +121,22 @@ export class BrowserDocumentExporter implements Exporter {
       throwIfAborted(context);
       const copied = new Uint8Array(pdf.byteLength);
       copied.set(pdf);
+      context?.onProgress?.({ phase: 'complete', completed: total, total, message: 'PDF compilation complete' });
       return finish(request, new Blob([copied], { type: 'application/pdf' }), typstResult.warnings);
     } catch (cause) {
       const detail = cause instanceof Error ? cause.message : String(cause);
       throw new MarkrootError('EXPORT_ERROR', `${request.format.toUpperCase()} export failed: ${detail}`, undefined, { cause });
     }
   }
+}
+
+function mappedPath(path: string | undefined, prepared: PreparedPandocInput): string | undefined {
+  return path ? prepared.paths.get(path) ?? path : undefined;
+}
+
+function withHtmlJustification(html: string, justified: boolean): string {
+  const style = `<style data-markroot-export>p { text-align: ${justified ? 'justify' : 'start'}; }</style>`;
+  return /<\/head\s*>/i.test(html) ? html.replace(/<\/head\s*>/i, `${style}</head>`) : `${style}${html}`;
 }
 
 function finish(request: ExportRequest, blob: Blob, warnings: readonly unknown[]): ExportResult {
@@ -122,6 +161,63 @@ export function exportFilename(filename: string, format: ExportFormat): string {
   const leaf = filename.replaceAll('\\', '/').split('/').at(-1) || 'document';
   const stem = leaf.replace(/\.(?:md|qmd|html|docx|pdf)$/i, '') || 'document';
   return `${stem}.${format}`;
+}
+
+export function parseExportOptions(source: string): ExportOptions {
+  const metadata = yamlFrontmatterValues(source);
+  return {
+    ...optionalValue('referenceDocx', metadata.get('format.docx.reference-doc')?.[0] ?? metadata.get('reference-doc')?.[0]),
+    ...optionalValue('htmlTemplate', metadata.get('format.html.template')?.[0]),
+    htmlCss: metadata.get('format.html.css') ?? [],
+    ...optionalValue('typstTemplate', metadata.get('format.typst.template')?.[0]),
+    typstTemplatePartials: metadata.get('format.typst.template-partials') ?? [],
+  };
+}
+
+function optionalValue<Key extends string>(key: Key, value: string | undefined): { readonly [Name in Key]?: string } {
+  return value ? { [key]: value } as { readonly [Name in Key]?: string } : {};
+}
+
+function yamlFrontmatterValues(source: string): ReadonlyMap<string, readonly string[]> {
+  const lines = source.replaceAll('\r\n', '\n').split('\n');
+  if (lines[0]?.trim() !== '---') return new Map();
+  const end = lines.findIndex((line, index) => index > 0 && /^(?:---|\.\.\.)\s*$/.test(line.trim()));
+  if (end < 0) return new Map();
+  const values = new Map<string, string[]>();
+  const stack: Array<{ readonly indent: number; readonly key: string }> = [];
+  let listPath: string | undefined;
+  for (const line of lines.slice(1, end)) {
+    if (!line.trim() || line.trimStart().startsWith('#')) continue;
+    const indent = line.length - line.trimStart().length;
+    const list = /^\s*-\s+(.+?)\s*$/.exec(line);
+    if (list && listPath) { addYamlValue(values, listPath, yamlScalar(list[1]!)); continue; }
+    const entry = /^\s*([A-Za-z0-9_-]+)\s*:\s*(.*?)\s*$/.exec(line);
+    if (!entry) continue;
+    while (stack.length && stack.at(-1)!.indent >= indent) stack.pop();
+    const key = entry[1]!;
+    const path = [...stack.map((item) => item.key), key].join('.');
+    const raw = entry[2]!;
+    listPath = undefined;
+    if (!raw) { stack.push({ indent, key }); listPath = path; continue; }
+    const flow = /^\[(.*)\]$/.exec(raw);
+    if (flow) {
+      for (const value of flow[1]!.split(',')) addYamlValue(values, path, yamlScalar(value));
+    } else addYamlValue(values, path, yamlScalar(raw));
+  }
+  return values;
+}
+
+function addYamlValue(values: Map<string, string[]>, path: string, value: string): void {
+  if (!value) return;
+  const existing = values.get(path) ?? [];
+  existing.push(value);
+  values.set(path, existing);
+}
+
+function yamlScalar(value: string): string {
+  const trimmed = value.trim();
+  const unquoted = trimmed.match(/^(["'])([\s\S]*)\1$/)?.[2] ?? trimmed.replace(/\s+#.*$/, '');
+  return unquoted.trim();
 }
 
 function resourceExtension(resource: ExportResource): string {

@@ -148,13 +148,13 @@ const previewStyle = `
   h2 { margin-top: 1.6em; font-size: 1.55em; }
   h3 { margin-top: 1.45em; font-size: 1.2em; }
   a { color: var(--accent-strong); }
-  [data-block-id] { position: relative; margin-inline: -12px; padding-inline: 12px; border-radius: 5px; scroll-margin-block: 40vh; transition: background-color 120ms ease, box-shadow 120ms ease; }
-  [data-block-id].active-block { background: color-mix(in srgb, var(--accent) 9%, transparent); box-shadow: -3px 0 0 var(--accent); }
-  pre { overflow: auto; padding: 14px; color: #d5e7e2; background: #111a18; border-radius: 7px; }
+  [data-block-id] { position: relative; margin-inline: -.706em; padding-inline: .706em; border-radius: .294em; scroll-margin-block: 40vh; transition: background-color 120ms ease, box-shadow 120ms ease; }
+  [data-block-id].active-block { background: color-mix(in srgb, var(--accent) 9%, transparent); box-shadow: -.176em 0 0 var(--accent); }
+  pre { overflow: auto; padding: .824em; color: #d5e7e2; background: #111a18; border-radius: .412em; }
   code { font-family: 'IBM Plex Mono', monospace; font-size: .86em; }
-  :not(pre) > code { padding: .12em .34em; color: var(--accent-strong); background: var(--accent-soft); border-radius: 3px; }
+  :not(pre) > code { padding: .12em .34em; color: var(--accent-strong); background: var(--accent-soft); border-radius: .205em; }
   figure { margin: 1.7em auto; text-align: center; }
-  figure img { display: block; max-width: 100%; height: auto; margin: auto; border-radius: 4px; }
+  figure img { display: block; max-width: 100%; height: auto; margin: auto; border-radius: .235em; }
   figure.figure-align-left, figure.figure-align-left figcaption { text-align: left; }
   figure.figure-align-left img { margin-left: 0; margin-right: auto; }
   figure.figure-align-right, figure.figure-align-right figcaption { text-align: right; }
@@ -167,10 +167,10 @@ const previewStyle = `
   .table-figure figcaption { max-width: none; margin: 0 0 .55em; text-align: left; }
   .table-label { color: var(--ink); font-weight: 600; }
   .table-scroll { overflow-x: auto; }
-  .image-missing { display: grid; place-items: center; min-height: 150px; padding: 22px; color: var(--muted); background: color-mix(in srgb, var(--surface-strong) 76%, transparent); border: 1px dashed var(--line-strong); border-radius: 6px; font-family: 'Manrope', sans-serif; text-align: center; }
+  .image-missing { display: grid; place-items: center; min-height: 8.824em; padding: 1.294em; color: var(--muted); background: color-mix(in srgb, var(--surface-strong) 76%, transparent); border: max(1px, .059em) dashed var(--line-strong); border-radius: .353em; font-family: 'Manrope', sans-serif; text-align: center; }
   .image-missing strong { color: var(--ink); font-size: .86em; }
   .image-missing code { max-width: 100%; margin-top: .4em; overflow-wrap: anywhere; color: var(--muted); background: transparent; }
-  .viewer-warnings { margin: 0 0 1.3em; padding: .65em .8em; color: var(--muted); background: var(--surface-strong); border: 1px solid var(--line); border-radius: 6px; font: .76em/1.45 'Manrope', sans-serif; }
+  .viewer-warnings { margin: 0 0 1.3em; padding: .65em .8em; color: var(--muted); background: var(--surface-strong); border: max(1px, .077em) solid var(--line); border-radius: .464em; font: .76em/1.45 'Manrope', sans-serif; }
   .viewer-warnings summary { cursor: pointer; color: var(--ink); font-weight: 600; }
   .viewer-warnings ul { margin: .55em 0 0; padding-left: 1.3em; }
   .figure-layout { display: grid; gap: 1.25em; align-items: start; }
@@ -193,8 +193,8 @@ const previewStyle = `
   th, td { padding: .55em .7em; border-bottom: 1px solid var(--line); text-align: left; }
   th { font-family: 'Manrope', sans-serif; font-size: .86em; letter-spacing: .02em; }
   tbody tr:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
-  mark { color: inherit; background: #ffd76a; border-radius: 2px; }
-  .remote-resource-placeholder { display: block; padding: 16px; color: var(--muted); background: var(--surface-strong); border: 1px dashed var(--line-strong); border-radius: 6px; font-family: 'Manrope', sans-serif; font-size: 12px; text-align: center; }
+  mark { color: inherit; background: #ffd76a; border-radius: .118em; }
+  .remote-resource-placeholder { display: block; padding: 1.333em; color: var(--muted); background: var(--surface-strong); border: max(1px, .083em) dashed var(--line-strong); border-radius: .5em; font-family: 'Manrope', sans-serif; font-size: .706em; text-align: center; }
   @media (max-width: 640px) { .figure-layout { grid-template-columns: 1fr !important; } }
 `;
 

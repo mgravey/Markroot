@@ -7,15 +7,22 @@ import {
   currentBranch,
   deleteBranch,
   getConfig,
+  hashBlob,
   listBranches,
   log,
   merge,
   readBlob,
+  readObject,
   remove,
   resetIndex,
   resolveRef,
+  STAGE,
   statusMatrix,
+  TREE,
+  walk,
+  WORKDIR,
   type FsClient,
+  type WalkerEntry,
 } from 'isomorphic-git';
 import { createTwoFilesPatch } from 'diff';
 import { MarkrootError, workspacePath, type AuthorIdentity, type WorkspacePath } from '@markroot/core';
@@ -37,6 +44,14 @@ export interface GitCommitSummary {
   readonly timestamp: number;
   readonly parents: readonly string[];
 }
+export interface GitCommitCandidate {
+  readonly openPath: WorkspacePath;
+  readonly paths: readonly WorkspacePath[];
+  readonly diff: string;
+  readonly repositoryFingerprint: string;
+  readonly openFileOid: string;
+  readonly diffOid: string;
+}
 export interface MergePreview { readonly ours: string; readonly theirs: string; readonly clean: boolean; readonly result?: unknown; readonly error?: string }
 
 export interface GitRepository {
@@ -44,6 +59,8 @@ export interface GitRepository {
   fingerprint(): Promise<string>;
   status(): Promise<readonly GitFileStatus[]>;
   diff(path: WorkspacePath): Promise<string>;
+  prepareCommitCandidate(openPath: WorkspacePath): Promise<GitCommitCandidate | undefined>;
+  commitCandidate(candidate: GitCommitCandidate, message: string, author: AuthorIdentity): Promise<string>;
   readFileAtRef(path: WorkspacePath, ref: string): Promise<string>;
   stage(path: WorkspacePath): Promise<void>;
   unstage(path: WorkspacePath): Promise<void>;
@@ -74,9 +91,9 @@ export class IsomorphicGitRepository implements GitRepository {
 
   async fingerprint(): Promise<string> {
     await this.validate();
-    const head = await this.workspace.readFile(workspacePath('.git/HEAD'));
-    const index = await this.workspace.stat(workspacePath('.git/index')).catch(() => undefined);
-    return `${head.trim()}:${index?.version ?? 'no-index'}`;
+    const head = await resolveRef({ fs: this.fs, dir: DIR, ref: 'HEAD' }).catch(() => 'unborn');
+    const index = await this.workspace.readBytes(workspacePath('.git/index')).catch(() => new Uint8Array());
+    return `${head}:${(await hashBlob({ object: index })).oid}`;
   }
 
   async status(): Promise<readonly GitFileStatus[]> {
@@ -98,17 +115,54 @@ export class IsomorphicGitRepository implements GitRepository {
     return createTwoFilesPatch(`a/${path}`, `b/${path}`, base, current, 'HEAD', 'working tree');
   }
 
+  async prepareCommitCandidate(openPath: WorkspacePath): Promise<GitCommitCandidate | undefined> {
+    await this.validate();
+    const repositoryFingerprint = await this.fingerprint();
+    const openBytes = await this.workspace.readBytes(openPath).catch(() => undefined);
+    if (!openBytes) return undefined;
+    const openFileOid = (await hashBlob({ object: openBytes })).oid;
+    const result = await this.candidateDiff(openPath);
+    if (!result.openChanged || !result.diff.trim()) return undefined;
+    return {
+      openPath,
+      paths: result.paths,
+      diff: result.diff,
+      repositoryFingerprint,
+      openFileOid,
+      diffOid: (await hashBlob({ object: result.diff })).oid,
+    };
+  }
+
+  async commitCandidate(candidate: GitCommitCandidate, message: string, author: AuthorIdentity): Promise<string> {
+    if (!message.trim()) throw new Error('Commit message is required.');
+    if (!author.email) throw new Error('A Git author email is required.');
+    return this.withMutation(async () => {
+      if (await this.fingerprint() !== candidate.repositoryFingerprint) throw new MarkrootError('CONFLICT', 'The repository changed while the commit message was being prepared. Generate it again.');
+      const openBytes = await this.workspace.readBytes(candidate.openPath).catch(() => undefined);
+      if (!openBytes || (await hashBlob({ object: openBytes })).oid !== candidate.openFileOid) throw new MarkrootError('CONFLICT', 'The open file changed while the commit message was being prepared. Save and generate it again.');
+
+      const indexPath = workspacePath('.git/index');
+      const previousIndex = await this.workspace.readBytes(indexPath).catch(() => undefined);
+      try {
+        await this.stageUnlocked(candidate.openPath);
+        const staged = await this.candidateDiff();
+        if ((await hashBlob({ object: staged.diff })).oid !== candidate.diffOid) throw new MarkrootError('CONFLICT', 'The staged changes no longer match the proposed commit. Generate the message again.');
+        return await commit({ fs: this.fs, dir: DIR, message: message.trim(), author: { name: author.displayName, email: author.email } });
+      } catch (error) {
+        if (previousIndex) await this.workspace.writeBytes(indexPath, previousIndex).catch(() => undefined);
+        else await this.workspace.remove(indexPath).catch(() => undefined);
+        throw error;
+      }
+    });
+  }
+
   async readFileAtRef(path: WorkspacePath, ref: string): Promise<string> {
     const oid = await resolveRef({ fs: this.fs, dir: DIR, ref });
     return new TextDecoder().decode((await readBlob({ fs: this.fs, dir: DIR, oid, filepath: path })).blob);
   }
 
   async stage(path: WorkspacePath): Promise<void> {
-    await this.withMutation(async () => {
-      const exists = await this.workspace.stat(path).then(() => true).catch(() => false);
-      if (exists) await add({ fs: this.fs, dir: DIR, filepath: path });
-      else await remove({ fs: this.fs, dir: DIR, filepath: path });
-    });
+    await this.withMutation(() => this.stageUnlocked(path));
   }
 
   async unstage(path: WorkspacePath): Promise<void> { await this.withMutation(() => resetIndex({ fs: this.fs, dir: DIR, filepath: path })); }
@@ -183,6 +237,63 @@ export class IsomorphicGitRepository implements GitRepository {
     if (!lockName || typeof navigator === 'undefined' || !navigator.locks) return run();
     return navigator.locks.request(lockName, { mode: 'exclusive' }, run);
   }
+
+  private async stageUnlocked(path: WorkspacePath): Promise<void> {
+    const exists = await this.workspace.stat(path).then(() => true).catch(() => false);
+    if (exists) await add({ fs: this.fs, dir: DIR, filepath: path });
+    else await remove({ fs: this.fs, dir: DIR, filepath: path });
+  }
+
+  private async candidateDiff(openPath?: WorkspacePath): Promise<{ readonly diff: string; readonly paths: readonly WorkspacePath[]; readonly openChanged: boolean }> {
+    const sections = await walk({
+      fs: this.fs,
+      dir: DIR,
+      trees: [TREE({ ref: 'HEAD' }), STAGE(), WORKDIR({ refresh: false })],
+      map: async (filepath, entries) => {
+        if (filepath === '.') return undefined;
+        const [head, stage, workdir] = entries;
+        const target = filepath === openPath ? workdir : stage;
+        const headType = await entryType(head);
+        const targetType = await entryType(target);
+        if (headType !== 'blob' && targetType !== 'blob') return undefined;
+        const path = workspacePath(filepath);
+        const before = await this.entryBytes(head, 'tree');
+        const after = await this.entryBytes(target, filepath === openPath ? 'workdir' : 'stage');
+        const headOid = headType === 'blob' ? await head!.oid() : undefined;
+        const targetOid = targetType === 'blob'
+          ? filepath === openPath ? (await hashBlob({ object: after })).oid : await target!.oid()
+          : undefined;
+        if (headType === targetType && headOid === targetOid) return undefined;
+        return { path, patch: createPatch(path, before, after), openChanged: filepath === openPath };
+      },
+    }) as Array<{ path: WorkspacePath; patch: string; openChanged: boolean }>;
+    const ordered = sections.filter(Boolean).sort((left, right) => left.path.localeCompare(right.path));
+    return {
+      diff: ordered.map((section) => section.patch).join('\n'),
+      paths: ordered.map((section) => section.path),
+      openChanged: ordered.some((section) => section.openChanged),
+    };
+  }
+
+  private async entryBytes(entry: WalkerEntry | null | undefined, source: 'tree' | 'stage' | 'workdir'): Promise<Uint8Array> {
+    if (!entry || await entry.type() !== 'blob') return new Uint8Array();
+    if (source !== 'stage') return new Uint8Array((await entry.content()) ?? []);
+    const result = await readObject({ fs: this.fs, dir: DIR, oid: await entry.oid(), format: 'content' });
+    return new Uint8Array(result.object as Uint8Array);
+  }
+}
+
+async function entryType(entry: WalkerEntry | null | undefined): Promise<Awaited<ReturnType<WalkerEntry['type']>> | undefined> {
+  return entry ? entry.type() : undefined;
+}
+
+function createPatch(path: WorkspacePath, before: Uint8Array, after: Uint8Array): string {
+  if (isBinary(before) || isBinary(after)) return `diff --git a/${path} b/${path}\nBinary files a/${path} and b/${path} differ\n`;
+  return createTwoFilesPatch(`a/${path}`, `b/${path}`, new TextDecoder().decode(before), new TextDecoder().decode(after), 'HEAD', 'candidate');
+}
+
+function isBinary(content: Uint8Array): boolean {
+  return content.subarray(0, Math.min(content.length, 8_000)).includes(0);
 }
 
 interface NodeStatLike {

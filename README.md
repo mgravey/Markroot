@@ -1,6 +1,10 @@
+<img src="apps/web/public/brand/markroot-mark.svg" alt="Markroot rooted-pilcrow logo" width="88" height="88">
+
 # Markroot
 
 Markroot is a fully static, browser-only Markdown and non-executable Quarto workspace. It opens a real local folder through the File System Access API and keeps document contents on the device.
+
+The visual identity uses a rooted pilcrow, with a Lottie-ready After Effects source and SVG/favicon assets documented in [brand/README.md](./brand/README.md).
 
 ## Current implementation (0.1 technical preview)
 
@@ -12,14 +16,15 @@ Markroot is a fully static, browser-only Markdown and non-executable Quarto work
 - A scholarly rendered view with numbered sections/tables/figures, `.unnumbered` headings, semantic equations, hidden Markdown HTML comments, placed `#refs` bibliographies, securely restored document-relative local images including first-page PDF figures, citations, cross-references, callouts, and figure layouts
 - A persistent overlay document outline with two heading levels by default, optional figures, tables, and direct navigation, plus in-view navigation for internal links and unobtrusive Ctrl/Cmd-click DOI access on citations
 - Bidirectional block/character navigation, paired active-paragraph highlighting, shared search highlighting, and interaction-owned center-line alignment
-- Persistent font-family and font-size controls for both panes, plus optional justified viewer text
+- Persistent font-family and display-size controls that proportionally scale each writing surface without affecting export typography, plus optional justified viewer text
 - A live detachable visual/rendered viewer for a second window or monitor, with focus and reattach controls
 - Persisted drag handles for resizing the file tree and balancing the source and viewer panes
 - Intent-locked pane synchronization that continuously follows whichever pane the user scrolls without feedback loops
 - Embedded, Git-friendly comment threads
 - Direct-folder local Git status/diff, staging, commits, history, branch create/rename/delete, checkout, branch review, and clean-merge preview through isomorphic-git with its browser runtime initialized locally
-- Worker-isolated HTML/DOCX export through Pandoc WASM and PDF export through Pandoc-to-Typst plus Typst WASM, including documents and resources stored in nested folders
-- Download, native Save As, and save-beside-source export targets
+- Opt-in Conventional Commit suggestions from Chrome's on-device Gemini Nano model after explicit saves, with editable review, large-diff reduction, and guarded one-click local commits
+- Worker-isolated HTML/DOCX export through Pandoc WASM and PDF export through Pandoc-to-Typst plus Typst WASM, including documents and resources stored in nested folders, header-selected DOCX/HTML/Typst templates, and setting-based paragraph justification when no template styling is supplied
+- Download, native Save As, and save-beside-source export targets with visible step-by-step progress and cancellation
 - Browser-only settings, local author profiles, and IndexedDB crash-recovery drafts
 - Light and dark themes
 
@@ -38,6 +43,8 @@ pnpm check
 ```
 
 Open the local HTTPS/localhost URL in a Chromium desktop browser. Firefox and Safari do not currently expose the required directory picker API.
+
+AI commit suggestions additionally require the Chrome Prompt API, compatible desktop hardware, an unmetered connection, and at least 22 GB free on the volume containing the Chrome profile. The feature is disabled by default. Selecting it in Settings immediately asks Chrome to create a local session, which triggers Gemini Nano's browser-managed download when needed and reports preparation progress inline. If Chrome reports no progress after startup, Markroot surfaces the storage and connection requirements. This browser component download may not appear in the page's DevTools Network panel; inspect `chrome://on-device-internals` for authoritative model status. Only the candidate Git diff is processed by the on-device model, and Markroot does not use a cloud fallback.
 
 For a browser-level export check during development, open `/export-smoke.html` from the Vite server. It runs HTML, DOCX, and PDF through the same dedicated worker as the application without reading a local folder.
 

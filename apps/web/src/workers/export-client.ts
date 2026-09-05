@@ -20,6 +20,7 @@ export class WorkerExporter implements Exporter {
   }
 
   export(request: ExportRequest, context?: OperationContext): Promise<ExportResult> {
+    if (context?.signal?.aborted) return Promise.reject(context.signal.reason ?? new DOMException('Export cancelled.', 'AbortError'));
     const id = crypto.randomUUID();
     return new Promise((resolve, reject) => {
       const abort = () => {

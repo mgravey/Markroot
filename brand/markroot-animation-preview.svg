@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720">
+  <defs>
+    <filter id="shadow" x="-40%" y="-40%" width="180%" height="180%"><feDropShadow dx="0" dy="22" stdDeviation="25" flood-color="#102d28" flood-opacity=".18"/></filter>
+    <g id="mark">
+      <path fill="#006f62" d="M144 48h224c53 0 96 43 96 96v256c0 35-29 64-64 64H144c-53 0-96-43-96-96V144c0-53 43-96 96-96Z"/>
+      <g fill="none" stroke="#fff" stroke-linecap="round" stroke-linejoin="round" stroke-width="32">
+        <path d="M326 156H232c-52 0-84 27-84 72s32 72 84 72h30"/>
+        <path d="M262 156v190"/><path d="M326 156v144"/>
+        <path d="M262 346 205 382M262 346v53M262 346l59 36"/>
+      </g>
+      <path fill="#ef9163" d="M354 128h24v64h-24z"/>
+    </g>
+  </defs>
+  <rect width="1200" height="720" fill="#edf0ee"/>
+  <path fill="#d6ebe6" d="M0 525C240 459 352 574 586 542c206-28 361-142 614-76v254H0Z"/>
+  <text x="72" y="82" fill="#1c2527" font-family="Manrope,Arial,sans-serif" font-size="38" font-weight="700" letter-spacing="-1.5">Markroot identity</text>
+  <text x="73" y="119" fill="#677174" font-family="Manrope,Arial,sans-serif" font-size="18">The pilcrow takes root — writing that stays grounded in your own files.</text>
+  <g transform="translate(75 172) scale(.72)" filter="url(#shadow)"><use href="#mark"/></g>
+  <text x="72" y="595" fill="#1c2527" font-family="Manrope,Arial,sans-serif" font-size="30" font-weight="700">Markroot</text>
+  <text x="73" y="625" fill="#677174" font-family="Manrope,Arial,sans-serif" font-size="15">PRIMARY MARK · FINAL FRAME</text>
+  <g transform="translate(550 188)">
+    <text y="0" fill="#677174" font-family="Manrope,Arial,sans-serif" font-size="14" font-weight="700" letter-spacing="1.5">ANIMATION BEATS · 2.4 SECONDS</text>
+    <g transform="translate(0 40)"><circle cx="62" cy="62" r="14" fill="#ef9163"/><text x="0" y="150" fill="#1c2527" font-family="Manrope,Arial,sans-serif" font-size="15" font-weight="700">01 · SEED</text></g>
+    <g transform="translate(180 40)"><path fill="#006f62" d="M28 18h68a28 28 0 0 1 28 28v74a18 18 0 0 1-18 18H28A28 28 0 0 1 0 110V46a28 28 0 0 1 28-28Z"/><path d="M66 95v27m0-27-20 16m20-16 20 16" fill="none" stroke="#fff" stroke-linecap="round" stroke-width="8"/><text x="0" y="150" fill="#1c2527" font-family="Manrope,Arial,sans-serif" font-size="15" font-weight="700">02 · ROOT</text></g>
+    <g transform="translate(360 40)"><svg width="140" height="140" viewBox="0 0 512 512"><path fill="#006f62" d="M144 48h224c53 0 96 43 96 96v256c0 35-29 64-64 64H144c-53 0-96-43-96-96V144c0-53 43-96 96-96Z"/><g fill="none" stroke="#fff" stroke-linecap="round" stroke-linejoin="round" stroke-width="32"><path d="M262 156v190M326 156v144M262 346 205 382M262 346v53M262 346l59 36"/></g></svg><text x="0" y="150" fill="#1c2527" font-family="Manrope,Arial,sans-serif" font-size="15" font-weight="700">03 · STEM</text></g>
+    <g transform="translate(0 235)"><svg width="140" height="140" viewBox="0 0 512 512"><use href="#mark"/></svg><text x="0" y="150" fill="#1c2527" font-family="Manrope,Arial,sans-serif" font-size="15" font-weight="700">04 · WRITE</text></g>
+    <g transform="translate(180 235)"><svg width="64" height="64" viewBox="0 0 512 512"><use href="#mark"/></svg><svg x="76" y="16" width="32" height="32" viewBox="0 0 512 512"><use href="#mark"/></svg><text x="0" y="150" fill="#1c2527" font-family="Manrope,Arial,sans-serif" font-size="15" font-weight="700">FAVICON · 64 / 32</text></g>
+    <g transform="translate(360 235)"><rect width="190" height="66" rx="14" fill="#17201e"/><svg x="12" y="9" width="48" height="48" viewBox="0 0 512 512"><use href="#mark"/></svg><text x="72" y="41" fill="#e4ece9" font-family="Manrope,Arial,sans-serif" font-size="20" font-weight="700">Markroot</text><text x="0" y="150" fill="#1c2527" font-family="Manrope,Arial,sans-serif" font-size="15" font-weight="700">DARK UI</text></g>
+  </g>
+</svg>

@@ -1,18 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  AlignJustify, BookOpen, Check, ChevronRight, CircleDot, Code2, Columns2, Download, FileCode2,
+  AlignJustify, BookOpen, Check, ChevronRight, CircleAlert, CircleDot, Code2, Columns2, Download, FileCode2,
   ExternalLink, Files, GitBranch, GitCommitHorizontal, GitCompare, ListTree, MessageSquare, Moon, PanelRight,
   RefreshCw, Save, Search, Settings2, Sun, Undo2, X,
 } from 'lucide-react';
-import { resolveWorkspaceReference, workspacePath, type SourceRange, type WorkspacePath } from '@markroot/core';
+import { resolveWorkspaceReference, throwIfAborted, workspacePath, type OperationContext, type ProgressEvent, type SourceRange, type WorkspacePath } from '@markroot/core';
 import { DocumentSession, searchDocument, type DocumentBlock, type DocumentSnapshot } from '@markroot/document';
 import { BasicDocumentEngine, type DocumentOutlineItem, type RenderArtifact } from '@markroot/rendering';
 import { FileSystemAccessWorkspace, ensureDirectoryPermission, type GuardedWorkspace, type WorkspaceEntry } from '@markroot/workspace';
 import { createThread, deleteThread, parseComments, recoverOrphan, replyToThread, setThreadStatus } from '@markroot/comments';
-import { IsomorphicGitRepository, type GitCommitSummary, type GitFileStatus } from '@markroot/git';
+import { IsomorphicGitRepository, type GitCommitCandidate, type GitCommitSummary, type GitFileStatus } from '@markroot/git';
 import { createReviewDraft, decideChange, materializeReview, type ReviewDraft } from '@markroot/review';
-import type { ExportFormat, ExportResource } from '@markroot/export';
+import { parseExportOptions, type ExportFormat, type ExportResource } from '@markroot/export';
 import { LocalCitationProvider, type CitationRecord } from '@markroot/citations';
 import { defaultSettings, deletePendingSession, loadPendingSession, loadRecentWorkspace, loadSettings, savePendingSession, saveRecentWorkspace, saveSettings, type MarkrootSettings } from '@markroot/settings';
 import { SourceEditor } from './components/SourceEditor.js';
@@ -21,12 +21,27 @@ import { Preview } from './components/Preview.js';
 import { WorkspaceTree } from './components/WorkspaceTree.js';
 import { DocumentOutline } from './components/DocumentOutline.js';
 import { PaneResizer } from './components/PaneResizer.js';
+import { BrandMark } from './components/BrandMark.js';
+import { CommitProposalDialog } from './components/CommitProposalDialog.js';
+import { ChromeCommitMessageGenerator, type CommitGenerationProgress, type CommitProposal, type PreparedCommitMessageGenerator } from './commit-message.js';
 import { WorkerExporter } from './workers/export-client.js';
 import { isPdfFigurePath, renderPdfFigurePreview } from './pdf-preview.js';
 import { detachedViewerTitle, prepareDetachedViewerDocument } from './detached-viewer.js';
 
 type Inspector = 'git' | 'review' | 'comments' | 'citations' | 'export' | 'settings' | undefined;
 type RightMode = 'visual' | 'preview';
+interface ExportProgressState extends ProgressEvent { readonly format: ExportFormat }
+interface CommitDialogState {
+  readonly phase: 'preparing' | 'ready' | 'committing';
+  readonly progress?: CommitGenerationProgress;
+  readonly candidate?: GitCommitCandidate;
+  readonly proposal?: CommitProposal;
+}
+interface AiModelSetupState {
+  readonly phase: 'checking' | 'downloading' | 'ready' | 'unavailable';
+  readonly message: string;
+  readonly loaded?: number;
+}
 const EMPTY_WARNINGS: readonly string[] = [];
 
 export function App() {
@@ -53,6 +68,7 @@ export function App() {
   const [scrollAlignment, setScrollAlignment] = useState<'center' | 'reveal'>('reveal');
   const [sourceCursorTarget, setSourceCursorTarget] = useState<number>();
   const [notice, setNotice] = useState<string>();
+  const [aiErrorNotice, setAiErrorNotice] = useState<string>();
   const [git, setGit] = useState<IsomorphicGitRepository>();
   const [gitError, setGitError] = useState<string>();
   const [gitStatus, setGitStatus] = useState<readonly GitFileStatus[]>([]);
@@ -61,11 +77,14 @@ export function App() {
   const [history, setHistory] = useState<readonly GitCommitSummary[]>([]);
   const [review, setReview] = useState<ReviewDraft>();
   const [commitMessage, setCommitMessage] = useState('');
+  const [commitDialog, setCommitDialog] = useState<CommitDialogState>();
+  const [aiModelSetup, setAiModelSetup] = useState<AiModelSetupState>();
   const [commentBody, setCommentBody] = useState('');
   const [replyBodies, setReplyBodies] = useState<Record<string, string>>({});
   const [citations, setCitations] = useState<readonly CitationRecord[]>([]);
   const [citationQuery, setCitationQuery] = useState('');
   const [exportBusy, setExportBusy] = useState(false);
+  const [exportProgress, setExportProgress] = useState<ExportProgressState>();
   const [outlineOpen, setOutlineOpen] = useState(false);
   const [previewAnchor, setPreviewAnchor] = useState<Readonly<{ id: string; request: number }>>();
   const [detachedViewerRoot, setDetachedViewerRoot] = useState<HTMLElement>();
@@ -75,10 +94,14 @@ export function App() {
   const workspacePane = useRef<HTMLElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
   const exportController = useRef<AbortController | undefined>(undefined);
+  const commitGenerationController = useRef<AbortController | undefined>(undefined);
+  const aiModelSetupController = useRef<AbortController | undefined>(undefined);
+  const preparedCommitGenerator = useRef<PreparedCommitMessageGenerator | undefined>(undefined);
   const renderedRef = useRef<RenderArtifact | undefined>(undefined);
   const detachedViewerWindow = useRef<Window | undefined>(undefined);
   const engine = useMemo(() => new BasicDocumentEngine(), []);
   const exporter = useMemo(() => new WorkerExporter(), []);
+  const commitMessageGenerator = useMemo(() => new ChromeCommitMessageGenerator(), []);
   const comments = snapshot ? parseComments(snapshot.source) : undefined;
   const matches = snapshot ? searchDocument(snapshot, search, { regularExpression }) : [];
   const dark = resolvedDark(settings.theme);
@@ -96,6 +119,9 @@ export function App() {
 
   useEffect(() => () => {
     exporter.terminate();
+    commitGenerationController.current?.abort();
+    aiModelSetupController.current?.abort();
+    preparedCommitGenerator.current?.destroy();
     revokeArtifact(renderedRef.current);
     detachedViewerWindow.current?.close();
   }, [exporter]);
@@ -125,7 +151,7 @@ export function App() {
 
   useEffect(() => {
     if (!settings.autosave || !snapshot?.dirty) return;
-    const timer = window.setTimeout(() => { void save(); }, 900);
+    const timer = window.setTimeout(() => { void saveDocument(); }, 900);
     return () => window.clearTimeout(timer);
   }, [settings.autosave, snapshot?.revision, snapshot?.dirty, workspace, fileVersion]);
 
@@ -191,6 +217,42 @@ export function App() {
     void saveSettings(next).catch(() => setNotice('Could not save browser preferences.'));
   }, []);
 
+  function updateAiCommitSuggestions(enabled: boolean) {
+    updateSettings({ ...settings, aiCommitSuggestions: enabled });
+    setAiErrorNotice(undefined);
+    aiModelSetupController.current?.abort();
+    aiModelSetupController.current = undefined;
+    if (!enabled) { setAiModelSetup(undefined); return; }
+
+    const controller = new AbortController();
+    aiModelSetupController.current = controller;
+    setAiModelSetup({ phase: 'checking', message: 'Checking Chrome on-device AI support' });
+    const preparation = commitMessageGenerator.prepare({
+      signal: controller.signal,
+      onProgress(progress) {
+        if (aiModelSetupController.current !== controller) return;
+        setAiModelSetup({
+          phase: progress.phase === 'downloading' ? 'downloading' : 'checking',
+          message: progress.message,
+          ...(typeof progress.loaded === 'number' ? { loaded: progress.loaded } : {}),
+        });
+      },
+    });
+    void preparation.then((prepared) => {
+      prepared.destroy();
+      if (aiModelSetupController.current !== controller) return;
+      aiModelSetupController.current = undefined;
+      setAiErrorNotice(undefined);
+      setAiModelSetup({ phase: 'ready', message: 'Chrome on-device AI is downloaded and ready' });
+    }).catch((error) => {
+      if (controller.signal.aborted || aiModelSetupController.current !== controller) return;
+      aiModelSetupController.current = undefined;
+      const detail = error instanceof Error ? error.message : String(error);
+      setAiModelSetup({ phase: 'unavailable', message: detail });
+      setAiErrorNotice(detail);
+    });
+  }
+
   async function chooseFolder() {
     if (!('showDirectoryPicker' in window)) { setNotice('Markroot needs a Chromium desktop browser with folder access.'); return; }
     try {
@@ -205,6 +267,7 @@ export function App() {
   }
 
   async function connectFolder(handle: FileSystemDirectoryHandle) {
+    closeCommitDialog(false);
     const next = new FileSystemAccessWorkspace(handle);
     const nextEntries = await documentEntries(next);
     setWorkspace(next);
@@ -318,8 +381,8 @@ export function App() {
     session.apply({ from: live.from, to: live.to, insert: replacement, origin: 'visual', baseRevision: current.revision });
   }, [session]);
 
-  async function save() {
-    if (!workspace || !session) return;
+  async function saveDocument(): Promise<DocumentSnapshot | undefined> {
+    if (!workspace || !session) return undefined;
     const current = session.snapshot();
     try {
       const stat = await workspace.writeFileGuarded(current.path, current.source, fileVersion);
@@ -329,7 +392,110 @@ export function App() {
       if (/\.(?:bib|bibtex)$/i.test(current.path)) await loadCitations();
       setNotice(`Saved ${current.path}.`);
       if (git) setGitStatus(await git.status());
-    } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
+      return current;
+    } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); return undefined; }
+  }
+
+  async function explicitSave() {
+    if (!settings.aiCommitSuggestions || !git) { await saveDocument(); return; }
+    setAiErrorNotice(undefined);
+    if (!settings.profile.email) {
+      if (await saveDocument()) { setInspector('git'); setNotice('A Git author email is required before creating a commit.'); }
+      return;
+    }
+    if (commitDialog || commitGenerationController.current) return;
+
+    const controller = new AbortController();
+    commitGenerationController.current = controller;
+    setCommitDialog({ phase: 'preparing', progress: { phase: 'checking', message: 'Checking Chrome on-device AI' } });
+    const onProgress = (progress: CommitGenerationProgress) => setCommitDialog((current) => current ? { ...current, progress } : current);
+    const preparation = commitMessageGenerator.prepare({ signal: controller.signal, onProgress });
+    void preparation.catch(() => undefined);
+
+    const saved = await saveDocument();
+    if (!saved) {
+      controller.abort();
+      if (commitGenerationController.current === controller) commitGenerationController.current = undefined;
+      void preparation.then((prepared) => prepared.destroy()).catch(() => undefined);
+      setCommitDialog(undefined);
+      return;
+    }
+    try {
+      const candidate = await git.prepareCommitCandidate(saved.path);
+      if (!candidate) {
+        controller.abort();
+        const prepared = await preparation.catch(() => undefined);
+        prepared?.destroy();
+        if (commitGenerationController.current === controller) commitGenerationController.current = undefined;
+        setCommitDialog(undefined);
+        return;
+      }
+      setCommitDialog((current) => current ? { ...current, candidate } : current);
+      const prepared = await preparation;
+      if (controller.signal.aborted) { prepared.destroy(); return; }
+      preparedCommitGenerator.current = prepared;
+      const proposal = await prepared.generate(candidate.diff, { signal: controller.signal, onProgress });
+      if (!controller.signal.aborted) setCommitDialog({ phase: 'ready', candidate, proposal });
+    } catch (error) {
+      if (!controller.signal.aborted) aiCommitUnavailable();
+    }
+  }
+
+  async function regenerateCommitProposal() {
+    const candidate = commitDialog?.candidate;
+    if (!candidate) return;
+    commitGenerationController.current?.abort();
+    preparedCommitGenerator.current?.destroy();
+    preparedCommitGenerator.current = undefined;
+    const controller = new AbortController();
+    commitGenerationController.current = controller;
+    const onProgress = (progress: CommitGenerationProgress) => setCommitDialog((current) => current ? { ...current, phase: 'preparing', progress } : current);
+    setCommitDialog({ phase: 'preparing', candidate, progress: { phase: 'checking', message: 'Preparing Chrome on-device AI' } });
+    try {
+      const prepared = await commitMessageGenerator.prepare({ signal: controller.signal, onProgress });
+      preparedCommitGenerator.current = prepared;
+      const proposal = await prepared.generate(candidate.diff, { signal: controller.signal, onProgress });
+      if (!controller.signal.aborted) setCommitDialog({ phase: 'ready', candidate, proposal });
+    } catch {
+      if (!controller.signal.aborted) aiCommitUnavailable();
+    }
+  }
+
+  async function acceptAiCommit() {
+    const state = commitDialog;
+    if (!git || state?.phase !== 'ready' || !state.candidate || !state.proposal?.subject.trim()) return;
+    setCommitDialog({ ...state, phase: 'committing' });
+    const message = `${state.proposal.subject.trim()}${state.proposal.body.trim() ? `\n\n${state.proposal.body.trim()}` : ''}`;
+    try {
+      const oid = await git.commitCandidate(state.candidate, message, settings.profile);
+      closeCommitDialog(false);
+      setCommitMessage('');
+      setAiErrorNotice(undefined);
+      setNotice(`Committed ${oid.slice(0, 8)}.`);
+      await refreshGit();
+    } catch (error) {
+      closeCommitDialog(true);
+      setAiErrorNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  function cancelAiCommit() {
+    closeCommitDialog(true);
+    setNotice('AI commit message generation cancelled; no commit was created.');
+  }
+
+  function aiCommitUnavailable() {
+    closeCommitDialog(true);
+    setAiErrorNotice('AI-generated commit message unavailable; no commit was created.');
+  }
+
+  function closeCommitDialog(openGit: boolean) {
+    commitGenerationController.current?.abort();
+    commitGenerationController.current = undefined;
+    preparedCommitGenerator.current?.destroy();
+    preparedCommitGenerator.current = undefined;
+    setCommitDialog(undefined);
+    if (openGit) setInspector('git');
   }
 
   async function refreshWorkspace() {
@@ -477,6 +643,7 @@ export function App() {
     const controller = new AbortController();
     exportController.current = controller;
     setExportBusy(true);
+    setExportProgress({ format, phase: 'resources', completed: 0, total: exportStepTotal(format), message: 'Starting local export' });
     try {
       let saveHandle: FileSystemFileHandle | undefined;
       if (destination === 'save-as' && 'showSaveFilePicker' in window) {
@@ -486,11 +653,21 @@ export function App() {
         });
       }
       setNotice(`Preparing ${format.toUpperCase()} locally…`);
-      const resources = workspace ? await collectDocumentResources(workspace, snapshot, entries, format) : [];
+      setExportProgress({ format, phase: 'resources', completed: 0, total: exportStepTotal(format), message: 'Collecting document resources' });
+      const exportOptions = parseExportOptions(snapshot.source);
+      const resources = workspace ? await collectDocumentResources(workspace, snapshot, format, exportOptions, {
+        signal: controller.signal,
+        onProgress: (progress) => setExportProgress(appExportProgress(format, progress)),
+      }) : [];
       const result = await exporter.export(
-        { format, source: snapshot.source, filename: snapshot.path, resources },
-        { signal: controller.signal, onProgress: (progress) => setNotice(progress.message ?? `Exporting ${format.toUpperCase()}…`) },
+        { format, source: snapshot.source, filename: snapshot.path, resources, justified: settings.viewerJustified, ...exportOptions },
+        { signal: controller.signal, onProgress: (progress) => {
+          setNotice(progress.message ?? `Exporting ${format.toUpperCase()}…`);
+          setExportProgress(appExportProgress(format, progress));
+        } },
       );
+      const total = exportStepTotal(format);
+      setExportProgress({ format, phase: 'save', completed: total - 1, total, message: exportSaveMessage(destination) });
       if (saveHandle) {
         const writable = await saveHandle.createWritable();
         await writable.write(result.blob);
@@ -501,8 +678,9 @@ export function App() {
         await workspace.writeBytes(outputPath, new Uint8Array(await result.blob.arrayBuffer()));
         await refreshWorkspace();
       } else download(result.blob, result.filename);
+      setExportProgress({ format, phase: 'complete', completed: total, total, message: `${result.filename} is ready` });
       setNotice(`${result.filename} is ready${destination === 'workspace' ? ' beside the source' : ''}.`);
-    } catch (error) { setNotice(error instanceof DOMException && error.name === 'AbortError' ? 'Export cancelled.' : error instanceof Error ? error.message : String(error)); }
+    } catch (error) { setExportProgress(undefined); setNotice(error instanceof DOMException && error.name === 'AbortError' ? 'Export cancelled.' : error instanceof Error ? error.message : String(error)); }
     finally { if (exportController.current === controller) exportController.current = undefined; setExportBusy(false); }
   }
 
@@ -556,19 +734,19 @@ export function App() {
     <div className="segmented"><button className={rightMode === 'visual' ? 'active' : ''} onClick={() => { setScrollOrigin('command'); setScrollAlignment('reveal'); setRightMode('visual'); }}>Visual</button><button className={rightMode === 'preview' ? 'active' : ''} onClick={() => { setScrollOrigin('command'); setScrollAlignment('reveal'); setRightMode('preview'); }}>Rendered</button></div>
     <button className={settings.viewerJustified ? 'viewer-option active' : 'viewer-option'} onClick={() => updateSettings({ ...settings, viewerJustified: !settings.viewerJustified })} title="Justify viewer text" aria-pressed={settings.viewerJustified}><AlignJustify size={14}/></button>
     <span className="spacer"/>
-    <span>{settings.viewerFontSize}px · {rendered?.engine ?? 'source model'}</span>
+    <span>{Math.round(settings.viewerFontSize / 17 * 100)}% view · {rendered?.engine ?? 'source model'}</span>
     <button className="viewer-option" onClick={detached ? reattachViewer : detachViewer} title={detached ? 'Return viewer to the main window' : 'Detach viewer to another window'} aria-label={detached ? 'Reattach viewer' : 'Detach viewer'}>{detached ? <Columns2 size={15}/> : <ExternalLink size={15}/>}</button>
   </div>;
 
-  if (!('showDirectoryPicker' in window)) return <main className="unsupported-browser"><div className="welcome-symbol">¶</div><h1>Markroot needs Chromium desktop</h1><p>This browser cannot grant direct access to a real local folder. Use a current Chromium-based desktop browser over HTTPS or localhost; Markroot does not offer an upload fallback.</p></main>;
+  if (!('showDirectoryPicker' in window)) return <main className="unsupported-browser"><BrandMark className="welcome-symbol"/><h1>Markroot needs Chromium desktop</h1><p>This browser cannot grant direct access to a real local folder. Use a current Chromium-based desktop browser over HTTPS or localhost; Markroot does not offer an upload fallback.</p></main>;
 
   return <><div className={`app ${inspector ? 'with-inspector' : ''}`} style={{ '--files-width': `${settings.filesPaneWidth}px` } as CSSProperties}>
     <header className="topbar">
-      <div className="brand" aria-label="Markroot"><span className="brand-mark">M</span><strong>Markroot</strong></div>
+      <div className="brand" aria-label="Markroot"><BrandMark className="brand-mark"/><strong>Markroot</strong></div>
       <button className="workspace-button" onClick={() => void chooseFolder()}><Files size={16}/><span>{rootName}</span><ChevronRight size={14}/></button>
       <div className="document-title"><FileCode2 size={16}/><span>{snapshot?.path ?? 'Open a Markdown or QMD file'}</span>{snapshot?.dirty && <CircleDot size={13} aria-label="Unsaved"/>}</div>
       <div className="top-actions">
-        {snapshot && <button onClick={() => void save()} title="Save (Ctrl/Cmd+S)"><Save size={17}/></button>}
+        {snapshot && <button onClick={() => void explicitSave()} title="Save (Ctrl/Cmd+S)"><Save size={17}/></button>}
         <button onClick={() => setFindOpen((open) => !open)} title="Find (Ctrl/Cmd+F)"><Search size={17}/></button>
         <button onClick={() => toggleInspector('comments')} className={inspector === 'comments' ? 'selected' : ''} title="Comments"><MessageSquare size={17}/>{comments?.threads.length ? <small>{comments.threads.length}</small> : null}</button>
         <button onClick={() => toggleInspector('git')} className={inspector === 'git' ? 'selected' : ''} title="Git"><GitBranch size={17}/></button>
@@ -579,6 +757,7 @@ export function App() {
 
     {findOpen && <div className="findbar"><Search size={15}/><input ref={searchInput} value={search} onChange={(event) => { setSearch(event.target.value); setMatchCursor(-1); }} placeholder="Find in source and rendered view"/><button className={regularExpression ? 'find-option active' : 'find-option'} onClick={() => { setRegularExpression((value) => !value); setMatchCursor(-1); }} title="Use regular expression">.*</button><button className="find-step" disabled={!matches.length} onClick={() => navigateMatch(-1)} title="Previous match">↑</button><button className="find-step" disabled={!matches.length} onClick={() => navigateMatch(1)} title="Next match">↓</button><span>{matches.length} source matches</span><form className="goto-line" onSubmit={(event) => { event.preventDefault(); const line = Number.parseInt(lineInput, 10); if (Number.isFinite(line) && line > 0) { setGoToLine(undefined); window.setTimeout(() => setGoToLine(line), 0); } }}><label>Line</label><input inputMode="numeric" aria-label="Go to line" value={lineInput} onChange={(event) => setLineInput(event.target.value.replace(/\D/g, ''))} placeholder="#"/><button type="submit">Go</button></form><button onClick={() => { setSearch(''); setFindOpen(false); }}><X size={15}/></button></div>}
     {notice && <div className="notice" role="status"><span>{notice}</span><button onClick={() => setNotice(undefined)}><X size={14}/></button></div>}
+    {aiErrorNotice && <div className="notice error-notice" role="alert"><CircleAlert size={18}/><span>{aiErrorNotice}</span><button onClick={() => setAiErrorNotice(undefined)} aria-label="Dismiss error"><X size={14}/></button></div>}
 
     <aside className="files-panel">
       <div className="panel-heading"><span>Workspace</span><div className="panel-heading-actions"><button className={outlineOpen ? 'selected' : ''} disabled={!rendered?.outline?.length} onClick={() => setOutlineOpen((open) => !open)} title="Document outline"><ListTree size={14}/></button><button onClick={() => void refreshWorkspace()} title="Refresh"><RefreshCw size={14}/></button></div></div>
@@ -590,9 +769,9 @@ export function App() {
     </aside>
 
     <main className={`workspace ${detachedViewerRoot ? 'viewer-detached' : ''}`} ref={workspacePane} style={{ '--source-width': `${settings.sourcePaneRatio * 100}%` } as CSSProperties}>
-      {!snapshot ? <div className="welcome"><div className="welcome-symbol">¶</div><h1>Your local writing workspace</h1><p>Choose a folder, then open a Markdown or QMD file. Source, preview, comments, and Git stay together on this device.</p>{!workspace && <button className="primary" onClick={() => void chooseFolder()}>Open folder</button>}</div>
+      {!snapshot ? <div className="welcome"><BrandMark className="welcome-symbol"/><h1>Your local writing workspace</h1><p>Choose a folder, then open a Markdown or QMD file. Source, preview, comments, and Git stay together on this device.</p>{!workspace && <button className="primary" onClick={() => void chooseFolder()}>Open folder</button>}</div>
       : <>
-        <section className="pane source-pane"><div className="pane-title"><Code2 size={15}/><span>Source</span><span className="spacer"/>{detachedViewerRoot && <><button className="detached-indicator" onClick={() => detachedViewerWindow.current?.focus()} title="Focus the detached viewer"><ExternalLink size={13}/>Viewer detached</button><button className="viewer-option" onClick={reattachViewer} title="Return viewer to this window" aria-label="Reattach viewer"><Columns2 size={15}/></button></>}<span>{settings.sourceFontSize}px · Ln {lineAt(snapshot.source, selection.from)}</span></div><SourceEditor path={snapshot.path} workspacePaths={entries.map((entry) => entry.path)} value={snapshot.source} blocks={snapshot.blocks} search={search} regularExpression={regularExpression} dark={dark} fontFamily={settings.sourceFont} fontSize={settings.sourceFontSize} activeBlock={scrollTarget} scrollTarget={scrollOrigin === 'source' ? undefined : scrollTarget} scrollProgress={scrollProgress} scrollAlignment={scrollAlignment} cursorTarget={sourceCursorTarget} goToLine={goToLine} onChange={applySource} onSelection={selectSource} onScroll={(id, progress) => { setSourceCursorTarget(undefined); setScrollOrigin('source'); setScrollAlignment('center'); setScrollProgress(progress); setScrollTarget(id); }} onSave={() => void save()} onFind={() => setFindOpen(true)}/></section>
+        <section className="pane source-pane"><div className="pane-title"><Code2 size={15}/><span>Source</span><span className="spacer"/>{detachedViewerRoot && <><button className="detached-indicator" onClick={() => detachedViewerWindow.current?.focus()} title="Focus the detached viewer"><ExternalLink size={13}/>Viewer detached</button><button className="viewer-option" onClick={reattachViewer} title="Return viewer to this window" aria-label="Reattach viewer"><Columns2 size={15}/></button></>}<span>{settings.sourceFontSize}px · Ln {lineAt(snapshot.source, selection.from)}</span></div><SourceEditor path={snapshot.path} workspacePaths={entries.map((entry) => entry.path)} value={snapshot.source} blocks={snapshot.blocks} search={search} regularExpression={regularExpression} dark={dark} fontFamily={settings.sourceFont} fontSize={settings.sourceFontSize} activeBlock={scrollTarget} scrollTarget={scrollOrigin === 'source' ? undefined : scrollTarget} scrollProgress={scrollProgress} scrollAlignment={scrollAlignment} cursorTarget={sourceCursorTarget} goToLine={goToLine} onChange={applySource} onSelection={selectSource} onScroll={(id, progress) => { setSourceCursorTarget(undefined); setScrollOrigin('source'); setScrollAlignment('center'); setScrollProgress(progress); setScrollTarget(id); }} onSave={() => void explicitSave()} onFind={() => setFindOpen(true)}/></section>
         {!detachedViewerRoot && <><PaneResizer label="Resize source and viewer panes" value={settings.sourcePaneRatio} min={0.25} max={0.75} keyboardStep={0.02} pixelsPerUnit={() => workspacePane.current?.clientWidth ?? 1} onChange={(value, finished) => resizeLayout({ sourcePaneRatio: value }, finished)}/><section className="pane right-pane">{viewerToolbar(false)}<div className="right-scroll">{viewerContent}</div></section></>}
       </>}
     </main>
@@ -602,10 +781,10 @@ export function App() {
       {inspector === 'review' && <ReviewPanel draft={review} onDecide={(id, decision) => review && setReview(decideChange(review, id, decision))} onApply={applyReview}/>}
       {inspector === 'comments' && <CommentsPanel parsed={comments} selection={selection} body={commentBody} setBody={setCommentBody} replies={replyBodies} setReplies={setReplyBodies} onAdd={addComment} onNavigate={navigateComment} onRepair={(id) => { if (snapshot) applySource(recoverOrphan(snapshot.source, id), 'comment'); }} onReply={(id) => { if (!snapshot || !replyBodies[id]?.trim()) return; applySource(replyToThread(snapshot.source, id, replyBodies[id]!, settings.profile), 'comment'); setReplyBodies((all) => ({ ...all, [id]: '' })); }} onStatus={(id, status) => { if (snapshot) applySource(setThreadStatus(snapshot.source, id, status), 'comment'); }} onDelete={(id) => { if (snapshot && window.confirm('Delete this comment thread?')) applySource(deleteThread(snapshot.source, id), 'comment'); }}/>}
       {inspector === 'citations' && <CitationsPanel records={citations} query={citationQuery} setQuery={setCitationQuery}/>}
-      {inspector === 'export' && <ExportPanel disabled={!snapshot} busy={exportBusy} onCancel={() => exportController.current?.abort()} onExport={exportDocument}/>}
-      {inspector === 'settings' && <SettingsPanel settings={settings} onChange={updateSettings}/>}
+      {inspector === 'export' && <ExportPanel disabled={!snapshot} busy={exportBusy} progress={exportProgress} onCancel={() => exportController.current?.abort()} onExport={exportDocument}/>}
+      {inspector === 'settings' && <SettingsPanel settings={settings} aiModelSetup={aiModelSetup} onChange={updateSettings} onAiCommitSuggestionsChange={updateAiCommitSuggestions}/>}
     </aside>}
-  </div>{detachedViewerRoot && createPortal(<main className="detached-viewer"><div className="detached-viewer-title"><strong>Markroot</strong><span>{snapshot?.path ?? 'Viewer'}</span></div>{viewerToolbar(true)}<div className="right-scroll">{viewerContent}</div></main>, detachedViewerRoot)}</>;
+  </div>{commitDialog && <CommitProposalDialog phase={commitDialog.phase} progress={commitDialog.progress} proposal={commitDialog.proposal} fileCount={commitDialog.candidate?.paths.length ?? 0} onProposalChange={(proposal) => setCommitDialog((current) => current ? { ...current, proposal } : current)} onAccept={() => void acceptAiCommit()} onRegenerate={() => void regenerateCommitProposal()} onCancel={cancelAiCommit}/>} {detachedViewerRoot && createPortal(<main className="detached-viewer"><div className="detached-viewer-title"><BrandMark className="detached-viewer-mark"/><strong>Markroot</strong><span>{snapshot?.path ?? 'Viewer'}</span></div>{viewerToolbar(true)}<div className="right-scroll">{viewerContent}</div></main>, detachedViewerRoot)}</>;
 }
 
 function GitPanel({ git, error, status, branches, currentBranch, history, dirty, message, setMessage, onStage, onCommit, onRefresh, onCheckout, onCreateBranch, onRenameBranch, onDeleteBranch, onMerge, onCompare }: { git: IsomorphicGitRepository | undefined; error: string | undefined; status: readonly GitFileStatus[]; branches: readonly string[]; currentBranch: string | undefined; history: readonly GitCommitSummary[]; dirty: boolean; message: string; setMessage(value: string): void; onStage(path: WorkspacePath, staged: boolean): Promise<void>; onCommit(): Promise<void>; onRefresh(): Promise<void>; onCheckout(ref: string): Promise<void>; onCreateBranch(ref: string): Promise<void>; onRenameBranch(from: string, to: string): Promise<void>; onDeleteBranch(ref: string): Promise<void>; onMerge(ref: string): Promise<void>; onCompare(ref: string): Promise<void> }) {
@@ -635,14 +814,49 @@ function CitationsPanel({ records, query, setQuery }: { records: readonly Citati
   return <div className="inspector-body"><label className="search-field"><Search size={14}/><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search local .bib files"/></label><div className="citation-list">{filtered.map((record) => <article key={`${record.source}:${record.key}`}><code>@{record.key}</code><strong>{record.title ?? 'Untitled reference'}</strong><span>{[record.author, record.year].filter(Boolean).join(' · ')}</span></article>)}</div>{!records.length && <p className="microcopy">No BibTeX entries found in this folder.</p>}</div>;
 }
 
-function ExportPanel({ disabled, busy, onCancel, onExport }: { disabled: boolean; busy: boolean; onCancel(): void; onExport(format: ExportFormat, destination: 'download' | 'save-as' | 'workspace'): Promise<void> }) {
+function ExportPanel({ disabled, busy, progress, onCancel, onExport }: { disabled: boolean; busy: boolean; progress: ExportProgressState | undefined; onCancel(): void; onExport(format: ExportFormat, destination: 'download' | 'save-as' | 'workspace'): Promise<void> }) {
   const [destination, setDestination] = useState<'download' | 'save-as' | 'workspace'>('download');
-  return <div className="inspector-body"><p>Exports run locally with bundled engines and local document resources. Comments and review markers are removed.</p><label className="field"><span>Destination</span><select disabled={busy} value={destination} onChange={(event) => setDestination(event.target.value as typeof destination)}><option value="download">Browser download</option><option value="save-as">Save As…</option><option value="workspace">Beside source</option></select></label>{(['html', 'docx', 'pdf'] as const).map((format) => <button key={format} className="export-button" disabled={disabled || busy} onClick={() => void onExport(format, destination)}><Download size={16}/><span><strong>{format.toUpperCase()}</strong><small>{format === 'pdf' ? 'Pandoc → Typst WASM' : 'Pandoc WASM'}</small></span></button>)}{busy && <button className="danger wide" onClick={onCancel}>Cancel export</button>}</div>;
+  return <div className="inspector-body"><p>Exports run locally with bundled engines and local document resources. Comments and review markers are removed.</p><label className="field"><span>Destination</span><select disabled={busy} value={destination} onChange={(event) => setDestination(event.target.value as typeof destination)}><option value="download">Browser download</option><option value="save-as">Save As…</option><option value="workspace">Beside source</option></select></label>{(['html', 'docx', 'pdf'] as const).map((format) => <button key={format} className="export-button" disabled={disabled || busy} onClick={() => void onExport(format, destination)}><Download size={16}/><span><strong>{format.toUpperCase()}</strong><small>{format === 'pdf' ? 'Pandoc → Typst WASM' : 'Pandoc WASM'}</small></span></button>)}{progress && <ExportProgress progress={progress} busy={busy} onCancel={onCancel}/>}</div>;
 }
 
-function SettingsPanel({ settings, onChange }: { settings: MarkrootSettings; onChange(settings: MarkrootSettings): void }) {
+function ExportProgress({ progress, busy, onCancel }: { progress: ExportProgressState; busy: boolean; onCancel(): void }) {
+  const total = progress.total ?? 1;
+  const percent = Math.round(Math.max(0, Math.min(1, progress.completed / total)) * 100);
+  const steps = progress.format === 'pdf' ? ['Resources', 'Pandoc', 'Typst', 'Save'] : ['Resources', 'Pandoc', 'Save'];
+  return <section className={`export-progress ${busy ? 'running' : 'complete'}`} aria-live="polite">
+    <div className="export-progress-heading">{busy ? <RefreshCw className="spin" size={15}/> : <Check size={15}/>}<strong>{progress.format.toUpperCase()} export</strong><span>{percent}%</span></div>
+    <div className="export-progress-track" role="progressbar" aria-label={`${progress.format.toUpperCase()} export progress`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}><span style={{ width: `${percent}%` }}/></div>
+    <p>{progress.message ?? `Exporting ${progress.format.toUpperCase()}…`}</p>
+    <ol>{steps.map((step, index) => <li key={step} className={index < progress.completed || !busy && index === steps.length - 1 ? 'done' : index === progress.completed ? 'active' : ''}><span>{index < progress.completed || !busy && index === steps.length - 1 ? <Check size={10}/> : index + 1}</span>{step}</li>)}</ol>
+    {busy && <div className="export-progress-actions"><button className="export-cancel" onClick={onCancel}><X size={13}/>Cancel export</button></div>}
+  </section>;
+}
+
+function exportStepTotal(format: ExportFormat): number { return format === 'pdf' ? 4 : 3; }
+
+function appExportProgress(format: ExportFormat, progress: ProgressEvent): ExportProgressState {
+  const total = exportStepTotal(format);
+  const completed = progress.phase === 'complete' ? total - 1 : progress.phase === 'typst' ? 2 : progress.phase === 'pandoc' || progress.phase === 'prepare' ? 1 : 0;
+  return { format, phase: progress.phase, completed, total, ...(progress.message ? { message: progress.message } : {}) };
+}
+
+function exportSaveMessage(destination: 'download' | 'save-as' | 'workspace'): string {
+  return destination === 'workspace' ? 'Saving beside the source' : destination === 'save-as' ? 'Writing selected file' : 'Preparing browser download';
+}
+
+function SettingsPanel({ settings, aiModelSetup, onChange, onAiCommitSuggestionsChange }: { settings: MarkrootSettings; aiModelSetup: AiModelSetupState | undefined; onChange(settings: MarkrootSettings): void; onAiCommitSuggestionsChange(enabled: boolean): void }) {
   const fontOptions = <><option value="serif">Source Serif</option><option value="sans">Manrope</option><option value="mono">IBM Plex Mono</option></>;
-  return <div className="inspector-body"><div className="theme-picker"><button className={settings.theme === 'light' ? 'active' : ''} onClick={() => onChange({ ...settings, theme: 'light' })}><Sun size={15}/>Light</button><button className={settings.theme === 'dark' ? 'active' : ''} onClick={() => onChange({ ...settings, theme: 'dark' })}><Moon size={15}/>Dark</button><button className={settings.theme === 'system' ? 'active' : ''} onClick={() => onChange({ ...settings, theme: 'system' })}>System</button></div><div className="section-label"><span>Typography</span></div><div className="typography-settings"><label className="field"><span>Source font</span><select value={settings.sourceFont} onChange={(event) => onChange({ ...settings, sourceFont: event.target.value as MarkrootSettings['sourceFont'] })}>{fontOptions}</select></label><label className="field"><span>Source size</span><input type="number" min="12" max="28" value={settings.sourceFontSize} onChange={(event) => onChange({ ...settings, sourceFontSize: boundedFontSize(event.target.value, settings.sourceFontSize) })}/></label><label className="field"><span>Viewer font</span><select value={settings.viewerFont} onChange={(event) => onChange({ ...settings, viewerFont: event.target.value as MarkrootSettings['viewerFont'] })}>{fontOptions}</select></label><label className="field"><span>Viewer size</span><input type="number" min="12" max="28" value={settings.viewerFontSize} onChange={(event) => onChange({ ...settings, viewerFontSize: boundedFontSize(event.target.value, settings.viewerFontSize) })}/></label></div><label className="check"><input type="checkbox" checked={settings.viewerJustified} onChange={(event) => onChange({ ...settings, viewerJustified: event.target.checked })}/><span>Justify viewer paragraphs</span></label><div className="section-label identity-label"><span>Local identity</span></div><label className="field"><span>Display name</span><input value={settings.profile.displayName} onChange={(event) => onChange({ ...settings, profile: { ...settings.profile, displayName: event.target.value } })}/></label><label className="field"><span>Git email</span><input type="email" value={settings.profile.email ?? ''} onChange={(event) => onChange({ ...settings, profile: { ...settings.profile, email: event.target.value } })}/></label><label className="check"><input type="checkbox" checked={settings.autosave} onChange={(event) => onChange({ ...settings, autosave: event.target.checked })}/><span>Autosave documents</span></label><label className="check"><input type="checkbox" checked={settings.allowRemoteResources} onChange={(event) => onChange({ ...settings, allowRemoteResources: event.target.checked })}/><span>Allow remote preview resources</span></label><p className="microcopy">Preferences and your local identity are stored only in this browser.</p></div>;
+  return <div className="inspector-body"><div className="theme-picker"><button className={settings.theme === 'light' ? 'active' : ''} onClick={() => onChange({ ...settings, theme: 'light' })}><Sun size={15}/>Light</button><button className={settings.theme === 'dark' ? 'active' : ''} onClick={() => onChange({ ...settings, theme: 'dark' })}><Moon size={15}/>Dark</button><button className={settings.theme === 'system' ? 'active' : ''} onClick={() => onChange({ ...settings, theme: 'system' })}>System</button></div><div className="section-label"><span>Typography</span></div><div className="typography-settings"><label className="field"><span>Source font</span><select value={settings.sourceFont} onChange={(event) => onChange({ ...settings, sourceFont: event.target.value as MarkrootSettings['sourceFont'] })}>{fontOptions}</select></label><label className="field"><span>Source size</span><input type="number" min="12" max="28" value={settings.sourceFontSize} onChange={(event) => onChange({ ...settings, sourceFontSize: boundedFontSize(event.target.value, settings.sourceFontSize) })}/></label><label className="field"><span>Viewer font</span><select value={settings.viewerFont} onChange={(event) => onChange({ ...settings, viewerFont: event.target.value as MarkrootSettings['viewerFont'] })}>{fontOptions}</select></label><label className="field"><span>Viewer size</span><input type="number" min="12" max="28" value={settings.viewerFontSize} onChange={(event) => onChange({ ...settings, viewerFontSize: boundedFontSize(event.target.value, settings.viewerFontSize) })}/></label></div><p className="microcopy">Sizes scale each writing surface proportionally, including spacing and padding. They are display-only and never change exported document typography.</p><label className="check"><input type="checkbox" checked={settings.viewerJustified} onChange={(event) => onChange({ ...settings, viewerJustified: event.target.checked })}/><span>Justify viewer paragraphs</span></label><div className="section-label identity-label"><span>Local identity</span></div><label className="field"><span>Display name</span><input value={settings.profile.displayName} onChange={(event) => onChange({ ...settings, profile: { ...settings.profile, displayName: event.target.value } })}/></label><label className="field"><span>Git email</span><input type="email" value={settings.profile.email ?? ''} onChange={(event) => onChange({ ...settings, profile: { ...settings.profile, email: event.target.value } })}/></label><label className="check"><input type="checkbox" checked={settings.autosave} onChange={(event) => onChange({ ...settings, autosave: event.target.checked })}/><span>Autosave documents</span></label><label className="check"><input type="checkbox" checked={settings.aiCommitSuggestions} onChange={(event) => onAiCommitSuggestionsChange(event.target.checked)}/><span>Generate commit messages with Chrome on-device AI</span></label>{settings.aiCommitSuggestions && aiModelSetup && <AiModelSetupStatus state={aiModelSetup}/>}<p className="microcopy">Enabling this option requests the Gemini Nano download from Chrome. The browser manages it outside this tab’s normal Network requests; inspect <code>chrome://on-device-internals</code> for model status. Only candidate Git diffs are passed to the model, with no cloud fallback.</p><label className="check"><input type="checkbox" checked={settings.allowRemoteResources} onChange={(event) => onChange({ ...settings, allowRemoteResources: event.target.checked })}/><span>Allow remote preview resources</span></label><p className="microcopy">Preferences and your local identity are stored only in this browser.</p></div>;
+}
+
+function AiModelSetupStatus({ state }: { state: AiModelSetupState }) {
+  const loaded = state.loaded === undefined ? undefined : Math.max(0, Math.min(1, state.loaded));
+  const working = state.phase === 'checking' || state.phase === 'downloading';
+  return <div className={`ai-model-status ${state.phase}`} role={state.phase === 'unavailable' ? 'alert' : 'status'} aria-live={state.phase === 'unavailable' ? 'assertive' : 'polite'}>
+    <div>{working ? <RefreshCw className="spin" size={14}/> : state.phase === 'ready' ? <Check size={14}/> : <X size={14}/>}<strong>{state.phase === 'ready' ? 'Model ready' : state.phase === 'unavailable' ? 'Model unavailable' : state.phase === 'downloading' ? 'Preparing model' : 'Checking support'}</strong>{loaded !== undefined && loaded > 0 && <span>{Math.round(loaded * 100)}%</span>}</div>
+    {state.phase === 'downloading' && <div className={`ai-model-progress ${loaded === undefined || loaded === 0 ? 'indeterminate' : ''}`} role="progressbar" aria-label="Chrome on-device AI model download" aria-valuemin={0} aria-valuemax={100} {...(loaded !== undefined && loaded > 0 ? { 'aria-valuenow': Math.round(loaded * 100) } : {})}><span style={loaded !== undefined && loaded > 0 ? { width: `${Math.round(loaded * 100)}%` } : undefined}/></div>}
+    <p>{state.message}</p>
+  </div>;
 }
 
 async function documentEntries(workspace: GuardedWorkspace): Promise<readonly WorkspaceEntry[]> {
@@ -700,36 +914,51 @@ async function collectPreviewResources(workspace: GuardedWorkspace | undefined, 
   return resources;
 }
 
-async function collectDocumentResources(workspace: GuardedWorkspace, snapshot: DocumentSnapshot, entries: readonly WorkspaceEntry[], format: ExportFormat): Promise<readonly ExportResource[]> {
+async function collectDocumentResources(workspace: GuardedWorkspace, snapshot: DocumentSnapshot, format: ExportFormat, exportOptions: ReturnType<typeof parseExportOptions>, context?: OperationContext): Promise<readonly ExportResource[]> {
   const sourceReferences = new Set<string>();
   for (const match of snapshot.source.matchAll(/!\[(?:[^\[\]]|\[[^\]]*\])*\]\((<[^>]+>|[^\s)>]+)(?:\s+["'][^"']*["'])?\)/g)) sourceReferences.add(unwrapReference(match[1]!));
   for (const match of snapshot.source.matchAll(/\b(?:bibliography|csl|reference-doc)\s*:\s*["']?([^\s"']+)/gi)) sourceReferences.add(unwrapReference(match[1]!));
+  for (const reference of [exportOptions.referenceDocx, exportOptions.htmlTemplate, exportOptions.typstTemplate, ...exportOptions.htmlCss, ...exportOptions.typstTemplatePartials]) {
+    if (reference) sourceReferences.add(reference);
+  }
+  const localReferences = [...sourceReferences].filter((reference) => !/^(?:https?:|data:|blob:|#)/i.test(reference));
   const resources: ExportResource[] = [];
   const added = new Set<string>();
   const add = async (reference: string, path: WorkspacePath) => {
     if (added.has(reference)) return;
-    const stat = await workspace.stat(path);
+    throwIfAborted(context);
+    const stat = await workspace.stat(path, context);
     if (stat.kind !== 'file') return;
-    const bytes = await workspace.readBytes(path);
+    const bytes = await workspace.readBytes(path, context);
     const localFile = new Blob([bytes.slice()], { type: mediaTypeForPath(path) });
     const content = format !== 'pdf' && isPdfFigurePath(path)
-      ? await renderPdfFigurePreview(localFile, `export:${path}:${stat.version ?? `${stat.modifiedAt ?? 'unknown'}:${stat.size}`}`)
+      ? await abortable(renderPdfFigurePreview(localFile, `export:${path}:${stat.version ?? `${stat.modifiedAt ?? 'unknown'}:${stat.size}`}`), context?.signal)
       : localFile;
+    throwIfAborted(context);
     resources.push({ path: reference, content });
     added.add(reference);
   };
-  for (const reference of sourceReferences) {
-    if (/^(?:https?:|data:|blob:|#)/i.test(reference)) continue;
+  if (!localReferences.length) context?.onProgress?.({ phase: 'resources', completed: 0, total: 0, message: 'No local resources to collect' });
+  for (const [index, reference] of localReferences.entries()) {
+    context?.onProgress?.({ phase: 'resources', completed: index, total: localReferences.length, message: `Reading resource ${index + 1} of ${localReferences.length}: ${reference}` });
     try {
       await add(reference, resolveWorkspaceReference(snapshot.path, reference));
-    } catch { /* unresolved dependencies are reported by Pandoc */ }
-  }
-  for (const entry of entries) {
-    if (entry.kind !== 'file' || !/\.(?:bib|bibtex|csl)$/i.test(entry.path)) continue;
-    try { await add(entry.path, entry.path); }
-    catch { /* unreadable bibliography dependencies are reported by Pandoc */ }
+    } catch { throwIfAborted(context); /* unresolved dependencies are reported by Pandoc */ }
   }
   return resources;
+}
+
+function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  throwIfAborted({ signal });
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(signal.reason ?? new DOMException('Export cancelled.', 'AbortError'));
+    signal.addEventListener('abort', abort, { once: true });
+    void promise.then(
+      (value) => { signal.removeEventListener('abort', abort); resolve(value); },
+      (error: unknown) => { signal.removeEventListener('abort', abort); reject(error); },
+    );
+  });
 }
 
 function unwrapReference(reference: string): string { return reference.trim().replace(/^<([\s\S]*)>$/, '$1'); }

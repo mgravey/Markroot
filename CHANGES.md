@@ -2,6 +2,12 @@
 
 ## 0.1.0 - unreleased
 
+- Added opt-in, on-device Gemini Nano Conventional Commit proposals after explicit saves, including an immediate browser-managed model-download trigger, inline readiness status, and prominent red alert cards/toasts with Chrome's storage/network requirements when a download cannot start, editable review, bounded large-diff summaries, and guarded commits of the staged set plus the open file.
+- Added the rooted-pilcrow identity across the application, detached viewer, browser favicon, touch/install metadata, documentation, motion previews, and a Lottie-friendly After Effects composition generator.
+- Kept the deployed logo fully visible while animating only its orange cursor, with a static reduced-motion fallback.
+- Changed source and viewer display sizing to scale their writing surfaces proportionally, including page width and padding, while keeping export typography independent.
+- Added an animated, accessible step-by-step export progress bar covering resources, Pandoc conversion, Typst PDF compilation, and saving; cancellation now also interrupts pre-worker resource collection.
+- Added YAML-selected DOCX reference documents, HTML templates/stylesheets, and Typst templates; explicit templates take precedence, while untemplated exports inherit the viewer paragraph-justification preference.
 - Established the modular pnpm/TypeScript workspace.
 - Added direct File System Access and in-memory workspace adapters.
 - Added the canonical document session, block mapping, source search, and source-backed visual editing.

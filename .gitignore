@@ -26,6 +26,15 @@ vite.config.*.timestamp-*
 .eslintcache
 *.tsbuildinfo
 .DS_Store
+# Local export outputs
+*.markroot-export.tmp
+# Local visual-regression artifacts
+.visual-regression/
+# Optional local Chrome profile for on-device AI testing
+.chromium-ai-profile/
+# After Effects local caches and autosaves
+Adobe After Effects Auto-Save/
+*.aepx.tmp
 .env
 .env.*
 !.env.example
