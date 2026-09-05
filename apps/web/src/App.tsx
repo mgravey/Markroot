@@ -72,6 +72,8 @@ export function App() {
   const [git, setGit] = useState<IsomorphicGitRepository>();
   const [gitError, setGitError] = useState<string>();
   const [gitStatus, setGitStatus] = useState<readonly GitFileStatus[]>([]);
+  const [gitBase, setGitBase] = useState<{ readonly path: WorkspacePath; readonly source: string }>();
+  const [trackChangesOpen, setTrackChangesOpen] = useState(false);
   const [branches, setBranches] = useState<readonly string[]>([]);
   const [currentBranch, setCurrentBranch] = useState<string>();
   const [history, setHistory] = useState<readonly GitCommitSummary[]>([]);
@@ -277,6 +279,8 @@ export function App() {
     const citationProvider = new LocalCitationProvider(next);
     setCitations(await citationProvider.index(bibliographyPaths).catch(() => []));
     const repository = new IsomorphicGitRepository(next);
+    setGitBase(undefined);
+    setTrackChangesOpen(false);
     try {
       await repository.validate();
       setGit(repository);
@@ -300,6 +304,7 @@ export function App() {
     try {
       const source = await workspace.readFile(path);
       const stat = await workspace.stat(path);
+      const base = git ? await git.readFileAtRef(path, 'HEAD').catch(() => '') : undefined;
       const pending = await loadPendingSession(rootName, path).catch(() => undefined);
       const restore = pending?.source !== undefined && pending.source !== source && window.confirm(`Recover browser-local edits from ${new Date(pending.updatedAt).toLocaleString()}?`);
       if (pending && !restore) await deletePendingSession(rootName, path).catch(() => undefined);
@@ -310,6 +315,8 @@ export function App() {
       if (restore && pending) next.replace(pending.source, 'system');
       const firstBlock = next.snapshot().blocks.find((block) => block.kind !== 'frontmatter') ?? next.snapshot().blocks[0];
       setFileVersion(stat.version);
+      setGitBase(base === undefined ? undefined : { path, source: base });
+      setTrackChangesOpen(false);
       setScrollTarget(firstBlock?.id);
       setScrollProgress(0);
       setScrollOrigin('command');
@@ -501,7 +508,10 @@ export function App() {
   async function refreshWorkspace() {
     if (!workspace) return;
     setEntries(await documentEntries(workspace));
-    if (git) setGitStatus(await git.status());
+    if (git) {
+      setGitStatus(await git.status());
+      if (snapshot?.path) setGitBase({ path: snapshot.path, source: await git.readFileAtRef(snapshot.path, 'HEAD').catch(() => '') });
+    }
   }
 
   async function refreshGit() {
@@ -510,6 +520,7 @@ export function App() {
     setBranches(await git.branches());
     setCurrentBranch(await git.currentBranch());
     setHistory(await git.history(20));
+    if (snapshot?.path) setGitBase({ path: snapshot.path, source: await git.readFileAtRef(snapshot.path, 'HEAD').catch(() => '') });
   }
   async function stage(path: WorkspacePath, staged: boolean) {
     if (!git || snapshot?.dirty) { setNotice('Save the open document before changing the Git index.'); return; }
@@ -771,7 +782,7 @@ export function App() {
     <main className={`workspace ${detachedViewerRoot ? 'viewer-detached' : ''}`} ref={workspacePane} style={{ '--source-width': `${settings.sourcePaneRatio * 100}%` } as CSSProperties}>
       {!snapshot ? <div className="welcome"><BrandMark className="welcome-symbol"/><h1>Your local writing workspace</h1><p>Choose a folder, then open a Markdown or QMD file. Source, preview, comments, and Git stay together on this device.</p>{!workspace && <button className="primary" onClick={() => void chooseFolder()}>Open folder</button>}</div>
       : <>
-        <section className="pane source-pane"><div className="pane-title"><Code2 size={15}/><span>Source</span><span className="spacer"/>{detachedViewerRoot && <><button className="detached-indicator" onClick={() => detachedViewerWindow.current?.focus()} title="Focus the detached viewer"><ExternalLink size={13}/>Viewer detached</button><button className="viewer-option" onClick={reattachViewer} title="Return viewer to this window" aria-label="Reattach viewer"><Columns2 size={15}/></button></>}<span>{settings.sourceFontSize}px · Ln {lineAt(snapshot.source, selection.from)}</span></div><SourceEditor path={snapshot.path} workspacePaths={entries.map((entry) => entry.path)} value={snapshot.source} blocks={snapshot.blocks} search={search} regularExpression={regularExpression} dark={dark} fontFamily={settings.sourceFont} fontSize={settings.sourceFontSize} activeBlock={scrollTarget} scrollTarget={scrollOrigin === 'source' ? undefined : scrollTarget} scrollProgress={scrollProgress} scrollAlignment={scrollAlignment} cursorTarget={sourceCursorTarget} goToLine={goToLine} onChange={applySource} onSelection={selectSource} onScroll={(id, progress) => { setSourceCursorTarget(undefined); setScrollOrigin('source'); setScrollAlignment('center'); setScrollProgress(progress); setScrollTarget(id); }} onSave={() => void explicitSave()} onFind={() => setFindOpen(true)}/></section>
+        <section className="pane source-pane"><div className="pane-title"><Code2 size={15}/><span>Source</span><button className={trackChangesOpen ? 'viewer-option active' : 'viewer-option'} disabled={!trackChangesOpen && (gitBase?.path !== snapshot.path || gitBase.source === snapshot.source)} onClick={() => setTrackChangesOpen((open) => !open)} title={trackChangesOpen ? 'Hide tracked changes' : 'Show tracked changes inline'} aria-label={trackChangesOpen ? 'Hide tracked changes' : 'Show tracked changes inline'} aria-pressed={trackChangesOpen}><GitCompare size={14}/></button><span className="spacer"/>{detachedViewerRoot && <><button className="detached-indicator" onClick={() => detachedViewerWindow.current?.focus()} title="Focus the detached viewer"><ExternalLink size={13}/>Viewer detached</button><button className="viewer-option" onClick={reattachViewer} title="Return viewer to this window" aria-label="Reattach viewer"><Columns2 size={15}/></button></>}<span>{settings.sourceFontSize}px · Ln {lineAt(snapshot.source, selection.from)}</span></div><SourceEditor path={snapshot.path} workspacePaths={entries.map((entry) => entry.path)} value={snapshot.source} comparisonBase={gitBase?.path === snapshot.path ? gitBase.source : undefined} showTrackChanges={trackChangesOpen} blocks={snapshot.blocks} search={search} regularExpression={regularExpression} dark={dark} fontFamily={settings.sourceFont} fontSize={settings.sourceFontSize} activeBlock={scrollTarget} scrollTarget={scrollOrigin === 'source' ? undefined : scrollTarget} scrollProgress={scrollProgress} scrollAlignment={scrollAlignment} cursorTarget={sourceCursorTarget} goToLine={goToLine} onChange={applySource} onSelection={selectSource} onScroll={(id, progress) => { setSourceCursorTarget(undefined); setScrollOrigin('source'); setScrollAlignment('center'); setScrollProgress(progress); setScrollTarget(id); }} onSave={() => void explicitSave()} onFind={() => setFindOpen(true)}/></section>
         {!detachedViewerRoot && <><PaneResizer label="Resize source and viewer panes" value={settings.sourcePaneRatio} min={0.25} max={0.75} keyboardStep={0.02} pixelsPerUnit={() => workspacePane.current?.clientWidth ?? 1} onChange={(value, finished) => resizeLayout({ sourcePaneRatio: value }, finished)}/><section className="pane right-pane">{viewerToolbar(false)}<div className="right-scroll">{viewerContent}</div></section></>}
       </>}
     </main>

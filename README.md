@@ -11,7 +11,7 @@ The visual identity uses a rooted pilcrow, with a Lottie-ready After Effects sou
 - Chromium directory opening with direct text and binary file access
 - Compact-by-default folder tree that emphasizes Markdown/QMD files, mutes unrelated branches, and supports copyable workspace paths with document-relative insertion on paste
 - Modular workspace, document, rendering, citation, Git, review, comment, and export packages
-- CodeMirror source editing with line numbers, syntax highlighting, high-contrast link paths in both themes, find, regex search, go-to-line, and guarded save
+- CodeMirror source editing with line numbers, live Git change markers in the gutter, toolbar-toggleable word-level tracked changes with green additions and red struck-through deletions, syntax highlighting, high-contrast link paths in both themes, find, regex search, go-to-line, and guarded save
 - A source-backed ProseMirror visual editor that edits recognized blocks without rewriting untouched source
 - A scholarly rendered view with numbered sections/tables/figures, `.unnumbered` headings, semantic equations, hidden Markdown HTML comments, placed `#refs` bibliographies, securely restored document-relative local images including first-page PDF figures, citations, cross-references, callouts, and figure layouts
 - A persistent overlay document outline with two heading levels by default, optional figures, tables, and direct navigation, plus in-view navigation for internal links and unobtrusive Ctrl/Cmd-click DOI access on citations
