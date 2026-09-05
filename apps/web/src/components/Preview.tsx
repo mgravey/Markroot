@@ -33,6 +33,10 @@ interface Props {
 
 export function Preview({ html, objectUrls, warnings, blocks, search, regularExpression, activeBlock, scrollTarget, scrollProgress, scrollAlignment, anchorTarget, allowRemoteResources, fontFamily, fontSize, justified, trackChangesBaseHtml, comments, activeCommentId, onNavigate, onSelect, onCommentActivate, onScroll }: Props) {
   const host = useRef<HTMLDivElement>(null);
+  const preservedSelection = useRef<Range | undefined>(undefined);
+  const preservedSourceSelection = useRef<SourceRange | undefined>(undefined);
+  const pointerSelectionStart = useRef<{ offset: number; x: number; y: number; blockId: string } | undefined>(undefined);
+  const pendingNavigation = useRef<(() => void) | undefined>(undefined);
   const scrollIntent = useRef(new ScrollIntentGate());
   const latestOnScroll = useRef(onScroll);
   const latestOnNavigate = useRef(onNavigate);
@@ -148,14 +152,51 @@ export function Preview({ html, objectUrls, warnings, blocks, search, regularExp
       eventWindow.removeEventListener('pointercancel', endPointer);
     };
   }, [html]);
-  return <div className={`preview${comments?.threads.length ? ' has-comments' : ''}`} ref={host} onPointerUp={() => {
+  const cancelPendingNavigation = () => {
+    pendingNavigation.current?.();
+    pendingNavigation.current = undefined;
+  };
+  const finalizeRenderedSelection = () => {
+    const domRange = renderedSelectionRange(host.current) ?? preservedSelection.current;
+    const selectedText = host.current?.ownerDocument.defaultView?.getSelection()?.toString() ?? '';
+    const sourceRange = (domRange ? renderedSourceRange(host.current, blocks, domRange) : undefined)
+      ?? preservedSourceSelection.current
+      ?? sourceRangeAroundPointer(blocks, pointerSelectionStart.current, selectedText);
+    if (!sourceRange) return false;
+    cancelPendingNavigation();
+    preservedSourceSelection.current = sourceRange;
+    if (domRange) preservedSelection.current = domRange.cloneRange();
+    if (host.current?.shadowRoot) drawPreservedSelection(host.current.shadowRoot, blocks, sourceRange);
+    onSelect(sourceRange);
+    if (domRange) host.current?.ownerDocument.defaultView?.requestAnimationFrame(() => restoreRenderedSelection(host.current, preservedSelection.current));
+    return true;
+  };
+  const finishSelectionAfterBrowserDefault = () => {
     const eventWindow = host.current?.ownerDocument.defaultView;
-    eventWindow?.requestAnimationFrame(() => {
-      const range = renderedSourceRange(host.current, blocks);
-      if (range) onSelect(range);
-    });
+    eventWindow?.setTimeout(() => { finalizeRenderedSelection(); }, 0);
+  };
+  return <div className={`preview${comments?.threads.length ? ' has-comments' : ''}`} ref={host} onPointerDown={(event) => {
+    cancelPendingNavigation();
+    preservedSelection.current = undefined;
+    preservedSourceSelection.current = undefined;
+    pointerSelectionStart.current = sourcePointFromEvent(host.current, blocks, event.nativeEvent.composedPath(), event.clientX, event.clientY);
+    host.current?.shadowRoot?.querySelector('.preserved-selection-layer')?.remove();
+  }} onPointerUp={(event) => {
+    const capturedRange = renderedSelectionRange(host.current)?.cloneRange();
+    if (capturedRange) preservedSelection.current = capturedRange;
+    const start = pointerSelectionStart.current;
+    const end = sourcePointFromEvent(host.current, blocks, event.nativeEvent.composedPath(), event.clientX, event.clientY);
+    if (start && end && start.offset !== end.offset && Math.hypot(event.clientX - start.x, event.clientY - start.y) >= 3) {
+      preservedSourceSelection.current = { from: Math.min(start.offset, end.offset), to: Math.max(start.offset, end.offset) };
+    }
+    finishSelectionAfterBrowserDefault();
   }} onClick={(event) => {
-    if (renderedSourceRange(host.current, blocks)) return;
+    const selectedRange = renderedSelectionRange(host.current) ?? preservedSelection.current;
+    if (preservedSourceSelection.current || (selectedRange && renderedSourceRange(host.current, blocks, selectedRange))) {
+      event.preventDefault();
+      finishSelectionAfterBrowserDefault();
+      return;
+    }
     const path = event.nativeEvent.composedPath();
     const doiLink = path.find((item): item is HTMLElement => isHtmlElement(item) && item.hasAttribute('data-doi-url'));
     if (doiLink && (event.metaKey || event.ctrlKey)) {
@@ -173,20 +214,26 @@ export function Preview({ html, objectUrls, warnings, blocks, search, regularExp
     if (link) return;
     const block = path.find((item): item is HTMLElement => isHtmlElement(item) && item.hasAttribute('data-block-id'));
     if (!block?.dataset.blockId) return;
+    if (event.detail > 1) {
+      event.preventDefault();
+      finishSelectionAfterBrowserDefault();
+      return;
+    }
     const mapped = path.find((item): item is HTMLElement => isHtmlElement(item) && item.hasAttribute('data-source-offset'));
     const exact = mapped?.dataset.sourceOffset ? Number(mapped.dataset.sourceOffset) : undefined;
     const sourceBlock = blocks.find((candidate) => candidate.id === block.dataset.blockId);
     const sourceOffset = Number.isFinite(exact) ? exact : sourceBlock ? sourceOffsetAtPoint(host.current?.shadowRoot, block, sourceBlock, event.clientX, event.clientY) : undefined;
     const blockId = block.dataset.blockId;
     const eventWindow = block.ownerDocument.defaultView ?? window;
-    eventWindow.requestAnimationFrame(() => {
-      const selection = renderedSourceRange(host.current, blocks);
-      if (selection) {
-        onSelect(selection);
-        return;
-      }
+    const timer = eventWindow.setTimeout(() => {
+      pendingNavigation.current = undefined;
+      if (finalizeRenderedSelection()) return;
       onNavigate(blockId, sourceOffset);
-    });
+    }, 400);
+    pendingNavigation.current = () => eventWindow.clearTimeout(timer);
+  }} onDoubleClick={(event) => {
+    event.preventDefault();
+    finishSelectionAfterBrowserDefault();
   }} />;
 }
 
@@ -194,6 +241,8 @@ const previewStyle = `
   :host { color: var(--ink); }
   article { position: relative; min-height: 100%; font-family: var(--viewer-font); font-size: var(--viewer-size); line-height: 1.72; }
   .comment-gutter { position: absolute; inset: 0 0 auto 0; pointer-events: none; font-family: 'Manrope', sans-serif; font-size: max(11px, .68em); line-height: 1.4; }
+  .preserved-selection-layer { position: absolute; inset: 0 0 auto 0; pointer-events: none; }
+  .preserved-selection-highlight { position: absolute; z-index: 1; border-radius: .18em; background: color-mix(in srgb, var(--accent) 22%, transparent); box-shadow: inset 0 -.12em 0 color-mix(in srgb, var(--accent) 62%, transparent); }
   .comment-highlight { position: absolute; z-index: 1; border-radius: .18em; background: color-mix(in srgb, var(--accent) 13%, transparent); box-shadow: inset 0 -.1em 0 color-mix(in srgb, var(--accent) 48%, transparent); transition: background-color 120ms ease, box-shadow 120ms ease; }
   .comment-highlight.active, .comment-highlight.hovered { background: color-mix(in srgb, var(--accent) 30%, transparent); box-shadow: inset 0 -.14em 0 var(--accent); }
   .comment-card { position: absolute; z-index: 2; left: calc(100% + .65em); width: min(11em, 34%); padding: .7em .75em; pointer-events: auto; color: var(--ink); background: color-mix(in srgb, var(--surface-strong) 96%, transparent); border: max(1px, .07em) solid var(--line); border-left: .22em solid var(--accent); border-radius: .45em; box-shadow: 0 .3em 1.1em color-mix(in srgb, #000 12%, transparent); text-align: left; cursor: pointer; transition: border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease; }
@@ -309,12 +358,47 @@ function sourceOffsetAtPoint(shadow: ShadowRoot | null | undefined, blockElement
   return block.from + mapRenderedOffset(block.text, blockElement.textContent ?? '', range.toString().length);
 }
 
-function renderedSourceRange(host: HTMLDivElement | null, blocks: readonly DocumentBlock[]): SourceRange | undefined {
+function sourcePointFromEvent(host: HTMLDivElement | null, blocks: readonly DocumentBlock[], path: readonly EventTarget[], x: number, y: number): { offset: number; x: number; y: number; blockId: string } | undefined {
+  const blockElement = path.find((item): item is HTMLElement => isHtmlElement(item) && item.hasAttribute('data-block-id'));
+  const block = blocks.find((candidate) => candidate.id === blockElement?.dataset.blockId);
+  if (!host?.shadowRoot || !blockElement || !block) return undefined;
+  return { offset: sourceOffsetAtPoint(host.shadowRoot, blockElement, block, x, y), x, y, blockId: block.id };
+}
+
+function sourceRangeAroundPointer(blocks: readonly DocumentBlock[], pointer: { offset: number; blockId: string } | undefined, selectedText: string): SourceRange | undefined {
+  const needle = selectedText.trim();
+  const block = blocks.find((candidate) => candidate.id === pointer?.blockId);
+  if (!pointer || !block || !needle) return undefined;
+  const source = block.text.toLocaleLowerCase();
+  const target = needle.toLocaleLowerCase();
+  const candidates: number[] = [];
+  let index = source.indexOf(target);
+  while (index >= 0) {
+    candidates.push(index);
+    index = source.indexOf(target, index + Math.max(1, target.length));
+  }
+  if (!candidates.length) return undefined;
+  const localPointer = pointer.offset - block.from;
+  const start = candidates.reduce((nearest, candidate) => {
+    const distance = localPointer < candidate ? candidate - localPointer : localPointer > candidate + target.length ? localPointer - candidate - target.length : 0;
+    const nearestDistance = localPointer < nearest ? nearest - localPointer : localPointer > nearest + target.length ? localPointer - nearest - target.length : 0;
+    return distance < nearestDistance ? candidate : nearest;
+  });
+  return { from: block.from + start, to: block.from + start + needle.length };
+}
+
+function renderedSelectionRange(host: HTMLDivElement | null): Range | undefined {
   const shadow = host?.shadowRoot;
-  const selection = host?.ownerDocument.getSelection();
+  const selection = host?.ownerDocument.defaultView?.getSelection();
   if (!shadow || !selection || selection.isCollapsed || selection.rangeCount === 0) return undefined;
   const range = selection.getRangeAt(0);
   if (!shadow.contains(range.startContainer) || !shadow.contains(range.endContainer)) return undefined;
+  return range;
+}
+
+function renderedSourceRange(host: HTMLDivElement | null, blocks: readonly DocumentBlock[], range = renderedSelectionRange(host)): SourceRange | undefined {
+  const shadow = host?.shadowRoot;
+  if (!shadow || !range || !shadow.contains(range.startContainer) || !shadow.contains(range.endContainer)) return undefined;
   const startElement = elementForNode(range.startContainer);
   const endElement = elementForNode(range.endContainer);
   const startBlockElement = startElement?.closest<HTMLElement>('[data-block-id]');
@@ -326,6 +410,38 @@ function renderedSourceRange(host: HTMLDivElement | null, blocks: readonly Docum
   const to = sourceOffsetAtDomPosition(endBlockElement, endBlock, range.endContainer, range.endOffset);
   const normalized = { from: Math.min(from, to), to: Math.max(from, to) };
   return normalized.to > normalized.from ? normalized : undefined;
+}
+
+function restoreRenderedSelection(host: HTMLDivElement | null, range: Range | undefined): void {
+  if (!host?.shadowRoot || !range || !range.startContainer.isConnected || !range.endContainer.isConnected) return;
+  if (!host.shadowRoot.contains(range.startContainer) || !host.shadowRoot.contains(range.endContainer)) return;
+  const selection = host.ownerDocument.defaultView?.getSelection();
+  if (!selection) return;
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+function drawPreservedSelection(shadow: ShadowRoot, blocks: readonly DocumentBlock[], sourceRange: SourceRange): void {
+  shadow.querySelector('.preserved-selection-layer')?.remove();
+  const article = shadow.querySelector<HTMLElement>('article');
+  if (!article) return;
+  const articleRect = article.getBoundingClientRect();
+  const layer = article.ownerDocument.createElement('span');
+  layer.className = 'preserved-selection-layer';
+  layer.setAttribute('aria-hidden', 'true');
+  const rectangles = renderedDomRanges(shadow, blocks, sourceRange)
+    .flatMap((range) => [...range.getClientRects()])
+    .filter((rectangle) => rectangle.width > 0 && rectangle.height > 0);
+  for (const rectangle of rectangles) {
+    const highlight = article.ownerDocument.createElement('span');
+    highlight.className = 'preserved-selection-highlight';
+    highlight.style.left = `${rectangle.left - articleRect.left}px`;
+    highlight.style.top = `${rectangle.top - articleRect.top}px`;
+    highlight.style.width = `${rectangle.width}px`;
+    highlight.style.height = `${rectangle.height}px`;
+    layer.append(highlight);
+  }
+  if (layer.childElementCount) article.append(layer);
 }
 
 function sourceOffsetAtDomPosition(blockElement: HTMLElement, block: DocumentBlock, node: Node, offset: number): number {

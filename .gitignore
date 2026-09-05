@@ -40,6 +40,8 @@ vite.config.*.timestamp-*
 .markroot-comment-overlay-debug/
 # Local rendered-selection timing traces
 .markroot-selection-traces/
+# Local rendered-selection preservation captures
+.markroot-selection-preservation-debug/
 # Optional local Chrome profile for on-device AI testing
 .chromium-ai-profile/
 # After Effects local caches and autosaves
