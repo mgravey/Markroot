@@ -228,7 +228,7 @@ export class FileSystemAccessWorkspace implements GuardedWorkspace {
       const file = await handle.getFile();
       return { path, kind: 'file', size: file.size, modifiedAt: file.lastModified, version: `${file.lastModified}:${file.size}` };
     } catch (error) {
-      if (!(error instanceof MarkrootError && error.code === 'NOT_FOUND')) throw error;
+      if (!(error instanceof MarkrootError && error.code === 'NOT_FOUND') && !hasDomExceptionName(error, 'TypeMismatchError')) throw error;
     }
     try { await this.directory(path, false, context); return { path, kind: 'directory', size: 0 }; }
     catch (cause) { throw mapFsError(cause, path); }
@@ -319,6 +319,15 @@ function mapFsError(cause: unknown, path: WorkspacePath): MarkrootError {
   if (name === 'NotAllowedError' || name === 'SecurityError') return new MarkrootError('PERMISSION_DENIED', `Permission denied: ${path}`, undefined, { cause });
   if (cause instanceof MarkrootError) return cause;
   return new MarkrootError('WORKSPACE_ERROR', `Workspace operation failed: ${path}`, undefined, { cause });
+}
+
+function hasDomExceptionName(error: unknown, name: string): boolean {
+  let current = error;
+  for (let depth = 0; depth < 3 && current; depth += 1) {
+    if (typeof current === 'object' && 'name' in current && current.name === name) return true;
+    current = typeof current === 'object' && 'cause' in current ? current.cause : undefined;
+  }
+  return false;
 }
 
 async function withBrowserLock<T>(name: string, operation: () => Promise<T>): Promise<T> {

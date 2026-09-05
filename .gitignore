@@ -7,6 +7,8 @@ coverage/
 playwright-report/
 test-results/
 *.log
+*.git-debug.log
+*.git-trace.log
 *.cpuprofile
 *.heapprofile
 *.swp
@@ -17,7 +19,9 @@ test-results/
 .vite/
 vite.config.*.timestamp-*
 .vite-temp/
+.detached-viewer-debug/
 .rollup.cache/
+.pandoc-work/
 .cache/
 .eslintcache
 *.tsbuildinfo

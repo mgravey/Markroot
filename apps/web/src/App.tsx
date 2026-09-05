@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { createPortal } from 'react-dom';
 import {
   AlignJustify, BookOpen, Check, ChevronRight, CircleDot, Code2, Columns2, Download, FileCode2,
-  Files, GitBranch, GitCommitHorizontal, GitCompare, ListTree, MessageSquare, Moon, PanelRight,
+  ExternalLink, Files, GitBranch, GitCommitHorizontal, GitCompare, ListTree, MessageSquare, Moon, PanelRight,
   RefreshCw, Save, Search, Settings2, Sun, Undo2, X,
 } from 'lucide-react';
 import { resolveWorkspaceReference, workspacePath, type SourceRange, type WorkspacePath } from '@markroot/core';
@@ -22,6 +23,7 @@ import { DocumentOutline } from './components/DocumentOutline.js';
 import { PaneResizer } from './components/PaneResizer.js';
 import { WorkerExporter } from './workers/export-client.js';
 import { isPdfFigurePath, renderPdfFigurePreview } from './pdf-preview.js';
+import { detachedViewerTitle, prepareDetachedViewerDocument } from './detached-viewer.js';
 
 type Inspector = 'git' | 'review' | 'comments' | 'citations' | 'export' | 'settings' | undefined;
 type RightMode = 'visual' | 'preview';
@@ -52,6 +54,7 @@ export function App() {
   const [sourceCursorTarget, setSourceCursorTarget] = useState<number>();
   const [notice, setNotice] = useState<string>();
   const [git, setGit] = useState<IsomorphicGitRepository>();
+  const [gitError, setGitError] = useState<string>();
   const [gitStatus, setGitStatus] = useState<readonly GitFileStatus[]>([]);
   const [branches, setBranches] = useState<readonly string[]>([]);
   const [currentBranch, setCurrentBranch] = useState<string>();
@@ -65,6 +68,7 @@ export function App() {
   const [exportBusy, setExportBusy] = useState(false);
   const [outlineOpen, setOutlineOpen] = useState(false);
   const [previewAnchor, setPreviewAnchor] = useState<Readonly<{ id: string; request: number }>>();
+  const [detachedViewerRoot, setDetachedViewerRoot] = useState<HTMLElement>();
   const sessionSubscription = useRef<(() => void) | undefined>(undefined);
   const snapshotRef = useRef<DocumentSnapshot | undefined>(undefined);
   const settingsRef = useRef(settings);
@@ -72,6 +76,7 @@ export function App() {
   const searchInput = useRef<HTMLInputElement>(null);
   const exportController = useRef<AbortController | undefined>(undefined);
   const renderedRef = useRef<RenderArtifact | undefined>(undefined);
+  const detachedViewerWindow = useRef<Window | undefined>(undefined);
   const engine = useMemo(() => new BasicDocumentEngine(), []);
   const exporter = useMemo(() => new WorkerExporter(), []);
   const comments = snapshot ? parseComments(snapshot.source) : undefined;
@@ -89,11 +94,20 @@ export function App() {
     return () => sessionSubscription.current?.();
   }, []);
 
-  useEffect(() => () => { exporter.terminate(); revokeArtifact(renderedRef.current); }, [exporter]);
+  useEffect(() => () => {
+    exporter.terminate();
+    revokeArtifact(renderedRef.current);
+    detachedViewerWindow.current?.close();
+  }, [exporter]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = dark ? 'dark' : 'light';
-  }, [dark]);
+    if (detachedViewerRoot) detachedViewerRoot.ownerDocument.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  }, [dark, detachedViewerRoot]);
+
+  useEffect(() => {
+    if (detachedViewerRoot) detachedViewerRoot.ownerDocument.title = detachedViewerTitle(snapshot?.path);
+  }, [detachedViewerRoot, snapshot?.path]);
 
   useEffect(() => {
     if (!snapshot || !/\.(?:md|qmd)$/i.test(snapshot.path)) { setRendered((current) => { revokeArtifact(current); return undefined; }); return; }
@@ -203,13 +217,14 @@ export function App() {
     try {
       await repository.validate();
       setGit(repository);
+      setGitError(undefined);
       setGitStatus(await repository.status());
       setBranches(await repository.branches());
       setCurrentBranch(await repository.currentBranch());
       setHistory(await repository.history(20));
       const configured = await repository.configuredAuthor();
       if (configured.displayName || configured.email) updateSettings({ ...settings, profile: { ...settings.profile, ...configured } });
-    } catch { setGit(undefined); setGitStatus([]); setBranches([]); setCurrentBranch(undefined); setHistory([]); }
+    } catch (error) { setGit(undefined); setGitError(error instanceof Error ? error.message : String(error)); setGitStatus([]); setBranches([]); setCurrentBranch(undefined); setHistory([]); }
     setNotice(`Opened ${handle.name}. Files stay on this device.`);
   }
 
@@ -471,7 +486,7 @@ export function App() {
         });
       }
       setNotice(`Preparing ${format.toUpperCase()} locally…`);
-      const resources = workspace ? await collectDocumentResources(workspace, snapshot, entries) : [];
+      const resources = workspace ? await collectDocumentResources(workspace, snapshot, entries, format) : [];
       const result = await exporter.export(
         { format, source: snapshot.source, filename: snapshot.path, resources },
         { signal: controller.signal, onProgress: (progress) => setNotice(progress.message ?? `Exporting ${format.toUpperCase()}…`) },
@@ -497,9 +512,57 @@ export function App() {
     if (next === 'git') void refreshGit();
   };
 
+  const detachViewer = () => {
+    const existing = detachedViewerWindow.current;
+    if (existing && !existing.closed) { existing.focus(); return; }
+    const popup = window.open('', 'markroot-detached-viewer', 'popup=yes,width=1000,height=820,resizable=yes,scrollbars=yes');
+    if (!popup) { setNotice('The viewer could not open. Allow pop-ups for Markroot and try again.'); return; }
+    const root = prepareDetachedViewerDocument(document, popup.document, snapshot?.path, dark);
+    detachedViewerWindow.current = popup;
+    setDetachedViewerRoot(root);
+    setScrollOrigin('command');
+    setScrollAlignment('reveal');
+    const handleClose = () => {
+      if (detachedViewerWindow.current !== popup) return;
+      detachedViewerWindow.current = undefined;
+      setDetachedViewerRoot(undefined);
+    };
+    popup.addEventListener('beforeunload', handleClose, { once: true });
+    popup.focus();
+  };
+
+  const reattachViewer = () => {
+    const popup = detachedViewerWindow.current;
+    detachedViewerWindow.current = undefined;
+    setDetachedViewerRoot(undefined);
+    setScrollOrigin('command');
+    setScrollAlignment('reveal');
+    if (popup && !popup.closed) popup.close();
+  };
+
+  const handleViewerScroll = useCallback((id: string, progress: number) => {
+    setSourceCursorTarget(undefined);
+    setScrollOrigin('right');
+    setScrollAlignment('center');
+    setScrollProgress(progress);
+    setScrollTarget(id);
+  }, []);
+
+  const viewerContent = snapshot ? (rightMode === 'visual'
+    ? <VisualEditor snapshot={snapshot} activeBlock={scrollTarget} scrollTarget={scrollOrigin === 'right' ? undefined : scrollTarget} scrollProgress={scrollProgress} scrollAlignment={scrollAlignment} fontFamily={settings.viewerFont} fontSize={settings.viewerFontSize} justified={settings.viewerJustified} onApply={applyVisualBlock} onNavigate={navigateFromRight} onScroll={handleViewerScroll}/>
+    : <Preview html={rendered?.html ?? ''} objectUrls={rendered?.objectUrls ?? EMPTY_WARNINGS} warnings={rendered?.warnings ?? EMPTY_WARNINGS} blocks={snapshot.blocks} search={search} regularExpression={regularExpression} activeBlock={scrollTarget} scrollTarget={scrollOrigin === 'right' ? undefined : scrollTarget} scrollProgress={scrollProgress} scrollAlignment={scrollAlignment} anchorTarget={previewAnchor} allowRemoteResources={settings.allowRemoteResources} fontFamily={settings.viewerFont} fontSize={settings.viewerFontSize} justified={settings.viewerJustified} onNavigate={navigateFromRight} onScroll={handleViewerScroll}/>) : null;
+
+  const viewerToolbar = (detached: boolean) => <div className="pane-title viewer-toolbar">
+    <div className="segmented"><button className={rightMode === 'visual' ? 'active' : ''} onClick={() => { setScrollOrigin('command'); setScrollAlignment('reveal'); setRightMode('visual'); }}>Visual</button><button className={rightMode === 'preview' ? 'active' : ''} onClick={() => { setScrollOrigin('command'); setScrollAlignment('reveal'); setRightMode('preview'); }}>Rendered</button></div>
+    <button className={settings.viewerJustified ? 'viewer-option active' : 'viewer-option'} onClick={() => updateSettings({ ...settings, viewerJustified: !settings.viewerJustified })} title="Justify viewer text" aria-pressed={settings.viewerJustified}><AlignJustify size={14}/></button>
+    <span className="spacer"/>
+    <span>{settings.viewerFontSize}px · {rendered?.engine ?? 'source model'}</span>
+    <button className="viewer-option" onClick={detached ? reattachViewer : detachViewer} title={detached ? 'Return viewer to the main window' : 'Detach viewer to another window'} aria-label={detached ? 'Reattach viewer' : 'Detach viewer'}>{detached ? <Columns2 size={15}/> : <ExternalLink size={15}/>}</button>
+  </div>;
+
   if (!('showDirectoryPicker' in window)) return <main className="unsupported-browser"><div className="welcome-symbol">¶</div><h1>Markroot needs Chromium desktop</h1><p>This browser cannot grant direct access to a real local folder. Use a current Chromium-based desktop browser over HTTPS or localhost; Markroot does not offer an upload fallback.</p></main>;
 
-  return <div className={`app ${inspector ? 'with-inspector' : ''}`} style={{ '--files-width': `${settings.filesPaneWidth}px` } as CSSProperties}>
+  return <><div className={`app ${inspector ? 'with-inspector' : ''}`} style={{ '--files-width': `${settings.filesPaneWidth}px` } as CSSProperties}>
     <header className="topbar">
       <div className="brand" aria-label="Markroot"><span className="brand-mark">M</span><strong>Markroot</strong></div>
       <button className="workspace-button" onClick={() => void chooseFolder()}><Files size={16}/><span>{rootName}</span><ChevronRight size={14}/></button>
@@ -526,32 +589,31 @@ export function App() {
       <PaneResizer className="files-resizer" label="Resize workspace tree" value={settings.filesPaneWidth} min={180} max={420} keyboardStep={12} onChange={(value, finished) => resizeLayout({ filesPaneWidth: Math.round(value) }, finished)}/>
     </aside>
 
-    <main className="workspace" ref={workspacePane} style={{ '--source-width': `${settings.sourcePaneRatio * 100}%` } as CSSProperties}>
+    <main className={`workspace ${detachedViewerRoot ? 'viewer-detached' : ''}`} ref={workspacePane} style={{ '--source-width': `${settings.sourcePaneRatio * 100}%` } as CSSProperties}>
       {!snapshot ? <div className="welcome"><div className="welcome-symbol">¶</div><h1>Your local writing workspace</h1><p>Choose a folder, then open a Markdown or QMD file. Source, preview, comments, and Git stay together on this device.</p>{!workspace && <button className="primary" onClick={() => void chooseFolder()}>Open folder</button>}</div>
       : <>
-        <section className="pane source-pane"><div className="pane-title"><Code2 size={15}/><span>Source</span><span className="spacer"/><span>{settings.sourceFontSize}px · Ln {lineAt(snapshot.source, selection.from)}</span></div><SourceEditor path={snapshot.path} workspacePaths={entries.map((entry) => entry.path)} value={snapshot.source} blocks={snapshot.blocks} search={search} regularExpression={regularExpression} dark={dark} fontFamily={settings.sourceFont} fontSize={settings.sourceFontSize} activeBlock={scrollTarget} scrollTarget={scrollOrigin === 'source' ? undefined : scrollTarget} scrollProgress={scrollProgress} scrollAlignment={scrollAlignment} cursorTarget={sourceCursorTarget} goToLine={goToLine} onChange={applySource} onSelection={selectSource} onScroll={(id, progress) => { setSourceCursorTarget(undefined); setScrollOrigin('source'); setScrollAlignment('center'); setScrollProgress(progress); setScrollTarget(id); }} onSave={() => void save()} onFind={() => setFindOpen(true)}/></section>
-        <PaneResizer label="Resize source and viewer panes" value={settings.sourcePaneRatio} min={0.25} max={0.75} keyboardStep={0.02} pixelsPerUnit={() => workspacePane.current?.clientWidth ?? 1} onChange={(value, finished) => resizeLayout({ sourcePaneRatio: value }, finished)}/>
-        <section className="pane right-pane"><div className="pane-title"><div className="segmented"><button className={rightMode === 'visual' ? 'active' : ''} onClick={() => setRightMode('visual')}>Visual</button><button className={rightMode === 'preview' ? 'active' : ''} onClick={() => setRightMode('preview')}>Rendered</button></div><button className={settings.viewerJustified ? 'viewer-option active' : 'viewer-option'} onClick={() => updateSettings({ ...settings, viewerJustified: !settings.viewerJustified })} title="Justify viewer text" aria-pressed={settings.viewerJustified}><AlignJustify size={14}/></button><span className="spacer"/><span>{settings.viewerFontSize}px · {rendered?.engine ?? 'source model'}</span></div><div className="right-scroll">{rightMode === 'visual' ? <VisualEditor snapshot={snapshot} activeBlock={scrollTarget} scrollTarget={scrollOrigin === 'right' ? undefined : scrollTarget} scrollProgress={scrollProgress} scrollAlignment={scrollAlignment} fontFamily={settings.viewerFont} fontSize={settings.viewerFontSize} justified={settings.viewerJustified} onApply={applyVisualBlock} onNavigate={navigateFromRight} onScroll={(id, progress) => { setSourceCursorTarget(undefined); setScrollOrigin('right'); setScrollAlignment('center'); setScrollProgress(progress); setScrollTarget(id); }}/> : <Preview html={rendered?.html ?? ''} objectUrls={rendered?.objectUrls ?? EMPTY_WARNINGS} warnings={rendered?.warnings ?? EMPTY_WARNINGS} blocks={snapshot.blocks} search={search} regularExpression={regularExpression} activeBlock={scrollTarget} scrollTarget={scrollOrigin === 'right' ? undefined : scrollTarget} scrollProgress={scrollProgress} scrollAlignment={scrollAlignment} anchorTarget={previewAnchor} allowRemoteResources={settings.allowRemoteResources} fontFamily={settings.viewerFont} fontSize={settings.viewerFontSize} justified={settings.viewerJustified} onNavigate={navigateFromRight} onScroll={(id, progress) => { setSourceCursorTarget(undefined); setScrollOrigin('right'); setScrollAlignment('center'); setScrollProgress(progress); setScrollTarget(id); }}/>}</div></section>
+        <section className="pane source-pane"><div className="pane-title"><Code2 size={15}/><span>Source</span><span className="spacer"/>{detachedViewerRoot && <><button className="detached-indicator" onClick={() => detachedViewerWindow.current?.focus()} title="Focus the detached viewer"><ExternalLink size={13}/>Viewer detached</button><button className="viewer-option" onClick={reattachViewer} title="Return viewer to this window" aria-label="Reattach viewer"><Columns2 size={15}/></button></>}<span>{settings.sourceFontSize}px · Ln {lineAt(snapshot.source, selection.from)}</span></div><SourceEditor path={snapshot.path} workspacePaths={entries.map((entry) => entry.path)} value={snapshot.source} blocks={snapshot.blocks} search={search} regularExpression={regularExpression} dark={dark} fontFamily={settings.sourceFont} fontSize={settings.sourceFontSize} activeBlock={scrollTarget} scrollTarget={scrollOrigin === 'source' ? undefined : scrollTarget} scrollProgress={scrollProgress} scrollAlignment={scrollAlignment} cursorTarget={sourceCursorTarget} goToLine={goToLine} onChange={applySource} onSelection={selectSource} onScroll={(id, progress) => { setSourceCursorTarget(undefined); setScrollOrigin('source'); setScrollAlignment('center'); setScrollProgress(progress); setScrollTarget(id); }} onSave={() => void save()} onFind={() => setFindOpen(true)}/></section>
+        {!detachedViewerRoot && <><PaneResizer label="Resize source and viewer panes" value={settings.sourcePaneRatio} min={0.25} max={0.75} keyboardStep={0.02} pixelsPerUnit={() => workspacePane.current?.clientWidth ?? 1} onChange={(value, finished) => resizeLayout({ sourcePaneRatio: value }, finished)}/><section className="pane right-pane">{viewerToolbar(false)}<div className="right-scroll">{viewerContent}</div></section></>}
       </>}
     </main>
 
     {inspector && <aside className="inspector"><div className="inspector-head"><strong>{panelTitle(inspector)}</strong><button onClick={() => setInspector(undefined)}><PanelRight size={16}/></button></div>
-      {inspector === 'git' && <GitPanel git={git} status={gitStatus} branches={branches} currentBranch={currentBranch} history={history} dirty={snapshot?.dirty ?? false} message={commitMessage} setMessage={setCommitMessage} onStage={stage} onCommit={createCommit} onRefresh={refreshGit} onCheckout={checkoutBranch} onCreateBranch={createBranch} onRenameBranch={renameBranch} onDeleteBranch={deleteBranch} onMerge={mergeBranch} onCompare={compareBranch}/>}
+      {inspector === 'git' && <GitPanel git={git} error={gitError} status={gitStatus} branches={branches} currentBranch={currentBranch} history={history} dirty={snapshot?.dirty ?? false} message={commitMessage} setMessage={setCommitMessage} onStage={stage} onCommit={createCommit} onRefresh={refreshGit} onCheckout={checkoutBranch} onCreateBranch={createBranch} onRenameBranch={renameBranch} onDeleteBranch={deleteBranch} onMerge={mergeBranch} onCompare={compareBranch}/>}
       {inspector === 'review' && <ReviewPanel draft={review} onDecide={(id, decision) => review && setReview(decideChange(review, id, decision))} onApply={applyReview}/>}
       {inspector === 'comments' && <CommentsPanel parsed={comments} selection={selection} body={commentBody} setBody={setCommentBody} replies={replyBodies} setReplies={setReplyBodies} onAdd={addComment} onNavigate={navigateComment} onRepair={(id) => { if (snapshot) applySource(recoverOrphan(snapshot.source, id), 'comment'); }} onReply={(id) => { if (!snapshot || !replyBodies[id]?.trim()) return; applySource(replyToThread(snapshot.source, id, replyBodies[id]!, settings.profile), 'comment'); setReplyBodies((all) => ({ ...all, [id]: '' })); }} onStatus={(id, status) => { if (snapshot) applySource(setThreadStatus(snapshot.source, id, status), 'comment'); }} onDelete={(id) => { if (snapshot && window.confirm('Delete this comment thread?')) applySource(deleteThread(snapshot.source, id), 'comment'); }}/>}
       {inspector === 'citations' && <CitationsPanel records={citations} query={citationQuery} setQuery={setCitationQuery}/>}
       {inspector === 'export' && <ExportPanel disabled={!snapshot} busy={exportBusy} onCancel={() => exportController.current?.abort()} onExport={exportDocument}/>}
       {inspector === 'settings' && <SettingsPanel settings={settings} onChange={updateSettings}/>}
     </aside>}
-  </div>;
+  </div>{detachedViewerRoot && createPortal(<main className="detached-viewer"><div className="detached-viewer-title"><strong>Markroot</strong><span>{snapshot?.path ?? 'Viewer'}</span></div>{viewerToolbar(true)}<div className="right-scroll">{viewerContent}</div></main>, detachedViewerRoot)}</>;
 }
 
-function GitPanel({ git, status, branches, currentBranch, history, dirty, message, setMessage, onStage, onCommit, onRefresh, onCheckout, onCreateBranch, onRenameBranch, onDeleteBranch, onMerge, onCompare }: { git: IsomorphicGitRepository | undefined; status: readonly GitFileStatus[]; branches: readonly string[]; currentBranch: string | undefined; history: readonly GitCommitSummary[]; dirty: boolean; message: string; setMessage(value: string): void; onStage(path: WorkspacePath, staged: boolean): Promise<void>; onCommit(): Promise<void>; onRefresh(): Promise<void>; onCheckout(ref: string): Promise<void>; onCreateBranch(ref: string): Promise<void>; onRenameBranch(from: string, to: string): Promise<void>; onDeleteBranch(ref: string): Promise<void>; onMerge(ref: string): Promise<void>; onCompare(ref: string): Promise<void> }) {
+function GitPanel({ git, error, status, branches, currentBranch, history, dirty, message, setMessage, onStage, onCommit, onRefresh, onCheckout, onCreateBranch, onRenameBranch, onDeleteBranch, onMerge, onCompare }: { git: IsomorphicGitRepository | undefined; error: string | undefined; status: readonly GitFileStatus[]; branches: readonly string[]; currentBranch: string | undefined; history: readonly GitCommitSummary[]; dirty: boolean; message: string; setMessage(value: string): void; onStage(path: WorkspacePath, staged: boolean): Promise<void>; onCommit(): Promise<void>; onRefresh(): Promise<void>; onCheckout(ref: string): Promise<void>; onCreateBranch(ref: string): Promise<void>; onRenameBranch(from: string, to: string): Promise<void>; onDeleteBranch(ref: string): Promise<void>; onMerge(ref: string): Promise<void>; onCompare(ref: string): Promise<void> }) {
   const [selectedBranch, setSelectedBranch] = useState('');
   const [newBranch, setNewBranch] = useState('');
   const [renamedBranch, setRenamedBranch] = useState('');
   const [diff, setDiff] = useState<{ path: WorkspacePath; text: string }>();
-  if (!git) return <div className="panel-empty"><GitBranch size={24}/><p>This folder is not a supported Git repository.</p></div>;
+  if (!git) return <div className="panel-empty"><GitBranch size={24}/><p>This folder is not a supported Git repository.</p>{error && <small>{error}</small>}</div>;
   const changed = status.filter((item) => item.state !== 'unmodified');
   const candidates = branches.filter((branch) => branch !== currentBranch);
   const selected = selectedBranch || candidates[0] || '';
@@ -638,7 +700,7 @@ async function collectPreviewResources(workspace: GuardedWorkspace | undefined, 
   return resources;
 }
 
-async function collectDocumentResources(workspace: GuardedWorkspace, snapshot: DocumentSnapshot, entries: readonly WorkspaceEntry[]): Promise<readonly ExportResource[]> {
+async function collectDocumentResources(workspace: GuardedWorkspace, snapshot: DocumentSnapshot, entries: readonly WorkspaceEntry[], format: ExportFormat): Promise<readonly ExportResource[]> {
   const sourceReferences = new Set<string>();
   for (const match of snapshot.source.matchAll(/!\[(?:[^\[\]]|\[[^\]]*\])*\]\((<[^>]+>|[^\s)>]+)(?:\s+["'][^"']*["'])?\)/g)) sourceReferences.add(unwrapReference(match[1]!));
   for (const match of snapshot.source.matchAll(/\b(?:bibliography|csl|reference-doc)\s*:\s*["']?([^\s"']+)/gi)) sourceReferences.add(unwrapReference(match[1]!));
@@ -649,7 +711,11 @@ async function collectDocumentResources(workspace: GuardedWorkspace, snapshot: D
     const stat = await workspace.stat(path);
     if (stat.kind !== 'file') return;
     const bytes = await workspace.readBytes(path);
-    resources.push({ path: reference, content: new Blob([bytes.slice()], { type: mediaTypeForPath(path) }) });
+    const localFile = new Blob([bytes.slice()], { type: mediaTypeForPath(path) });
+    const content = format !== 'pdf' && isPdfFigurePath(path)
+      ? await renderPdfFigurePreview(localFile, `export:${path}:${stat.version ?? `${stat.modifiedAt ?? 'unknown'}:${stat.size}`}`)
+      : localFile;
+    resources.push({ path: reference, content });
     added.add(reference);
   };
   for (const reference of sourceReferences) {

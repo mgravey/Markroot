@@ -35,4 +35,8 @@
 - Replaced explicit `::: {#refs}` placeholders with the generated bibliography at that exact location, avoiding visible marker syntax and duplicate appended References sections.
 - Added local PDF.js first-page rasterization so PDF-backed figures display like PNG/SVG figures in the browser viewer, with versioned caching and no network access.
 - Improved dark-mode source readability with a dedicated high-contrast style for Markdown link and image paths.
+- Fixed blank HTML/PDF and missing DOCX output for documents with nested paths by flattening Pandoc's temporary resource names, validating engine output, and rasterizing PDF figures for HTML/DOCX.
+- Fixed real-folder Git detection by handling Chromium's file-versus-directory `TypeMismatchError` when probing `.git`, and exposed repository validation errors in the Git panel.
+- Initialized the browser `Buffer` implementation required by isomorphic-git's ESM bundle, fixing the `Buffer is not defined` repository startup failure.
+- Added a live detachable visual/rendered viewer for second-window and multi-monitor workflows, including reattach/focus controls and cross-window-safe navigation, scrolling, figures, search, typography, and visual editing.
 - Added workspace dependency-boundary and cycle enforcement.

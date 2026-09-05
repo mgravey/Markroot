@@ -13,11 +13,12 @@ Markroot is a fully static, browser-only Markdown and non-executable Quarto work
 - A persistent overlay document outline with two heading levels by default, optional figures, tables, and direct navigation, plus in-view navigation for internal links and unobtrusive Ctrl/Cmd-click DOI access on citations
 - Bidirectional block/character navigation, paired active-paragraph highlighting, shared search highlighting, and interaction-owned center-line alignment
 - Persistent font-family and font-size controls for both panes, plus optional justified viewer text
+- A live detachable visual/rendered viewer for a second window or monitor, with focus and reattach controls
 - Persisted drag handles for resizing the file tree and balancing the source and viewer panes
 - Intent-locked pane synchronization that continuously follows whichever pane the user scrolls without feedback loops
 - Embedded, Git-friendly comment threads
-- Local Git status/diff, staging, commits, history, branch create/rename/delete, checkout, branch review, and clean-merge preview through isomorphic-git
-- Worker-isolated HTML/DOCX export through Pandoc WASM and PDF export through Pandoc-to-Typst plus Typst WASM
+- Direct-folder local Git status/diff, staging, commits, history, branch create/rename/delete, checkout, branch review, and clean-merge preview through isomorphic-git with its browser runtime initialized locally
+- Worker-isolated HTML/DOCX export through Pandoc WASM and PDF export through Pandoc-to-Typst plus Typst WASM, including documents and resources stored in nested folders
 - Download, native Save As, and save-beside-source export targets
 - Browser-only settings, local author profiles, and IndexedDB crash-recovery drafts
 - Light and dark themes

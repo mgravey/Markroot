@@ -29,21 +29,23 @@ export function VisualEditor({ snapshot, activeBlock, scrollTarget, scrollProgre
     const target = scrollTarget ? host.current?.querySelector<HTMLElement>(`[data-block-id="${CSS.escape(scrollTarget)}"]`) : undefined;
     if (!target) return;
     const container = host.current?.parentElement;
-    const next = target.nextElementSibling instanceof HTMLElement ? target.nextElementSibling : undefined;
+    const next = isHtmlElement(target.nextElementSibling) ? target.nextElementSibling : undefined;
+    const eventWindow = target.ownerDocument.defaultView ?? window;
     scrollIntent.current.beginProgrammatic();
     const moved = container ? (scrollAlignment === 'center' ? centerPoint : revealPoint)(container, target, next, scrollProgress ?? 0) : (target.scrollIntoView({ block: 'center' }), true);
     if (!moved) scrollIntent.current.endProgrammatic();
-    else requestAnimationFrame(() => scrollIntent.current.endProgrammatic());
+    else eventWindow.requestAnimationFrame(() => scrollIntent.current.endProgrammatic());
   }, [scrollTarget, scrollProgress, scrollAlignment]);
   useEffect(() => {
     const container = host.current?.parentElement;
     if (!container) return;
+    const eventWindow = container.ownerDocument.defaultView ?? window;
     let frame = 0;
     const handle = () => {
       if (!scrollIntent.current.shouldPublish()) return;
       scrollIntent.current.continueScroll();
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => {
+      eventWindow.cancelAnimationFrame(frame);
+      frame = eventWindow.requestAnimationFrame(() => {
         const blocks = [...(host.current?.querySelectorAll<HTMLElement>('[data-block-id]') ?? [])];
         if (!blocks.length) return;
         const center = viewportCenter(container.getBoundingClientRect());
@@ -63,16 +65,16 @@ export function VisualEditor({ snapshot, activeBlock, scrollTarget, scrollProgre
     container.addEventListener('wheel', markWheel, { passive: true });
     container.addEventListener('pointerdown', beginPointer, { passive: true });
     container.addEventListener('keydown', markKeyboard);
-    window.addEventListener('pointerup', endPointer, { passive: true });
-    window.addEventListener('pointercancel', endPointer, { passive: true });
+    eventWindow.addEventListener('pointerup', endPointer, { passive: true });
+    eventWindow.addEventListener('pointercancel', endPointer, { passive: true });
     return () => {
-      cancelAnimationFrame(frame);
+      eventWindow.cancelAnimationFrame(frame);
       container.removeEventListener('scroll', handle);
       container.removeEventListener('wheel', markWheel);
       container.removeEventListener('pointerdown', beginPointer);
       container.removeEventListener('keydown', markKeyboard);
-      window.removeEventListener('pointerup', endPointer);
-      window.removeEventListener('pointercancel', endPointer);
+      eventWindow.removeEventListener('pointerup', endPointer);
+      eventWindow.removeEventListener('pointercancel', endPointer);
     };
   }, [snapshot.revision]);
   return <div className={`visual-editor ${justified ? 'justified' : ''}`} ref={host} aria-label="Visual Markdown editor" style={{ '--viewer-font': fontStack(fontFamily), '--viewer-size': `${fontSize}px` } as CSSProperties}>
@@ -154,12 +156,13 @@ function revealPoint(container: HTMLElement, target: HTMLElement, next: HTMLElem
 }
 
 function visualSourceOffset(event: ReactMouseEvent<HTMLElement>, block: DocumentBlock): number {
-  const caret = document.caretPositionFromPoint?.(event.clientX, event.clientY);
-  const legacy = !caret ? (document as Document & { caretRangeFromPoint?(x: number, y: number): Range | null }).caretRangeFromPoint?.(event.clientX, event.clientY) : undefined;
+  const ownerDocument = event.currentTarget.ownerDocument;
+  const caret = ownerDocument.caretPositionFromPoint?.(event.clientX, event.clientY);
+  const legacy = !caret ? (ownerDocument as Document & { caretRangeFromPoint?(x: number, y: number): Range | null }).caretRangeFromPoint?.(event.clientX, event.clientY) : undefined;
   const node = caret?.offsetNode ?? legacy?.startContainer;
   const offset = caret?.offset ?? legacy?.startOffset;
   if (!node || offset === undefined || !event.currentTarget.contains(node)) return block.from;
-  const range = document.createRange();
+  const range = ownerDocument.createRange();
   range.selectNodeContents(event.currentTarget);
   try { range.setEnd(node, offset); }
   catch { return block.from; }
@@ -172,4 +175,8 @@ function fontStack(font: Props['fontFamily']): string {
   if (font === 'mono') return '"IBM Plex Mono", "SFMono-Regular", Consolas, monospace';
   if (font === 'sans') return '"Manrope", system-ui, sans-serif';
   return '"Source Serif 4", Georgia, serif';
+}
+
+function isHtmlElement(value: unknown): value is HTMLElement {
+  return typeof value === 'object' && value !== null && 'nodeType' in value && (value as Node).nodeType === 1;
 }

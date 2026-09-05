@@ -24,7 +24,7 @@ try {
   for (const format of ['html', 'docx', 'pdf'] satisfies readonly ExportFormat[]) {
     output.textContent = [...reports, `${format.toUpperCase()}: running…`].join('\n');
     const result = await exporter.export(
-      { format, source, filename: 'export-smoke.qmd' },
+      { format, source, filename: 'chapters/export-smoke.qmd' },
       { onProgress: (progress) => {
         output.textContent = [...reports, `${format.toUpperCase()}: ${progress.message ?? progress.phase}`].join('\n');
       } },

@@ -17,6 +17,19 @@ export interface ExportRequest {
 }
 export interface ExportResult { readonly format: ExportFormat; readonly blob: Blob; readonly filename: string; readonly warnings: readonly string[] }
 
+interface PandocResult {
+  readonly stdout: string;
+  readonly stderr?: string;
+  readonly warnings: readonly unknown[];
+  readonly files: Readonly<Record<string, string | Blob>>;
+}
+
+interface PreparedPandocInput {
+  readonly source: string;
+  readonly files: Readonly<Record<string, string | Blob>>;
+  readonly paths: ReadonlyMap<string, string>;
+}
+
 export interface Exporter {
   readonly formats: readonly ExportFormat[];
   export(request: ExportRequest, context?: OperationContext): Promise<ExportResult>;
@@ -29,22 +42,24 @@ export class BrowserDocumentExporter implements Exporter {
     throwIfAborted(context);
     context?.onProgress?.({ phase: 'prepare', completed: 0, total: 3, message: 'Preparing local resources' });
     const source = stripCommentMarkup(request.source);
-    const files = Object.fromEntries((request.resources ?? []).map((resource) => [resource.path, resource.content]));
+    const prepared = preparePandocInput(source, request.resources ?? []);
     try {
       const { convert } = await import('pandoc-wasm');
       if (request.format === 'html') {
-        const result = await convert({ from: 'markdown+fenced_divs+tex_math_dollars', to: 'html5', standalone: true, 'embed-resources': true, citeproc: true }, source, files);
-        return finish(request, new Blob([result.stdout], { type: 'text/html;charset=utf-8' }), result.warnings);
+        const result = await convert({ from: 'markdown+fenced_divs+tex_math_dollars', to: 'html5', standalone: true, 'embed-resources': true, citeproc: true }, prepared.source, prepared.files) as PandocResult;
+        const html = requirePandocText(result, 'HTML');
+        return finish(request, new Blob([html], { type: 'text/html;charset=utf-8' }), result.warnings);
       }
       if (request.format === 'docx') {
-        const output = `${basename(request.filename)}.docx`;
-        const result = await convert({ from: 'markdown+fenced_divs+tex_math_dollars', to: 'docx', 'output-file': output, citeproc: true, ...(request.referenceDocx ? { 'reference-doc': request.referenceDocx } : {}) }, source, files);
-        const blob = result.files[output];
-        if (!(blob instanceof Blob)) throw new Error('Pandoc did not return a DOCX blob.');
+        const output = exportFilename(request.filename, 'docx');
+        const referenceDocx = request.referenceDocx ? prepared.paths.get(request.referenceDocx) ?? request.referenceDocx : undefined;
+        const result = await convert({ from: 'markdown+fenced_divs+tex_math_dollars', to: 'docx', 'output-file': output, citeproc: true, ...(referenceDocx ? { 'reference-doc': referenceDocx } : {}) }, prepared.source, prepared.files) as PandocResult;
+        const blob = await requirePandocBlob(result, output, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
         return finish(request, blob, result.warnings);
       }
       context?.onProgress?.({ phase: 'pandoc', completed: 1, total: 3, message: 'Converting Markdown to Typst' });
-      const typstResult = await convert({ from: 'markdown+fenced_divs+tex_math_dollars', to: 'typst', standalone: true, citeproc: true }, source, files);
+      const typstResult = await convert({ from: 'markdown+fenced_divs+tex_math_dollars', to: 'typst', standalone: true, citeproc: true }, prepared.source, prepared.files) as PandocResult;
+      const typstSource = requirePandocText(typstResult, 'Typst');
       throwIfAborted(context);
       context?.onProgress?.({ phase: 'typst', completed: 2, total: 3, message: 'Compiling PDF locally' });
       const [{ $typst, MemoryAccessModel }, { TypstSnippet }] = await Promise.all([
@@ -65,15 +80,15 @@ export class BrowserDocumentExporter implements Exporter {
         typstConfigured = true;
       }
       await $typst.resetShadow();
-      await $typst.mapShadow('/main.typ', new TextEncoder().encode(typstResult.stdout));
-      for (const resource of request.resources ?? []) {
-        const bytes = typeof resource.content === 'string'
-          ? new TextEncoder().encode(resource.content)
-          : new Uint8Array(await resource.content.arrayBuffer());
-        await $typst.mapShadow(`/${resource.path.replace(/^\/+/, '')}`, bytes);
+      await $typst.mapShadow('/main.typ', new TextEncoder().encode(typstSource));
+      for (const [path, content] of Object.entries(prepared.files)) {
+        const bytes = typeof content === 'string'
+          ? new TextEncoder().encode(content)
+          : new Uint8Array(await content.arrayBuffer());
+        await $typst.mapShadow(`/${path}`, bytes);
       }
       const pdf = await $typst.pdf({ mainFilePath: '/main.typ' });
-      if (!pdf) throw new Error('Typst did not return a PDF document.');
+      if (!pdf?.byteLength) throw new Error('Typst did not return a PDF document.');
       throwIfAborted(context);
       const copied = new Uint8Array(pdf.byteLength);
       copied.set(pdf);
@@ -86,6 +101,77 @@ export class BrowserDocumentExporter implements Exporter {
 }
 
 function finish(request: ExportRequest, blob: Blob, warnings: readonly unknown[]): ExportResult {
-  return { format: request.format, blob, filename: `${basename(request.filename)}.${request.format}`, warnings: warnings.map(String) };
+  return { format: request.format, blob, filename: exportFilename(request.filename, request.format), warnings: warnings.map(formatWarning) };
 }
-function basename(filename: string): string { return filename.replace(/\.(?:md|qmd|html|docx|pdf)$/i, ''); }
+
+export function preparePandocInput(source: string, resources: readonly ExportResource[]): PreparedPandocInput {
+  const files: Record<string, string | Blob> = {};
+  const paths = new Map<string, string>();
+  for (const resource of resources) {
+    if (!resource.path || paths.has(resource.path)) continue;
+    const filename = `markroot-resource-${paths.size + 1}${resourceExtension(resource)}`;
+    paths.set(resource.path, filename);
+    files[filename] = resource.content;
+  }
+  const replacements = [...paths.entries()].sort(([left], [right]) => right.length - left.length);
+  const rewritten = replacements.reduce((value, [path, filename]) => value.replaceAll(path, filename), source);
+  return { source: rewritten, files, paths };
+}
+
+export function exportFilename(filename: string, format: ExportFormat): string {
+  const leaf = filename.replaceAll('\\', '/').split('/').at(-1) || 'document';
+  const stem = leaf.replace(/\.(?:md|qmd|html|docx|pdf)$/i, '') || 'document';
+  return `${stem}.${format}`;
+}
+
+function resourceExtension(resource: ExportResource): string {
+  const path = resource.path.split(/[?#]/, 1)[0] ?? '';
+  const pathExtension = /\.[a-z0-9]{1,10}$/i.exec(path)?.[0]?.toLowerCase() ?? '';
+  if (pathExtension && !(pathExtension === '.pdf' && resource.content instanceof Blob && resource.content.type.toLowerCase() === 'image/png')) {
+    return pathExtension;
+  }
+  if (resource.content instanceof Blob) {
+    const byType = ({
+      'application/pdf': '.pdf',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
+      'application/xml': '.xml',
+      'image/avif': '.avif',
+      'image/gif': '.gif',
+      'image/jpeg': '.jpg',
+      'image/png': '.png',
+      'image/svg+xml': '.svg',
+      'image/webp': '.webp',
+      'text/css': '.css',
+      'text/plain': '.txt',
+    } as Record<string, string>)[resource.content.type.toLowerCase()];
+    if (byType) return byType;
+  }
+  return pathExtension;
+}
+
+function requirePandocText(result: PandocResult, label: string): string {
+  if (result.stdout.trim()) return result.stdout;
+  throw new Error(pandocFailure(result, `Pandoc did not return ${label} content.`));
+}
+
+async function requirePandocBlob(result: PandocResult, filename: string, type: string): Promise<Blob> {
+  const output = result.files[filename];
+  if (output instanceof Blob && output.size > 0) return output.slice(0, output.size, type);
+  if (output && typeof output !== 'string' && typeof output.arrayBuffer === 'function') {
+    const bytes = await output.arrayBuffer();
+    if (bytes.byteLength > 0) return new Blob([bytes], { type });
+  }
+  throw new Error(pandocFailure(result, `Pandoc did not return ${filename}.`));
+}
+
+function pandocFailure(result: PandocResult, fallback: string): string {
+  const stderr = result.stderr?.trim();
+  if (stderr) return `${fallback} ${stderr}`;
+  const warning = result.warnings.map(formatWarning).find(Boolean);
+  return warning ? `${fallback} ${warning}` : fallback;
+}
+
+function formatWarning(warning: unknown): string {
+  if (typeof warning === 'object' && warning !== null && 'pretty' in warning && typeof warning.pretty === 'string') return warning.pretty.trim();
+  return String(warning);
+}

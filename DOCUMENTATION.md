@@ -51,6 +51,8 @@ The source editor applies a dedicated high-contrast color to Markdown link and i
 
 Source and viewer font family and size are independent browser preferences. The viewer can additionally justify prose and apply browser hyphenation; the quick justification toggle is also available in the viewer header.
 
+The viewer header can detach the complete visual/rendered surface into a separate browser window for use on another monitor. The detached surface remains part of the same live React document session: mode changes, edits, rendered updates, search marks, active-block highlighting, navigation, center-line scroll synchronization, theme, font, and justification settings continue to update without copying document content or opening a second workspace. While detached, the source pane uses the available main-window width and offers controls to focus the second window or reattach it. Closing the second window also reattaches the viewer state. The detach action must originate from its button so Chromium can apply the normal pop-up permission policy; if blocked, Markroot reports how to retry.
+
 Scroll synchronization is interaction-owned. Wheel, touch, scrollbar, and scrolling-key input in one pane makes that pane the reference; the semantic point under its exact vertical midpoint is placed at the paired pane's midpoint on every animation frame. Alignment clamps naturally near either document boundary. The paired pane's automatic movement never takes ownership in return, and a one-pixel tolerance avoids needless writes when both centers are already aligned.
 
 ### Workspace tree and portable paths
@@ -76,9 +78,13 @@ Prose comments use HTML boundary markers. Thread data is stored in a terminal `m
 
 Version 0.1 targets standard non-bare SHA-1 repositories whose root contains a `.git/` directory. Linked worktrees, SHA-256 repositories, submodule mutation, and symlink checkout are rejected. Save open documents before staging, branch rename, checkout, or merge. Branch create/rename/delete and clean merges are supported; conflict resolution and recursive merge-base edge cases remain a release gate.
 
+The File System Access adapter probes both file and directory handles when determining an entry type. Chromium's expected `TypeMismatchError` from probing `.git` as a file is treated as a signal to probe it as a directory, while genuine permission and I/O errors remain visible in the Git panel.
+
+The Git package initializes the standard browser `Buffer` implementation before evaluating isomorphic-git. This satisfies isomorphic-git's index and packed-object readers without Node.js, a backend, or a repository copy.
+
 ## Export
 
-HTML and DOCX use the self-hosted Pandoc WASM engine. PDF uses Pandoc-to-Typst followed by the pinned self-hosted Typst compiler WASM and bundled Source Serif 4 TrueType bytes. The font is registered before compiler initialization; Typst webfont containers are not used because the compiler does not recognize them as document fonts. Export runs in a cancellable worker that restarts after a crash. Online Typst package fetching is not used. Local images, bibliographies, and CSL files referenced by the document are passed explicitly to the worker. Results may be downloaded, saved through the native Save As picker, or written beside the source.
+HTML and DOCX use the self-hosted Pandoc WASM engine. PDF uses Pandoc-to-Typst followed by the pinned self-hosted Typst compiler WASM and bundled Source Serif 4 TrueType bytes. The font is registered before compiler initialization; Typst webfont containers are not used because the compiler does not recognize them as document fonts. Export runs in a cancellable worker that restarts after a crash. Online Typst package fetching is not used. Local images, bibliographies, and CSL files referenced by the document are passed explicitly to the worker. Because Pandoc WASM exposes a flat temporary filesystem, Markroot assigns collision-free temporary filenames and rewrites only the in-memory export source; nested workspace paths and the saved source remain untouched. PDF figures are rasterized for HTML/DOCX and remain native PDF assets for Typst. Empty Pandoc results are rejected with stderr details rather than downloaded as blank documents. Results may be downloaded, saved through the native Save As picker, or written beside the source.
 
 ## Testing
 
@@ -93,3 +99,4 @@ HTML and DOCX use the self-hosted Pandoc WASM engine. PDF uses Pandoc-to-Typst f
 - Add in-memory three-way conflict resolution and exact per-segment authorship for ambiguous/moved/merged history.
 - Run DOCX archive validation and offline PDF text, font, metadata, and pixel-fidelity tests on every supported platform.
 - Complete accessibility, storage-pressure, large-packfile, and multi-tab endurance testing.
+- Exercise detached-viewer lifecycle, cross-window input, and multi-monitor placement on every supported desktop platform.

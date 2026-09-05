@@ -32,10 +32,11 @@ export function Preview({ html, objectUrls, warnings, blocks, search, regularExp
   latestOnNavigate.current = onNavigate;
   useEffect(() => {
     if (!host.current) return;
+    const ownerDocument = host.current.ownerDocument;
     const shadow = host.current.shadowRoot ?? host.current.attachShadow({ mode: 'open' });
-    const style = document.createElement('style');
+    const style = ownerDocument.createElement('style');
     style.textContent = previewStyle;
-    const article = document.createElement('article');
+    const article = ownerDocument.createElement('article');
     article.classList.toggle('justified', justified);
     article.innerHTML = DOMPurify.sanitize(protectLocalObjectUrls(html, objectUrls), { FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed'], FORBID_ATTR: ['style'] });
     restoreLocalObjectUrls(article, objectUrls);
@@ -45,8 +46,10 @@ export function Preview({ html, objectUrls, warnings, blocks, search, regularExp
     appendViewerWarnings(article, warnings);
     if (search) highlight(article, search, regularExpression);
     if (activeBlock) article.querySelector(`[data-block-id="${CSS.escape(activeBlock)}"]`)?.classList.add('active-block');
-    shadow.host instanceof HTMLElement && shadow.host.style.setProperty('--viewer-font', fontStack(fontFamily));
-    shadow.host instanceof HTMLElement && shadow.host.style.setProperty('--viewer-size', `${fontSize}px`);
+    if (isHtmlElement(shadow.host)) {
+      shadow.host.style.setProperty('--viewer-font', fontStack(fontFamily));
+      shadow.host.style.setProperty('--viewer-size', `${fontSize}px`);
+    }
     shadow.replaceChildren(style, article);
   }, [html, objectUrls, warnings, search, regularExpression, allowRemoteResources, fontFamily, fontSize, justified]);
   useEffect(() => {
@@ -58,11 +61,12 @@ export function Preview({ html, objectUrls, warnings, blocks, search, regularExp
     const target = scrollTarget ? host.current?.shadowRoot?.querySelector<HTMLElement>(`[data-block-id="${CSS.escape(scrollTarget)}"]`) : undefined;
     if (target) {
       const container = host.current?.parentElement;
-      const next = target.nextElementSibling instanceof HTMLElement ? target.nextElementSibling : undefined;
+      const next = isHtmlElement(target.nextElementSibling) ? target.nextElementSibling : undefined;
+      const eventWindow = target.ownerDocument.defaultView ?? window;
       scrollIntent.current.beginProgrammatic();
       const moved = container ? (scrollAlignment === 'center' ? centerPoint : revealPoint)(container, target, next, scrollProgress ?? 0) : (target.scrollIntoView({ block: 'center' }), true);
       if (!moved) scrollIntent.current.endProgrammatic();
-      else requestAnimationFrame(() => scrollIntent.current.endProgrammatic());
+      else eventWindow.requestAnimationFrame(() => scrollIntent.current.endProgrammatic());
     }
   }, [scrollTarget, scrollProgress, scrollAlignment]);
   useEffect(() => {
@@ -71,12 +75,13 @@ export function Preview({ html, objectUrls, warnings, blocks, search, regularExp
   useEffect(() => {
     const container = host.current?.parentElement;
     if (!container) return;
+    const eventWindow = container.ownerDocument.defaultView ?? window;
     let frame = 0;
     const handle = () => {
       if (!scrollIntent.current.shouldPublish()) return;
       scrollIntent.current.continueScroll();
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => {
+      eventWindow.cancelAnimationFrame(frame);
+      frame = eventWindow.requestAnimationFrame(() => {
         const blocks = [...(host.current?.shadowRoot?.querySelectorAll<HTMLElement>('[data-block-id]') ?? [])];
         if (!blocks.length) return;
         const center = viewportCenter(container.getBoundingClientRect());
@@ -96,27 +101,27 @@ export function Preview({ html, objectUrls, warnings, blocks, search, regularExp
     container.addEventListener('wheel', markWheel, { passive: true });
     container.addEventListener('pointerdown', beginPointer, { passive: true });
     container.addEventListener('keydown', markKeyboard);
-    window.addEventListener('pointerup', endPointer, { passive: true });
-    window.addEventListener('pointercancel', endPointer, { passive: true });
+    eventWindow.addEventListener('pointerup', endPointer, { passive: true });
+    eventWindow.addEventListener('pointercancel', endPointer, { passive: true });
     return () => {
-      cancelAnimationFrame(frame);
+      eventWindow.cancelAnimationFrame(frame);
       container.removeEventListener('scroll', handle);
       container.removeEventListener('wheel', markWheel);
       container.removeEventListener('pointerdown', beginPointer);
       container.removeEventListener('keydown', markKeyboard);
-      window.removeEventListener('pointerup', endPointer);
-      window.removeEventListener('pointercancel', endPointer);
+      eventWindow.removeEventListener('pointerup', endPointer);
+      eventWindow.removeEventListener('pointercancel', endPointer);
     };
   }, [html]);
   return <div className="preview" ref={host} onClick={(event) => {
     const path = event.nativeEvent.composedPath();
-    const doiLink = path.find((item): item is HTMLElement => item instanceof HTMLElement && item.hasAttribute('data-doi-url'));
+    const doiLink = path.find((item): item is HTMLElement => isHtmlElement(item) && item.hasAttribute('data-doi-url'));
     if (doiLink && (event.metaKey || event.ctrlKey)) {
       event.preventDefault();
-      openTrustedDoi(doiLink.dataset.doiUrl);
+      openTrustedDoi(doiLink.dataset.doiUrl, doiLink.ownerDocument.defaultView ?? window);
       return;
     }
-    const link = path.find((item): item is HTMLAnchorElement => item instanceof HTMLAnchorElement);
+    const link = path.find((item): item is HTMLAnchorElement => isHtmlElement(item) && item.tagName === 'A') as HTMLAnchorElement | undefined;
     const href = link?.getAttribute('href') ?? '';
     if (href.startsWith('#')) {
       event.preventDefault();
@@ -124,9 +129,9 @@ export function Preview({ html, objectUrls, warnings, blocks, search, regularExp
       return;
     }
     if (link) return;
-    const block = path.find((item): item is HTMLElement => item instanceof HTMLElement && item.hasAttribute('data-block-id'));
+    const block = path.find((item): item is HTMLElement => isHtmlElement(item) && item.hasAttribute('data-block-id'));
     if (!block?.dataset.blockId) return;
-    const mapped = path.find((item): item is HTMLElement => item instanceof HTMLElement && item.hasAttribute('data-source-offset'));
+    const mapped = path.find((item): item is HTMLElement => isHtmlElement(item) && item.hasAttribute('data-source-offset'));
     const exact = mapped?.dataset.sourceOffset ? Number(mapped.dataset.sourceOffset) : undefined;
     const sourceBlock = blocks.find((candidate) => candidate.id === block.dataset.blockId);
     const sourceOffset = Number.isFinite(exact) ? exact : sourceBlock ? sourceOffsetAtPoint(host.current?.shadowRoot, block, sourceBlock, event.clientX, event.clientY) : undefined;
@@ -219,7 +224,8 @@ function revealPoint(container: HTMLElement, target: HTMLElement, next: HTMLElem
 
 function sourceOffsetAtPoint(shadow: ShadowRoot | null | undefined, blockElement: HTMLElement, block: DocumentBlock, x: number, y: number): number {
   if (!shadow) return block.from;
-  const documentWithCaret = document as Document & {
+  const ownerDocument = blockElement.ownerDocument;
+  const documentWithCaret = ownerDocument as Document & {
     caretPositionFromPoint?(x: number, y: number, options?: { shadowRoots?: readonly ShadowRoot[] }): { offsetNode: Node; offset: number } | null;
     caretRangeFromPoint?(x: number, y: number): Range | null;
   };
@@ -233,7 +239,7 @@ function sourceOffsetAtPoint(shadow: ShadowRoot | null | undefined, blockElement
     offset = nearest?.offset;
   }
   if (!node || offset === undefined) return block.from;
-  const range = document.createRange();
+  const range = ownerDocument.createRange();
   range.selectNodeContents(blockElement);
   try { range.setEnd(node, offset); }
   catch { return block.from; }
@@ -241,14 +247,16 @@ function sourceOffsetAtPoint(shadow: ShadowRoot | null | undefined, blockElement
 }
 
 function nearestTextCaret(root: HTMLElement, x: number, y: number): { node: Text; offset: number } | undefined {
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const ownerDocument = root.ownerDocument;
+  const showText = ownerDocument.defaultView?.NodeFilter.SHOW_TEXT ?? 4;
+  const walker = ownerDocument.createTreeWalker(root, showText);
   let best: { node: Text; offset: number; distance: number } | undefined;
   while (walker.nextNode()) {
     const node = walker.currentNode as Text;
     if (!node.length || !node.nodeValue?.trim()) continue;
     const stride = Math.max(1, Math.ceil(node.length / 1024));
     for (let offset = 0; offset <= node.length; offset += stride) {
-      const range = document.createRange();
+      const range = ownerDocument.createRange();
       range.setStart(node, Math.min(offset, node.length));
       range.collapse(true);
       const rect = range.getBoundingClientRect();
@@ -261,7 +269,7 @@ function nearestTextCaret(root: HTMLElement, x: number, y: number): { node: Text
   const from = Math.max(0, best.offset - radius);
   const to = Math.min(best.node.length, best.offset + radius);
   for (let offset = from; offset <= to; offset += 1) {
-    const range = document.createRange();
+    const range = ownerDocument.createRange();
     range.setStart(best.node, offset);
     range.collapse(true);
     const distance = pointDistance(range.getBoundingClientRect(), x, y);
@@ -305,6 +313,7 @@ function fontStack(font: Props['fontFamily']): string {
 }
 
 function prepareFigureImages(root: HTMLElement): void {
+  const ownerDocument = root.ownerDocument;
   for (const image of root.querySelectorAll<HTMLImageElement>('img')) {
     const width = image.dataset.figureWidth;
     const height = image.dataset.figureHeight;
@@ -312,13 +321,13 @@ function prepareFigureImages(root: HTMLElement): void {
     if (safeCssLength(height)) image.style.height = height!;
     image.addEventListener('error', () => {
       const source = image.dataset.imageSource ?? image.getAttribute('src') ?? image.alt;
-      const placeholder = document.createElement('span');
+      const placeholder = ownerDocument.createElement('span');
       placeholder.className = 'image-missing';
       placeholder.setAttribute('role', 'img');
       placeholder.setAttribute('aria-label', `Image unavailable: ${image.alt || source}`);
-      const heading = document.createElement('strong');
+      const heading = ownerDocument.createElement('strong');
       heading.textContent = 'Image unavailable';
-      const code = document.createElement('code');
+      const code = ownerDocument.createElement('code');
       code.textContent = source;
       placeholder.append(heading, code);
       image.replaceWith(placeholder);
@@ -337,20 +346,21 @@ function restoreLocalObjectUrls(root: HTMLElement, objectUrls: readonly string[]
   for (const element of root.querySelectorAll<HTMLElement>('[data-markroot-object-url]')) {
     const index = Number.parseInt(element.dataset.markrootObjectUrl ?? '', 10);
     element.removeAttribute('data-markroot-object-url');
-    if (!(element instanceof HTMLImageElement) || !Number.isInteger(index) || index < 0 || index >= objectUrls.length) continue;
-    element.src = objectUrls[index]!;
+    if (element.tagName !== 'IMG' || !Number.isInteger(index) || index < 0 || index >= objectUrls.length) continue;
+    (element as HTMLImageElement).src = objectUrls[index]!;
   }
 }
 
 function appendViewerWarnings(root: HTMLElement, warnings: readonly string[]): void {
   if (!warnings.length) return;
-  const details = document.createElement('details');
+  const ownerDocument = root.ownerDocument;
+  const details = ownerDocument.createElement('details');
   details.className = 'viewer-warnings';
-  const summary = document.createElement('summary');
+  const summary = ownerDocument.createElement('summary');
   summary.textContent = `${warnings.length} viewer ${warnings.length === 1 ? 'note' : 'notes'}`;
-  const list = document.createElement('ul');
+  const list = ownerDocument.createElement('ul');
   for (const warning of warnings) {
-    const item = document.createElement('li');
+    const item = ownerDocument.createElement('li');
     item.textContent = warning;
     list.append(item);
   }
@@ -383,10 +393,10 @@ export function trustedDoiUrl(value?: string): string | undefined {
   } catch { return undefined; }
 }
 
-function openTrustedDoi(value?: string): void {
+function openTrustedDoi(value: string | undefined, targetWindow: Window): void {
   const url = trustedDoiUrl(value);
   if (!url) return;
-  window.open(url, '_blank', 'noopener,noreferrer');
+  targetWindow.open(url, '_blank', 'noopener,noreferrer');
 }
 
 function navigatePreviewAnchor(host: HTMLDivElement | null, id: string, blocks: readonly DocumentBlock[], gate: ScrollIntentGate, onNavigate: Props['onNavigate']): void {
@@ -395,10 +405,11 @@ function navigatePreviewAnchor(host: HTMLDivElement | null, id: string, blocks: 
   if (!target) return;
   const container = host.parentElement;
   if (container) {
+    const eventWindow = container.ownerDocument.defaultView ?? window;
     gate.beginProgrammatic();
     const moved = revealPoint(container, target, undefined, 0);
     if (!moved) gate.endProgrammatic();
-    else requestAnimationFrame(() => gate.endProgrammatic());
+    else eventWindow.requestAnimationFrame(() => gate.endProgrammatic());
   }
   const block = target.closest<HTMLElement>('[data-block-id]');
   if (!block?.dataset.blockId) return;
@@ -413,15 +424,17 @@ function decodeFragment(value: string): string {
 }
 
 function blockRemoteResources(root: HTMLElement): void {
+  const ownerDocument = root.ownerDocument;
   const selector = 'img[src], audio[src], video[src], source[src], track[src], input[src], link[href]';
   for (const element of root.querySelectorAll<HTMLElement>(selector)) {
     const attribute = element.hasAttribute('src') ? 'src' : 'href';
     const value = element.getAttribute(attribute) ?? '';
     if (!/^https?:\/\//i.test(value)) continue;
-    if (element instanceof HTMLImageElement) {
-      const placeholder = document.createElement('span');
+    if (element.tagName === 'IMG') {
+      const placeholder = ownerDocument.createElement('span');
       placeholder.className = 'remote-resource-placeholder';
-      placeholder.textContent = element.alt ? `Remote image blocked: ${element.alt}` : 'Remote image blocked';
+      const image = element as HTMLImageElement;
+      placeholder.textContent = image.alt ? `Remote image blocked: ${image.alt}` : 'Remote image blocked';
       element.replaceWith(placeholder);
     } else {
       element.removeAttribute(attribute);
@@ -434,18 +447,20 @@ function highlight(root: HTMLElement, query: string, regularExpression: boolean)
   let expression: RegExp;
   try { expression = new RegExp(regularExpression ? query : escapeRegExp(query), 'giu'); }
   catch { return; }
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const ownerDocument = root.ownerDocument;
+  const showText = ownerDocument.defaultView?.NodeFilter.SHOW_TEXT ?? 4;
+  const walker = ownerDocument.createTreeWalker(root, showText);
   const nodes: Text[] = [];
   while (walker.nextNode()) if (expression.test(walker.currentNode.nodeValue ?? '')) { nodes.push(walker.currentNode as Text); expression.lastIndex = 0; }
   for (const node of nodes) {
     const value = node.nodeValue ?? '';
-    const fragment = document.createDocumentFragment();
+    const fragment = ownerDocument.createDocumentFragment();
     let cursor = 0;
     expression.lastIndex = 0;
     for (const match of value.matchAll(expression)) {
       if (!match[0]) continue;
       fragment.append(value.slice(cursor, match.index));
-      const mark = document.createElement('mark'); mark.textContent = match[0]; fragment.append(mark);
+      const mark = ownerDocument.createElement('mark'); mark.textContent = match[0]; fragment.append(mark);
       cursor = match.index + match[0].length;
     }
     fragment.append(value.slice(cursor));
@@ -454,3 +469,7 @@ function highlight(root: HTMLElement, query: string, regularExpression: boolean)
 }
 
 function escapeRegExp(value: string): string { return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+function isHtmlElement(value: unknown): value is HTMLElement {
+  return typeof value === 'object' && value !== null && 'nodeType' in value && (value as Node).nodeType === 1 && 'hasAttribute' in value;
+}

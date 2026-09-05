@@ -1,3 +1,4 @@
+import './buffer-runtime.js';
 import {
   add,
   branch,

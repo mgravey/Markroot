@@ -3,8 +3,16 @@ import { init } from 'isomorphic-git';
 import { workspacePath } from '@markroot/core';
 import { MemoryWorkspace } from '@markroot/workspace';
 import { createGitFs, IsomorphicGitRepository } from './index.js';
+import { ensureGitBuffer } from './buffer-runtime.js';
 
 describe('IsomorphicGitRepository', () => {
+  it('installs the Buffer implementation required by the browser ESM build', () => {
+    const runtime = {} as typeof globalThis & { Buffer?: typeof Buffer };
+    ensureGitBuffer(runtime);
+    expect(runtime.Buffer).toBeDefined();
+    expect(runtime.Buffer!.from('Markroot').toString('utf8')).toBe('Markroot');
+  });
+
   it('uses the workspace as the real repository store', async () => {
     const workspace = new MemoryWorkspace();
     await init({ fs: createGitFs(workspace), dir: '/repo', defaultBranch: 'main' });
