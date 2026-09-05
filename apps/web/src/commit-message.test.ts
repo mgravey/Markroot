@@ -25,6 +25,17 @@ describe('ChromeCommitMessageGenerator', () => {
     expect(model.create).not.toHaveBeenCalled();
   });
 
+  it('shows session-creation failures instead of inventing a timeout cause', async () => {
+    const model: ChromeLanguageModelFactory = {
+      availability: vi.fn(async (): Promise<ChromeLanguageModelAvailability> => 'downloadable'),
+      create: vi.fn(async () => { throw new Error('Chrome model component failed'); }),
+    };
+    await expect(new ChromeCommitMessageGenerator(model).prepare()).rejects.toMatchObject({
+      name: 'CommitMessageUnavailableError',
+      message: 'Chrome could not prepare the on-device AI model: Chrome model component failed',
+    });
+  });
+
   it('reports model download progress and returns validated structured output', async () => {
     const progress: Array<{ phase: string; loaded?: number }> = [];
     const model: ChromeLanguageModelFactory = {

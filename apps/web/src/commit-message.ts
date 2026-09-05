@@ -56,51 +56,24 @@ const TYPES = new Set(['feat', 'fix', 'docs', 'refactor', 'test', 'chore', 'styl
 const MAX_PROMPTS = 64;
 const MAX_REDUCTION_ROUNDS = 3;
 const CONTEXT_FRACTION = 0.65;
-const DOWNLOAD_DIAGNOSTIC_DELAY = 12_000;
 
 export class ChromeCommitMessageGenerator implements CommitMessageGenerator {
-  constructor(private readonly factory: ChromeLanguageModelFactory | undefined = globalThis.LanguageModel, private readonly downloadDiagnosticDelay = DOWNLOAD_DIAGNOSTIC_DELAY) {}
+  constructor(private readonly factory: ChromeLanguageModelFactory | undefined = globalThis.LanguageModel) {}
 
   async prepare(options: CommitGenerationOptions = {}): Promise<PreparedCommitMessageGenerator> {
     if (!this.factory) throw new CommitMessageUnavailableError();
     options.onProgress?.({ phase: 'checking', message: 'Checking Chrome on-device AI' });
     const availability = await this.factory.availability(EXPECTED_IO);
-    if (availability === 'unavailable') throw new CommitMessageUnavailableError();
+    if (availability === 'unavailable') throw new CommitMessageUnavailableError('Chrome reports that on-device AI is unavailable on this device or profile.');
     const needsDownload = availability === 'downloadable' || availability === 'downloading';
     if (needsDownload) options.onProgress?.({ phase: 'downloading', message: 'Chrome is starting the on-device AI model download' });
-    const creationController = new AbortController();
-    const relayAbort = () => creationController.abort(options.signal?.reason);
-    if (options.signal?.aborted) relayAbort();
-    else options.signal?.addEventListener('abort', relayAbort, { once: true });
-    let diagnosticTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
-    let downloadStarted = !needsDownload;
-    const creationOptions: CommitGenerationOptions = {
-      signal: creationController.signal,
-      onProgress: (progress) => {
-        if (progress.phase === 'downloading' && typeof progress.loaded === 'number' && progress.loaded > 0) {
-          downloadStarted = true;
-          if (diagnosticTimer !== undefined) globalThis.clearTimeout(diagnosticTimer);
-          diagnosticTimer = undefined;
-        }
-        options.onProgress?.(progress);
-      },
-    };
-    const noProgress = new Promise<never>((_, reject) => {
-      if (!needsDownload) return;
-      diagnosticTimer = globalThis.setTimeout(() => {
-        if (downloadStarted) return;
-        const error = new CommitMessageUnavailableError('Chrome could not start the Gemini Nano download. At least 22 GB of free space on the Chrome profile volume and an unmetered connection are required.');
-        creationController.abort(error);
-        reject(error);
-      }, this.downloadDiagnosticDelay);
-    });
     try {
-      const creation = this.createSession(creationOptions);
-      const session = needsDownload ? await Promise.race([creation, noProgress]) : await creation;
+      const session = await this.createSession(options);
       return new ChromePreparedGenerator(this.factory, session, options);
-    } finally {
-      if (diagnosticTimer !== undefined) globalThis.clearTimeout(diagnosticTimer);
-      options.signal?.removeEventListener('abort', relayAbort);
+    } catch (error) {
+      if (options.signal?.aborted) throw options.signal.reason ?? error;
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new CommitMessageUnavailableError(`Chrome could not prepare the on-device AI model: ${detail}`);
     }
   }
 

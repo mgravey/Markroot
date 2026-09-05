@@ -2,7 +2,7 @@
 
 ## 0.1.0 - unreleased
 
-- Added opt-in, on-device Gemini Nano Conventional Commit proposals after explicit saves, including an immediate browser-managed model-download trigger, inline readiness status, and prominent red alert cards/toasts with Chrome's storage/network requirements when a download cannot start, editable review, bounded large-diff summaries, and guarded commits of the staged set plus the open file.
+- Added opt-in, on-device Gemini Nano Conventional Commit proposals after explicit saves, including an immediate browser-managed model-download trigger, inline readiness status, and prominent red alert cards/toasts for actual Chrome API failures without timing out slow model downloads, editable review, bounded large-diff summaries, and guarded commits of the staged set plus the open file.
 - Added the rooted-pilcrow identity across the application, detached viewer, browser favicon, touch/install metadata, documentation, motion previews, and a Lottie-friendly After Effects composition generator.
 - Kept the deployed logo fully visible while animating only its orange cursor, with a static reduced-motion fallback.
 - Changed source and viewer display sizing to scale their writing surfaces proportionally, including page width and padding, while keeping export typography independent.
