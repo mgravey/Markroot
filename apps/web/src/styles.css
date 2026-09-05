@@ -292,6 +292,7 @@ mark { color: inherit; background: #ffd76a; border-radius: .118em; }
 .ai-model-progress > span { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-strong)); border-radius: inherit; transition: width 260ms ease; }
 .selection-chip { padding: 7px 9px; color: var(--muted); background: var(--surface-muted); border-radius: 5px; font-family: 'IBM Plex Mono', monospace; font-size: 11px; }
 .thread-list article { margin: 13px 0; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+.thread-list article.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-soft); }
 .thread-list article.resolved { opacity: .68; }
 .thread-list article > header { display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 7px 0 10px; background: var(--surface-muted); }
 .thread-list article > header span { flex: 1; color: var(--muted); font-size: 10px; font-weight: 700; text-transform: uppercase; }

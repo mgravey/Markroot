@@ -84,6 +84,7 @@ export function App() {
   const [aiModelSetup, setAiModelSetup] = useState<AiModelSetupState>();
   const [commentBody, setCommentBody] = useState('');
   const [replyBodies, setReplyBodies] = useState<Record<string, string>>({});
+  const [activeCommentId, setActiveCommentId] = useState<string>();
   const [citations, setCitations] = useState<readonly CitationRecord[]>([]);
   const [citationQuery, setCitationQuery] = useState('');
   const [exportBusy, setExportBusy] = useState(false);
@@ -105,7 +106,7 @@ export function App() {
   const engine = useMemo(() => new BasicDocumentEngine(), []);
   const exporter = useMemo(() => new WorkerExporter(), []);
   const commitMessageGenerator = useMemo(() => new ChromeCommitMessageGenerator(), []);
-  const comments = snapshot ? parseComments(snapshot.source) : undefined;
+  const comments = useMemo(() => snapshot ? parseComments(snapshot.source) : undefined, [snapshot?.source]);
   const matches = snapshot ? searchDocument(snapshot, search, { regularExpression }) : [];
   const dark = resolvedDark(settings.theme);
   snapshotRef.current = snapshot;
@@ -333,6 +334,7 @@ export function App() {
       setScrollOrigin('command');
       setScrollAlignment('reveal');
       setSourceCursorTarget(undefined);
+      setActiveCommentId(undefined);
       setOutlineOpen(false);
       setPreviewAnchor(undefined);
       setNotice(undefined);
@@ -371,6 +373,17 @@ export function App() {
     setScrollProgress(block && position !== undefined ? (position - block.from) / Math.max(1, block.to - block.from) : 0);
     setSourceCursorTarget(undefined);
     if (position !== undefined) window.setTimeout(() => setSourceCursorTarget(position), 0);
+  }, []);
+
+  const selectFromRight = useCallback((range: SourceRange) => {
+    setSelection(range);
+    setSourceCursorTarget(undefined);
+    const block = snapshotRef.current?.blocks.find((candidate) => range.from >= candidate.from && range.from <= candidate.to);
+    if (!block) return;
+    setScrollOrigin('right');
+    setScrollAlignment('reveal');
+    setScrollTarget(block.id);
+    setScrollProgress(Math.max(0, Math.min(1, (range.from - block.from) / Math.max(1, block.to - block.from))));
   }, []);
 
   const resizeLayout = useCallback((patch: Pick<MarkrootSettings, 'filesPaneWidth'> | Pick<MarkrootSettings, 'sourcePaneRatio'>, finished: boolean) => {
@@ -616,6 +629,7 @@ export function App() {
 
   function navigateComment(threadId: string) {
     if (!snapshot || !comments) return;
+    setActiveCommentId(threadId);
     const range = comments.ranges.get(threadId) ?? comments.threads.find((thread) => thread.id === threadId)?.selector;
     if (!range) return;
     setSelection({ from: range.from, to: range.to });
@@ -648,7 +662,7 @@ export function App() {
     const range = blockLevel && selectedBlock ? { from: selectedBlock.from, to: selectedBlock.to } : selection;
     try {
       const result = createThread(snapshot.source, range, commentBody, settings.profile, { blockLevel });
-      applySource(result.source, 'comment'); setCommentBody(''); setNotice('Comment added to the document.');
+      applySource(result.source, 'comment'); setActiveCommentId(result.thread.id); setCommentBody(''); setNotice('Comment added to the document.');
     } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
   }
 
@@ -750,7 +764,7 @@ export function App() {
 
   const viewerContent = snapshot ? (rightMode === 'visual'
     ? <VisualEditor snapshot={snapshot} activeBlock={scrollTarget} scrollTarget={scrollOrigin === 'right' ? undefined : scrollTarget} scrollProgress={scrollProgress} scrollAlignment={scrollAlignment} fontFamily={settings.viewerFont} fontSize={settings.viewerFontSize} justified={settings.viewerJustified} onApply={applyVisualBlock} onNavigate={navigateFromRight} onScroll={handleViewerScroll}/>
-    : <Preview html={rendered?.html ?? ''} objectUrls={rendered?.objectUrls ?? EMPTY_WARNINGS} warnings={rendered?.warnings ?? EMPTY_WARNINGS} blocks={snapshot.blocks} search={search} regularExpression={regularExpression} activeBlock={scrollTarget} scrollTarget={scrollOrigin === 'right' ? undefined : scrollTarget} scrollProgress={scrollProgress} scrollAlignment={scrollAlignment} anchorTarget={previewAnchor} allowRemoteResources={settings.allowRemoteResources} fontFamily={settings.viewerFont} fontSize={settings.viewerFontSize} justified={settings.viewerJustified} trackChangesBaseHtml={trackChangesOpen ? renderedBaseHtml : undefined} onNavigate={navigateFromRight} onScroll={handleViewerScroll}/>) : null;
+    : <Preview html={rendered?.html ?? ''} objectUrls={rendered?.objectUrls ?? EMPTY_WARNINGS} warnings={rendered?.warnings ?? EMPTY_WARNINGS} blocks={snapshot.blocks} search={search} regularExpression={regularExpression} activeBlock={scrollTarget} scrollTarget={scrollOrigin === 'right' ? undefined : scrollTarget} scrollProgress={scrollProgress} scrollAlignment={scrollAlignment} anchorTarget={previewAnchor} allowRemoteResources={settings.allowRemoteResources} fontFamily={settings.viewerFont} fontSize={settings.viewerFontSize} justified={settings.viewerJustified} trackChangesBaseHtml={trackChangesOpen ? renderedBaseHtml : undefined} comments={comments} activeCommentId={activeCommentId} onNavigate={navigateFromRight} onSelect={selectFromRight} onCommentActivate={(id) => { setInspector('comments'); navigateComment(id); }} onScroll={handleViewerScroll}/>) : null;
 
   const viewerToolbar = (detached: boolean) => <div className="pane-title viewer-toolbar">
     <div className="segmented"><button className={rightMode === 'visual' ? 'active' : ''} onClick={() => { setScrollOrigin('command'); setScrollAlignment('reveal'); setRightMode('visual'); }}>Visual</button><button className={rightMode === 'preview' ? 'active' : ''} onClick={() => { setScrollOrigin('command'); setScrollAlignment('reveal'); setRightMode('preview'); }}>Rendered</button></div>
@@ -802,7 +816,21 @@ export function App() {
     {inspector && <aside className="inspector"><div className="inspector-head"><strong>{panelTitle(inspector)}</strong><button onClick={() => setInspector(undefined)}><PanelRight size={16}/></button></div>
       {inspector === 'git' && <GitPanel git={git} error={gitError} status={gitStatus} branches={branches} currentBranch={currentBranch} history={history} dirty={snapshot?.dirty ?? false} message={commitMessage} setMessage={setCommitMessage} onStage={stage} onCommit={createCommit} onRefresh={refreshGit} onCheckout={checkoutBranch} onCreateBranch={createBranch} onRenameBranch={renameBranch} onDeleteBranch={deleteBranch} onMerge={mergeBranch} onCompare={compareBranch}/>}
       {inspector === 'review' && <ReviewPanel draft={review} onDecide={(id, decision) => review && setReview(decideChange(review, id, decision))} onApply={applyReview}/>}
-      {inspector === 'comments' && <CommentsPanel parsed={comments} selection={selection} body={commentBody} setBody={setCommentBody} replies={replyBodies} setReplies={setReplyBodies} onAdd={addComment} onNavigate={navigateComment} onRepair={(id) => { if (snapshot) applySource(recoverOrphan(snapshot.source, id), 'comment'); }} onReply={(id) => { if (!snapshot || !replyBodies[id]?.trim()) return; applySource(replyToThread(snapshot.source, id, replyBodies[id]!, settings.profile), 'comment'); setReplyBodies((all) => ({ ...all, [id]: '' })); }} onStatus={(id, status) => { if (snapshot) applySource(setThreadStatus(snapshot.source, id, status), 'comment'); }} onDelete={(id) => { if (snapshot && window.confirm('Delete this comment thread?')) applySource(deleteThread(snapshot.source, id), 'comment'); }}/>}
+      {inspector === 'comments' && <CommentsPanel
+        parsed={comments}
+        activeId={activeCommentId}
+        selection={selection}
+        body={commentBody}
+        setBody={setCommentBody}
+        replies={replyBodies}
+        setReplies={setReplyBodies}
+        onAdd={addComment}
+        onNavigate={navigateComment}
+        onRepair={(id) => { if (snapshot) applySource(recoverOrphan(snapshot.source, id), 'comment'); }}
+        onReply={(id) => { if (!snapshot || !replyBodies[id]?.trim()) return; applySource(replyToThread(snapshot.source, id, replyBodies[id]!, settings.profile), 'comment'); setReplyBodies((all) => ({ ...all, [id]: '' })); }}
+        onStatus={(id, status) => { if (snapshot) applySource(setThreadStatus(snapshot.source, id, status), 'comment'); }}
+        onDelete={(id) => { if (snapshot && window.confirm('Delete this comment thread?')) { applySource(deleteThread(snapshot.source, id), 'comment'); if (activeCommentId === id) setActiveCommentId(undefined); } }}
+      />}
       {inspector === 'citations' && <CitationsPanel records={citations} query={citationQuery} setQuery={setCitationQuery}/>}
       {inspector === 'export' && <ExportPanel disabled={!snapshot} busy={exportBusy} progress={exportProgress} onCancel={() => exportController.current?.abort()} onExport={exportDocument}/>}
       {inspector === 'settings' && <SettingsPanel settings={settings} aiModelSetup={aiModelSetup} onChange={updateSettings} onAiCommitSuggestionsChange={updateAiCommitSuggestions}/>}
@@ -828,8 +856,8 @@ function ReviewPanel({ draft, onDecide, onApply }: { draft: ReviewDraft | undefi
   return <div className="inspector-body"><p>{draft.changes.length} tracked change(s). Accept includes the compared branch; reject retains the current branch.</p><div className="review-list">{draft.changes.map((change) => <article key={change.id} className={change.decision}><div className="tracked-text">{change.segments.map((segment, index) => <span key={index} className={segment.kind}>{segment.value || '∅'}</span>)}</div><div className="review-meta"><span>{change.authors.map((author) => author.displayName).join(', ') || 'Unknown author'}</span><div><button className={change.decision === 'accept' ? 'selected' : ''} onClick={() => onDecide(change.id, 'accept')}>Accept</button><button className={change.decision === 'reject' ? 'selected' : ''} onClick={() => onDecide(change.id, 'reject')}>Reject</button></div></div></article>)}</div><button className="primary wide" disabled={pending > 0} onClick={onApply}>Apply reviewed result</button>{pending > 0 && <p className="microcopy">{pending} change(s) still need a decision.</p>}</div>;
 }
 
-function CommentsPanel({ parsed, selection, body, setBody, replies, setReplies, onAdd, onNavigate, onRepair, onReply, onStatus, onDelete }: { parsed: ReturnType<typeof parseComments> | undefined; selection: SourceRange; body: string; setBody(value: string): void; replies: Record<string, string>; setReplies(value: Record<string, string>): void; onAdd(): void; onNavigate(id: string): void; onRepair(id: string): void; onReply(id: string): void; onStatus(id: string, status: 'open' | 'resolved'): void; onDelete(id: string): void }) {
-  return <div className="inspector-body"><div className="selection-chip">Selected range: {selection.from}–{selection.to}</div><label className="field"><span>New comment</span><textarea value={body} onChange={(event) => setBody(event.target.value)} placeholder="Add a precise note…" rows={3}/></label><button className="primary wide" disabled={selection.to <= selection.from || !body.trim()} onClick={onAdd}><MessageSquare size={15}/>Add comment</button><div className="thread-list">{parsed?.threads.map((thread) => { const orphan = parsed.orphans.includes(thread.id); return <article key={thread.id} className={thread.status === 'resolved' ? 'resolved' : ''}><header><button onClick={() => onNavigate(thread.id)}>{orphan ? 'orphan' : thread.status}</button>{orphan && <button onClick={() => onRepair(thread.id)}>Repair</button>}<button onClick={() => onStatus(thread.id, thread.status === 'open' ? 'resolved' : 'open')}>{thread.status === 'open' ? 'Resolve' : 'Reopen'}</button><button onClick={() => onDelete(thread.id)}><X size={13}/></button></header>{thread.messages.map((message) => <div className="message" key={message.id}><strong>{message.author.displayName}</strong><p>{message.body}</p><time>{new Date(message.createdAt).toLocaleString()}</time></div>)}<div className="reply"><input value={replies[thread.id] ?? ''} onChange={(event) => setReplies({ ...replies, [thread.id]: event.target.value })} placeholder="Reply…"/><button onClick={() => onReply(thread.id)}>Send</button></div></article>; })}</div>{parsed?.orphans.length ? <p className="warning">{parsed.orphans.length} thread(s) need anchor repair.</p> : null}</div>;
+function CommentsPanel({ parsed, activeId, selection, body, setBody, replies, setReplies, onAdd, onNavigate, onRepair, onReply, onStatus, onDelete }: { parsed: ReturnType<typeof parseComments> | undefined; activeId: string | undefined; selection: SourceRange; body: string; setBody(value: string): void; replies: Record<string, string>; setReplies(value: Record<string, string>): void; onAdd(): void; onNavigate(id: string): void; onRepair(id: string): void; onReply(id: string): void; onStatus(id: string, status: 'open' | 'resolved'): void; onDelete(id: string): void }) {
+  return <div className="inspector-body"><div className="selection-chip">Selected range: {selection.from}–{selection.to}</div><label className="field"><span>New comment</span><textarea value={body} onChange={(event) => setBody(event.target.value)} placeholder="Add a precise note…" rows={3}/></label><button className="primary wide" disabled={selection.to <= selection.from || !body.trim()} onClick={onAdd}><MessageSquare size={15}/>Add comment</button><div className="thread-list">{parsed?.threads.map((thread) => { const orphan = parsed.orphans.includes(thread.id); return <article key={thread.id} className={`${thread.status === 'resolved' ? 'resolved' : ''}${thread.id === activeId ? ' active' : ''}`}><header><button onClick={() => onNavigate(thread.id)}>{orphan ? 'orphan' : thread.status}</button>{orphan && <button onClick={() => onRepair(thread.id)}>Repair</button>}<button onClick={() => onStatus(thread.id, thread.status === 'open' ? 'resolved' : 'open')}>{thread.status === 'open' ? 'Resolve' : 'Reopen'}</button><button onClick={() => onDelete(thread.id)}><X size={13}/></button></header>{thread.messages.map((message) => <div className="message" key={message.id}><strong>{message.author.displayName}</strong><p>{message.body}</p><time>{new Date(message.createdAt).toLocaleString()}</time></div>)}<div className="reply"><input value={replies[thread.id] ?? ''} onChange={(event) => setReplies({ ...replies, [thread.id]: event.target.value })} placeholder="Reply…"/><button onClick={() => onReply(thread.id)}>Send</button></div></article>; })}</div>{parsed?.orphans.length ? <p className="warning">{parsed.orphans.length} thread(s) need anchor repair.</p> : null}</div>;
 }
 
 function CitationsPanel({ records, query, setQuery }: { records: readonly CitationRecord[]; query: string; setQuery(value: string): void }) {

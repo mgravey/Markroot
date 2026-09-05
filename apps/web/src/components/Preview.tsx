@@ -1,5 +1,7 @@
 import { useEffect, useRef } from 'react';
 import DOMPurify from 'dompurify';
+import type { ParsedComments } from '@markroot/comments';
+import type { SourceRange } from '@markroot/core';
 import type { DocumentBlock } from '@markroot/document';
 import { centeredScrollTop, isScrollKey, ScrollIntentGate, viewportCenter } from './scroll-sync.js';
 import { applyRenderedTrackChanges } from '../rendered-track-changes.js';
@@ -21,17 +23,23 @@ interface Props {
   fontSize: number;
   justified: boolean;
   trackChangesBaseHtml?: string | undefined;
+  comments?: ParsedComments | undefined;
+  activeCommentId?: string | undefined;
   onNavigate(id: string, sourceOffset?: number): void;
+  onSelect(range: SourceRange): void;
+  onCommentActivate(id: string): void;
   onScroll(id: string, progress: number): void;
 }
 
-export function Preview({ html, objectUrls, warnings, blocks, search, regularExpression, activeBlock, scrollTarget, scrollProgress, scrollAlignment, anchorTarget, allowRemoteResources, fontFamily, fontSize, justified, trackChangesBaseHtml, onNavigate, onScroll }: Props) {
+export function Preview({ html, objectUrls, warnings, blocks, search, regularExpression, activeBlock, scrollTarget, scrollProgress, scrollAlignment, anchorTarget, allowRemoteResources, fontFamily, fontSize, justified, trackChangesBaseHtml, comments, activeCommentId, onNavigate, onSelect, onCommentActivate, onScroll }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const scrollIntent = useRef(new ScrollIntentGate());
   const latestOnScroll = useRef(onScroll);
   const latestOnNavigate = useRef(onNavigate);
+  const latestOnCommentActivate = useRef(onCommentActivate);
   latestOnScroll.current = onScroll;
   latestOnNavigate.current = onNavigate;
+  latestOnCommentActivate.current = onCommentActivate;
   useEffect(() => {
     if (!host.current) return;
     const ownerDocument = host.current.ownerDocument;
@@ -64,6 +72,26 @@ export function Preview({ html, objectUrls, warnings, blocks, search, regularExp
     shadow?.querySelectorAll('.active-block').forEach((element) => element.classList.remove('active-block'));
     if (activeBlock) shadow?.querySelector(`[data-block-id="${CSS.escape(activeBlock)}"]`)?.classList.add('active-block');
   }, [activeBlock, html]);
+  useEffect(() => {
+    const hostElement = host.current;
+    const shadow = hostElement?.shadowRoot;
+    if (!hostElement || !shadow) return;
+    const draw = () => drawCommentGutter(shadow, comments, blocks, activeCommentId, (id) => latestOnCommentActivate.current(id));
+    draw();
+    const eventWindow = hostElement.ownerDocument.defaultView;
+    const ResizeObserverClass = eventWindow?.ResizeObserver;
+    let width = hostElement.clientWidth;
+    const observer = ResizeObserverClass ? new ResizeObserverClass(() => {
+      const nextWidth = hostElement.clientWidth;
+      if (Math.abs(nextWidth - width) < 1) return;
+      width = nextWidth;
+      draw();
+    }) : undefined;
+    observer?.observe(hostElement);
+    let cancelled = false;
+    void hostElement.ownerDocument.fonts?.ready.then(() => { if (!cancelled) draw(); });
+    return () => { cancelled = true; observer?.disconnect(); };
+  }, [html, comments, blocks, activeCommentId, fontFamily, fontSize, justified, trackChangesBaseHtml]);
   useEffect(() => {
     const target = scrollTarget ? host.current?.shadowRoot?.querySelector<HTMLElement>(`[data-block-id="${CSS.escape(scrollTarget)}"]`) : undefined;
     if (target) {
@@ -120,7 +148,14 @@ export function Preview({ html, objectUrls, warnings, blocks, search, regularExp
       eventWindow.removeEventListener('pointercancel', endPointer);
     };
   }, [html]);
-  return <div className="preview" ref={host} onClick={(event) => {
+  return <div className="preview" ref={host} onPointerUp={() => {
+    const eventWindow = host.current?.ownerDocument.defaultView;
+    eventWindow?.requestAnimationFrame(() => {
+      const range = renderedSourceRange(host.current, blocks);
+      if (range) onSelect(range);
+    });
+  }} onClick={(event) => {
+    if (renderedSourceRange(host.current, blocks)) return;
     const path = event.nativeEvent.composedPath();
     const doiLink = path.find((item): item is HTMLElement => isHtmlElement(item) && item.hasAttribute('data-doi-url'));
     if (doiLink && (event.metaKey || event.ctrlKey)) {
@@ -142,13 +177,33 @@ export function Preview({ html, objectUrls, warnings, blocks, search, regularExp
     const exact = mapped?.dataset.sourceOffset ? Number(mapped.dataset.sourceOffset) : undefined;
     const sourceBlock = blocks.find((candidate) => candidate.id === block.dataset.blockId);
     const sourceOffset = Number.isFinite(exact) ? exact : sourceBlock ? sourceOffsetAtPoint(host.current?.shadowRoot, block, sourceBlock, event.clientX, event.clientY) : undefined;
-    onNavigate(block.dataset.blockId, sourceOffset);
+    const blockId = block.dataset.blockId;
+    const eventWindow = block.ownerDocument.defaultView ?? window;
+    eventWindow.requestAnimationFrame(() => {
+      const selection = renderedSourceRange(host.current, blocks);
+      if (selection) {
+        onSelect(selection);
+        return;
+      }
+      onNavigate(blockId, sourceOffset);
+    });
   }} />;
 }
 
 const previewStyle = `
   :host { color: var(--ink); }
-  article { min-height: 100%; font-family: var(--viewer-font); font-size: var(--viewer-size); line-height: 1.72; }
+  article { position: relative; min-height: 100%; font-family: var(--viewer-font); font-size: var(--viewer-size); line-height: 1.72; }
+  article.has-comment-gutter { box-sizing: border-box; padding-right: min(13.5em, 38%); }
+  .comment-gutter { position: absolute; inset: 0 0 auto 0; pointer-events: none; font-family: 'Manrope', sans-serif; font-size: max(11px, .68em); line-height: 1.4; }
+  .comment-highlight { position: absolute; z-index: 1; border-radius: .18em; background: color-mix(in srgb, var(--accent) 13%, transparent); box-shadow: inset 0 -.1em 0 color-mix(in srgb, var(--accent) 48%, transparent); transition: background-color 120ms ease, box-shadow 120ms ease; }
+  .comment-highlight.active, .comment-highlight.hovered { background: color-mix(in srgb, var(--accent) 30%, transparent); box-shadow: inset 0 -.14em 0 var(--accent); }
+  .comment-card { position: absolute; z-index: 2; right: 0; width: min(12.4em, 36%); padding: .7em .75em; pointer-events: auto; color: var(--ink); background: color-mix(in srgb, var(--surface-strong) 96%, transparent); border: max(1px, .07em) solid var(--line); border-left: .22em solid var(--accent); border-radius: .45em; box-shadow: 0 .3em 1.1em color-mix(in srgb, #000 12%, transparent); text-align: left; cursor: pointer; transition: border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease; }
+  .comment-card:hover, .comment-card.active { border-color: var(--accent); box-shadow: 0 .4em 1.25em color-mix(in srgb, #000 17%, transparent); transform: translateX(-.12em); }
+  .comment-card.resolved { opacity: .62; border-left-color: var(--muted); }
+  .comment-card strong, .comment-card span { display: block; overflow: hidden; text-overflow: ellipsis; }
+  .comment-card strong { margin-bottom: .28em; font-size: .95em; white-space: nowrap; }
+  .comment-card span { display: -webkit-box; color: var(--muted); -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+  .comment-card small { display: block; margin-top: .4em; color: var(--accent-strong); font-size: .78em; }
   article.justified p, article.justified li, article.justified blockquote { text-align: justify; text-justify: inter-word; hyphens: auto; }
   h1, h2, h3 { line-height: 1.18; letter-spacing: -.02em; }
   h1 { margin-top: .6em; font-size: 2.25em; }
@@ -255,6 +310,37 @@ function sourceOffsetAtPoint(shadow: ShadowRoot | null | undefined, blockElement
   return block.from + mapRenderedOffset(block.text, blockElement.textContent ?? '', range.toString().length);
 }
 
+function renderedSourceRange(host: HTMLDivElement | null, blocks: readonly DocumentBlock[]): SourceRange | undefined {
+  const shadow = host?.shadowRoot;
+  const selection = host?.ownerDocument.getSelection();
+  if (!shadow || !selection || selection.isCollapsed || selection.rangeCount === 0) return undefined;
+  const range = selection.getRangeAt(0);
+  if (!shadow.contains(range.startContainer) || !shadow.contains(range.endContainer)) return undefined;
+  const startElement = elementForNode(range.startContainer);
+  const endElement = elementForNode(range.endContainer);
+  const startBlockElement = startElement?.closest<HTMLElement>('[data-block-id]');
+  const endBlockElement = endElement?.closest<HTMLElement>('[data-block-id]');
+  const startBlock = blocks.find((block) => block.id === startBlockElement?.dataset.blockId);
+  const endBlock = blocks.find((block) => block.id === endBlockElement?.dataset.blockId);
+  if (!startBlockElement || !endBlockElement || !startBlock || !endBlock) return undefined;
+  const from = sourceOffsetAtDomPosition(startBlockElement, startBlock, range.startContainer, range.startOffset);
+  const to = sourceOffsetAtDomPosition(endBlockElement, endBlock, range.endContainer, range.endOffset);
+  const normalized = { from: Math.min(from, to), to: Math.max(from, to) };
+  return normalized.to > normalized.from ? normalized : undefined;
+}
+
+function sourceOffsetAtDomPosition(blockElement: HTMLElement, block: DocumentBlock, node: Node, offset: number): number {
+  const range = blockElement.ownerDocument.createRange();
+  range.selectNodeContents(blockElement);
+  try { range.setEnd(node, offset); }
+  catch { return block.from; }
+  return block.from + mapRenderedOffset(block.text, blockElement.textContent ?? '', range.toString().length);
+}
+
+function elementForNode(node: Node): Element | null {
+  return node.nodeType === 1 ? node as Element : node.parentElement;
+}
+
 function nearestTextCaret(root: HTMLElement, x: number, y: number): { node: Text; offset: number } | undefined {
   const ownerDocument = root.ownerDocument;
   const showText = ownerDocument.defaultView?.NodeFilter.SHOW_TEXT ?? 4;
@@ -293,7 +379,7 @@ function pointDistance(rect: DOMRect, x: number, y: number): number {
   return horizontal * horizontal + vertical * vertical;
 }
 
-function mapRenderedOffset(source: string, rendered: string, renderedOffset: number): number {
+export function mapRenderedOffset(source: string, rendered: string, renderedOffset: number): number {
   const isWord = (value: string) => /[\p{L}\p{N}'’_-]/u.test(value);
   let start = Math.max(0, Math.min(renderedOffset, rendered.length));
   let end = start;
@@ -313,6 +399,133 @@ function mapRenderedOffset(source: string, rendered: string, renderedOffset: num
     }
   }
   return Math.round(source.length * (renderedOffset / Math.max(1, rendered.length)));
+}
+
+export function mapSourceOffset(source: string, rendered: string, sourceOffset: number): number {
+  const target = Math.max(0, Math.min(sourceOffset, source.length));
+  let bestOffset = 0;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (let offset = 0; offset <= rendered.length; offset += 1) {
+    const distance = Math.abs(mapRenderedOffset(source, rendered, offset) - target);
+    if (distance < bestDistance) {
+      bestOffset = offset;
+      bestDistance = distance;
+      if (distance === 0) break;
+    }
+  }
+  return bestOffset;
+}
+
+function drawCommentGutter(shadow: ShadowRoot, comments: ParsedComments | undefined, blocks: readonly DocumentBlock[], activeCommentId: string | undefined, onActivate: (id: string) => void): void {
+  shadow.querySelector('.comment-gutter')?.remove();
+  const article = shadow.querySelector<HTMLElement>('article');
+  if (!article) return;
+  article.classList.remove('has-comment-gutter');
+  article.style.removeProperty('min-height');
+  if (!comments?.threads.length) return;
+  article.classList.add('has-comment-gutter');
+  const baseHeight = article.scrollHeight;
+  const articleRect = article.getBoundingClientRect();
+  const gutter = article.ownerDocument.createElement('aside');
+  gutter.className = 'comment-gutter';
+  gutter.setAttribute('aria-label', 'Document comments');
+  const placements: Array<{ card: HTMLButtonElement; anchorTop: number }> = [];
+
+  for (const thread of comments.threads) {
+    const sourceRange = comments.ranges.get(thread.id);
+    if (!sourceRange) continue;
+    const domRanges = renderedDomRanges(shadow, blocks, sourceRange);
+    if (!domRanges.length) continue;
+    const rectangles = domRanges.flatMap((range) => [...range.getClientRects()]).filter((rect) => rect.width > 0 && rect.height > 0);
+    if (!rectangles.length) continue;
+    for (const rectangle of rectangles) {
+      const highlight = article.ownerDocument.createElement('span');
+      highlight.className = `comment-highlight${thread.id === activeCommentId ? ' active' : ''}`;
+      highlight.dataset.commentId = thread.id;
+      highlight.style.left = `${rectangle.left - articleRect.left}px`;
+      highlight.style.top = `${rectangle.top - articleRect.top}px`;
+      highlight.style.width = `${rectangle.width}px`;
+      highlight.style.height = `${rectangle.height}px`;
+      gutter.append(highlight);
+    }
+    const latest = thread.messages.at(-1);
+    const card = article.ownerDocument.createElement('button');
+    card.type = 'button';
+    card.className = `comment-card${thread.status === 'resolved' ? ' resolved' : ''}${thread.id === activeCommentId ? ' active' : ''}`;
+    card.dataset.commentId = thread.id;
+    card.setAttribute('aria-label', `Open comment by ${latest?.author.displayName ?? 'Unknown author'}`);
+    const author = article.ownerDocument.createElement('strong');
+    author.textContent = latest?.author.displayName ?? 'Unknown author';
+    const body = article.ownerDocument.createElement('span');
+    body.textContent = latest?.body ?? '';
+    card.append(author, body);
+    if (thread.messages.length > 1) {
+      const replies = article.ownerDocument.createElement('small');
+      replies.textContent = `${thread.messages.length - 1} ${thread.messages.length === 2 ? 'reply' : 'replies'}`;
+      card.append(replies);
+    }
+    const toggleHover = (hovered: boolean) => {
+      for (const highlight of gutter.querySelectorAll<HTMLElement>('.comment-highlight')) {
+        if (highlight.dataset.commentId === thread.id) highlight.classList.toggle('hovered', hovered);
+      }
+    };
+    card.addEventListener('mouseenter', () => toggleHover(true));
+    card.addEventListener('mouseleave', () => toggleHover(false));
+    card.addEventListener('click', (event) => { event.stopPropagation(); onActivate(thread.id); });
+    gutter.append(card);
+    placements.push({ card, anchorTop: Math.max(0, rectangles[0]!.top - articleRect.top) });
+  }
+
+  if (!placements.length) {
+    article.classList.remove('has-comment-gutter');
+    return;
+  }
+  article.append(gutter);
+  let nextTop = 0;
+  for (const placement of placements.sort((left, right) => left.anchorTop - right.anchorTop)) {
+    const top = Math.max(placement.anchorTop, nextTop);
+    placement.card.style.top = `${top}px`;
+    nextTop = top + placement.card.offsetHeight + 8;
+  }
+  article.style.minHeight = `${Math.max(baseHeight, nextTop)}px`;
+}
+
+function renderedDomRanges(shadow: ShadowRoot, blocks: readonly DocumentBlock[], sourceRange: SourceRange): Range[] {
+  const ranges: Range[] = [];
+  for (const block of blocks) {
+    if (sourceRange.to <= block.from || sourceRange.from >= block.to) continue;
+    const element = shadow.querySelector<HTMLElement>(`[data-block-id="${CSS.escape(block.id)}"]`);
+    if (!element) continue;
+    const rendered = element.textContent ?? '';
+    if (!rendered) continue;
+    const from = mapSourceOffset(block.text, rendered, Math.max(0, sourceRange.from - block.from));
+    const to = mapSourceOffset(block.text, rendered, Math.min(block.text.length, sourceRange.to - block.from));
+    const start = textPositionAt(element, Math.min(from, to));
+    const end = textPositionAt(element, Math.max(from, to));
+    if (!start || !end || from === to) continue;
+    const range = element.ownerDocument.createRange();
+    try {
+      range.setStart(start.node, start.offset);
+      range.setEnd(end.node, end.offset);
+      ranges.push(range);
+    } catch { /* Skip a stale layout range. */ }
+  }
+  return ranges;
+}
+
+function textPositionAt(root: HTMLElement, targetOffset: number): { node: Text; offset: number } | undefined {
+  const ownerDocument = root.ownerDocument;
+  const showText = ownerDocument.defaultView?.NodeFilter.SHOW_TEXT ?? 4;
+  const walker = ownerDocument.createTreeWalker(root, showText);
+  let consumed = 0;
+  let last: Text | undefined;
+  while (walker.nextNode()) {
+    const node = walker.currentNode as Text;
+    last = node;
+    if (targetOffset <= consumed + node.length) return { node, offset: Math.max(0, targetOffset - consumed) };
+    consumed += node.length;
+  }
+  return last ? { node: last, offset: last.length } : undefined;
 }
 
 function fontStack(font: Props['fontFamily']): string {

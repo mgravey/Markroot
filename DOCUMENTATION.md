@@ -63,7 +63,7 @@ The outline button in the workspace header opens a panel over the file tree, pre
 
 ## Comments
 
-Prose comments use HTML boundary markers. Thread data is stored in a terminal `markroot:threads:v1` HTML comment. Rendering and export remove both forms. Comments in code, YAML, or raw blocks use block-level ranges to avoid changing executable or literal content.
+Prose comments use HTML boundary markers. A selection in either the source editor or rendered document maps to the same source range and can be sent to the Comments panel. Rendered selections account for Markdown formatting before anchors are inserted and take precedence over click-to-source navigation, so focus does not clear a completed selection. The rendered document places compact thread cards in a scrolling gutter beside their anchored text. Hovering or activating a card highlights its mapped range; selecting a card opens the complete thread in the Comments panel. Thread data is stored in a terminal `markroot:threads:v1` HTML comment. Rendering and export remove both forms. Comments in code, YAML, or raw blocks use block-level ranges to avoid changing executable or literal content.
 
 ## Security and privacy
 

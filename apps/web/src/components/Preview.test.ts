@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { opensExternalPage, protectLocalObjectUrls, trustedDoiUrl } from './Preview.js';
+import { mapRenderedOffset, mapSourceOffset, opensExternalPage, protectLocalObjectUrls, trustedDoiUrl } from './Preview.js';
 
 describe('preview local resources', () => {
   it('protects only Markroot-created object URLs while HTML is sanitized', () => {
@@ -21,5 +21,17 @@ describe('preview local resources', () => {
     expect(trustedDoiUrl('https://doi.org/10.1234/example.7')).toBe('https://doi.org/10.1234/example.7');
     expect(trustedDoiUrl('https://example.com/10.1234/example.7')).toBeUndefined();
     expect(trustedDoiUrl('javascript:alert(1)')).toBeUndefined();
+  });
+
+  it('maps rendered prose selections back inside Markdown formatting', () => {
+    const source = 'A **carefully written** sentence.\n';
+    const rendered = 'A carefully written sentence.';
+    const from = rendered.indexOf('carefully');
+    const to = from + 'carefully written'.length;
+
+    expect(mapRenderedOffset(source, rendered, from)).toBe(source.indexOf('carefully'));
+    expect(mapRenderedOffset(source, rendered, to)).toBe(source.indexOf('carefully written') + 'carefully written'.length);
+    expect(mapSourceOffset(source, rendered, source.indexOf('carefully'))).toBe(from);
+    expect(mapSourceOffset(source, rendered, source.indexOf('carefully written') + 'carefully written'.length)).toBe(to);
   });
 });
