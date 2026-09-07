@@ -1,5 +1,12 @@
 # Changes
 
+## YAML comment sidecars
+
+- Replaced embedded comment writing with Git-tracked `.markroot/comments/<thread-id>/thread.yaml` and independent YAML reply files, keeping Markdown clean and concurrent replies mergeable.
+- Added stable contextual anchors, explicit reattachment, revision-aware resolutions, and deletion tombstones.
+- Migrated embedded comments on save with sidecars-first validation and retry-safe preservation of existing replies and state.
+- Connected sidecars to checkout/refresh, the comment panel, and AI commit candidates; added real Git branch-merge, migration, malformed YAML, and stale-candidate coverage.
+
 ## 0.1.0 - unreleased
 
 - Changed branch comparison from one inspector card per diff fragment to a read-only, document-level tracked-changes view in both Source and Rendered panes, with a bold active revision, next/previous navigation, and per-change or bulk accept/reject decisions that update the displayed document immediately.

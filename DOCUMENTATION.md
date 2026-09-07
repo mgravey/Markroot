@@ -13,7 +13,7 @@ Markroot is a pnpm workspace. Every package exposes contracts from its public `s
 | `@markroot/citations` | BibTeX indexing and future resolver boundary |
 | `@markroot/git` | Local isomorphic-git operations over the selected folder |
 | `@markroot/review` | Word/character changes and accept/reject review drafts |
-| `@markroot/comments` | Embedded anchors, thread metadata, replies, and recovery |
+| `@markroot/comments` | Git-tracked YAML sidecars, revision-aware anchors, replies, and legacy migration |
 | `@markroot/export` | Pandoc HTML/DOCX and Pandoc-to-Typst PDF export |
 | `@markroot/settings` | IndexedDB preferences, identities, and recent folder handles |
 | `@markroot/web` | React composition root and user interface |
@@ -63,7 +63,40 @@ The outline button in the workspace header opens a panel over the file tree, pre
 
 ## Comments
 
-Prose comments use HTML boundary markers. A selection in either the source editor or rendered document maps to the same source range and can be sent to the Comments panel. Rendered selections account for Markdown formatting before anchors are inserted and take precedence over click-to-source navigation. The preview records the rendered pointer endpoints, uses the browser selection text as a fallback for word selections that Chromium retargets at the shadow-DOM boundary, and delays click-to-source navigation long enough to distinguish a completed selection. It then draws a persistent non-interactive highlight until another rendered selection begins or the document is re-rendered. The rendered document places compact thread cards in a non-reflowing lane to the right of their anchored text. The lane redistributes the existing page margins instead of changing the document measure, so paragraph wrapping remains identical when comments appear. Hovering or activating a card highlights its mapped range; selecting a card opens the complete thread in the Comments panel. Thread data is stored in a terminal `markroot:threads:v1` HTML comment. Rendering and export remove both forms. Comments in code, YAML, or raw blocks use block-level ranges to avoid changing executable or literal content.
+Comments keep Markdown and QMD source free of application markers. A selection in either the source editor or rendered view creates a thread with an original anchor: document path, commit (when available), SHA-256 of the saved document, character offsets, selected text, and 32 characters of context on each side. The SHA-256 identifies uncommitted saved text too; the Git commit alone is not assumed to contain it.
+
+Sidecars are ordinary **tracked Git files**, using this layout:
+
+```text
+paper.md
+.markroot/comments/<thread-id>/thread.yaml
+.markroot/comments/<thread-id>/messages/<message-id>.yaml
+```
+
+`thread.yaml` contains `version: 1`, `id`, `document`, `createdAt`, `sourceRevision`, `selector`, `status`, `resolution`, and `deleted`. Each message file contains `id`, `author` (the local identity), `createdAt`, and a literal-block `body`. UUIDs identify threads and messages. Replies never rewrite thread metadata, a shared message list, a reply count, or an `updatedAt` field. The UI derives activity timestamps and sorts messages by creation time with ID as a deterministic tie-breaker. Fixed field order and unwrapped YAML keep diffs stable.
+
+```yaml
+id: "83b2-example"
+author:
+  actorId: "mathieu"
+  displayName: "Mathieu"
+createdAt: "2026-09-07T14:30:00Z"
+body: |-
+  Could we explain this assumption?
+  It changes how I interpret the result.
+```
+
+New threads and concurrent replies on different branches add distinct files, so Git can retain both. A resolution is branch-local until merged; Git carries a one-sided resolution into the merged branch. It records the reviewed source revision, passage/context, author, and time. The UI marks a resolved thread **needs review** if that passage or its immediate context no longer matches. Legacy resolutions without revision evidence also need review. Simultaneous edits to the same message or incompatible metadata changes can still require ordinary Git conflict resolution; YAML is not a semantic merge engine.
+
+The original anchor is not rewritten as prose changes. The app locates the selected text, using context to disambiguate repeated passages. Deleted, rewritten, or ambiguous passages become **detached** rather than being attached to an arbitrary old offset. Select the intended passage and use **Attach to selection** to set a new anchor; this reopens the thread. Small source insertions outside the anchor context do not write sidecars. File renames currently require updating `document` in affected thread files; there is no automatic cross-rename document identity mapping.
+
+Deleting a thread writes `deleted: true` rather than deleting its reply files. This tombstone prevents a concurrent reply from resurrecting a deleted discussion after merging. The deleted history remains in Git and on disk. Comment metadata updates use guarded writes; malformed YAML and unresolved Git conflicts are reported and are not silently replaced with empty comment data.
+
+Comment actions save any pending document edits first, then write sidecars immediately. They do not create a Git commit. Stage sidecars in the Git panel, or use AI-assisted document commits, which include that document’s sidecars (including deletion tombstones) in the reviewed candidate. A changed sidecar invalidates that candidate before committing. Other documents’ unstaged comments are excluded. `.markroot` is hidden from the document tree but its changes remain visible in Git. Checkout/merge reloads sidecars, and focus or refresh reloads external comment edits. Comment mutations are disabled while viewing a branch comparison.
+
+Legacy `markroot:anchor:v1` markers and the terminal `markroot:threads:v1` envelope are read on opening a document. The editor shows clean Markdown; on save, sidecars are persisted and validated **before** the cleaned document replaces the original. Migration retains IDs and replies and can retry after interruption without duplicating replies or resetting newer resolutions. If persistence or validation fails, the on-disk embedded source remains available. Invalid legacy data is reported rather than discarded. Rendering and export retain compatibility with legacy markup.
+
+The rendered document continues to show compact cards in a non-reflowing lane beside their located passages, with active-range highlighting and access to the complete discussion in the Comments panel. Code, YAML, and raw-block selections use block-level ranges without inserting anything into the selected content.
 
 ## Security and privacy
 

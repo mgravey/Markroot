@@ -50,6 +50,7 @@ export interface GitCommitCandidate {
   readonly diff: string;
   readonly repositoryFingerprint: string;
   readonly openFileOid: string;
+  readonly worktreePaths?: readonly WorkspacePath[];
   readonly diffOid: string;
 }
 export interface MergePreview { readonly ours: string; readonly theirs: string; readonly clean: boolean; readonly result?: unknown; readonly error?: string }
@@ -59,7 +60,7 @@ export interface GitRepository {
   fingerprint(): Promise<string>;
   status(): Promise<readonly GitFileStatus[]>;
   diff(path: WorkspacePath): Promise<string>;
-  prepareCommitCandidate(openPath: WorkspacePath): Promise<GitCommitCandidate | undefined>;
+  prepareCommitCandidate(openPath: WorkspacePath, relatedPaths?: readonly WorkspacePath[]): Promise<GitCommitCandidate | undefined>;
   commitCandidate(candidate: GitCommitCandidate, message: string, author: AuthorIdentity): Promise<string>;
   readFileAtRef(path: WorkspacePath, ref: string): Promise<string>;
   stage(path: WorkspacePath): Promise<void>;
@@ -115,16 +116,18 @@ export class IsomorphicGitRepository implements GitRepository {
     return createTwoFilesPatch(`a/${path}`, `b/${path}`, base, current, 'HEAD', 'working tree');
   }
 
-  async prepareCommitCandidate(openPath: WorkspacePath): Promise<GitCommitCandidate | undefined> {
+  async prepareCommitCandidate(openPath: WorkspacePath, relatedPaths?: readonly WorkspacePath[]): Promise<GitCommitCandidate | undefined> {
     await this.validate();
     const repositoryFingerprint = await this.fingerprint();
     const openBytes = await this.workspace.readBytes(openPath).catch(() => undefined);
     if (!openBytes) return undefined;
     const openFileOid = (await hashBlob({ object: openBytes })).oid;
-    const result = await this.candidateDiff(openPath);
+    const worktreePaths = [...new Set([openPath, ...(relatedPaths ?? [])])];
+    const result = await this.candidateDiff(worktreePaths);
     if (!result.openChanged || !result.diff.trim()) return undefined;
     return {
       openPath,
+      worktreePaths,
       paths: result.paths,
       diff: result.diff,
       repositoryFingerprint,
@@ -144,7 +147,7 @@ export class IsomorphicGitRepository implements GitRepository {
       const indexPath = workspacePath('.git/index');
       const previousIndex = await this.workspace.readBytes(indexPath).catch(() => undefined);
       try {
-        await this.stageUnlocked(candidate.openPath);
+        for (const path of candidate.worktreePaths ?? [candidate.openPath]) await this.stageUnlocked(path);
         const staged = await this.candidateDiff();
         if ((await hashBlob({ object: staged.diff })).oid !== candidate.diffOid) throw new MarkrootError('CONFLICT', 'The staged changes no longer match the proposed commit. Generate the message again.');
         return await commit({ fs: this.fs, dir: DIR, message: message.trim(), author: { name: author.displayName, email: author.email } });
@@ -244,7 +247,7 @@ export class IsomorphicGitRepository implements GitRepository {
     else await remove({ fs: this.fs, dir: DIR, filepath: path });
   }
 
-  private async candidateDiff(openPath?: WorkspacePath): Promise<{ readonly diff: string; readonly paths: readonly WorkspacePath[]; readonly openChanged: boolean }> {
+  private async candidateDiff(worktreePaths: readonly WorkspacePath[] = []): Promise<{ readonly diff: string; readonly paths: readonly WorkspacePath[]; readonly openChanged: boolean }> {
     const sections = await walk({
       fs: this.fs,
       dir: DIR,
@@ -252,19 +255,20 @@ export class IsomorphicGitRepository implements GitRepository {
       map: async (filepath, entries) => {
         if (filepath === '.') return undefined;
         const [head, stage, workdir] = entries;
-        const target = filepath === openPath ? workdir : stage;
+        const selected = worktreePaths.includes(filepath as WorkspacePath);
+        const target = selected ? workdir : stage;
         const headType = await entryType(head);
         const targetType = await entryType(target);
         if (headType !== 'blob' && targetType !== 'blob') return undefined;
         const path = workspacePath(filepath);
         const before = await this.entryBytes(head, 'tree');
-        const after = await this.entryBytes(target, filepath === openPath ? 'workdir' : 'stage');
+        const after = await this.entryBytes(target, selected ? 'workdir' : 'stage');
         const headOid = headType === 'blob' ? await head!.oid() : undefined;
         const targetOid = targetType === 'blob'
-          ? filepath === openPath ? (await hashBlob({ object: after })).oid : await target!.oid()
+          ? selected ? (await hashBlob({ object: after })).oid : await target!.oid()
           : undefined;
         if (headType === targetType && headOid === targetOid) return undefined;
-        return { path, patch: createPatch(path, before, after), openChanged: filepath === openPath };
+        return { path, patch: createPatch(path, before, after), openChanged: selected };
       },
     }) as Array<{ path: WorkspacePath; patch: string; openChanged: boolean }>;
     const ordered = sections.filter(Boolean).sort((left, right) => left.path.localeCompare(right.path));

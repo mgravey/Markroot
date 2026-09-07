@@ -20,7 +20,7 @@ The visual identity uses a rooted pilcrow, with a Lottie-ready After Effects sou
 - A live detachable visual/rendered viewer for a second window or monitor, with focus and reattach controls
 - Persisted drag handles for resizing the file tree and balancing the source and viewer panes
 - Intent-locked pane synchronization that continuously follows whichever pane the user scrolls without feedback loops
-- Embedded, Git-friendly comment threads created from preserved selections in either the source or rendered document, with durable rendered selections, non-reflowing scroll-anchored cards in a right-side comment lane, and active-range highlighting
+- Git-tracked YAML comment sidecars keep Markdown clean: one directory per thread and one file per reply, with branch-local resolution history, revision-aware anchors, and automatic migration of legacy embedded comments on save; selections and comment cards work in both source and rendered views
 - Direct-folder local Git status/diff, staging, commits, history, branch create/rename/delete, checkout, inline tracked-change branch review with a bold and directly clickable active revision, stable cross-pane navigation after decisions, automatic next-pending navigation, and immediately rendered per-change or bulk decisions; initial review diffing runs off the UI thread, author attribution fills in asynchronously, and accept/reject updates reuse the existing rendered document
 - Opt-in Conventional Commit suggestions from Chrome's on-device Gemini Nano model after explicit saves, with editable review, large-diff reduction, and guarded one-click local commits
 - Worker-isolated HTML/DOCX export through Pandoc WASM and PDF export through Pandoc-to-Typst plus Typst WASM, including documents and resources stored in nested folders, header-selected DOCX/HTML/Typst templates, and setting-based paragraph justification when no template styling is supplied
@@ -57,6 +57,8 @@ The repository includes a GitHub Actions workflow that checks, builds, and deplo
 For `https://www.mgravey.com/markroot/`, create or use a repository named `markroot` under the same GitHub account that owns the GitHub Pages user site for `www.mgravey.com`. In that repository, open **Settings → Pages** and select **GitHub Actions** as the source. Leave the Markroot repository's **Custom domain** field empty: the custom domain belongs to the user site and GitHub applies it to project sites as `/<repository-name>/`. No extra `CNAME` file or DNS record is required for Markroot.
 
 Push `master`, then follow the **Actions → Deploy Markroot to GitHub Pages** run. The workflow can also be started manually with **Run workflow**. See [DOCUMENTATION.md](./DOCUMENTATION.md#github-pages) for the full checklist and troubleshooting notes.
+
+Commit `.markroot/comments/` alongside your documents to share comments across branches. Replies use separate files so concurrent discussions merge cleanly. AI-assisted document commits include the open document’s sidecars; the Git panel also supports staging them manually. See [comment storage](./DOCUMENTATION.md#comments) for the YAML layout and merge behavior.
 
 See [DOCUMENTATION.md](./DOCUMENTATION.md) for architecture, formats, limitations, and test guidance.
 

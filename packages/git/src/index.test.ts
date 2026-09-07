@@ -60,6 +60,33 @@ describe('IsomorphicGitRepository', () => {
     expect((await repository.status()).find((item) => item.path === 'notes.md')?.state).toBe('modified');
   });
 
+  it('includes comment-only changes in document candidates and rejects stale sidecars', async () => {
+    const workspace = new MemoryWorkspace();
+    await init({ fs: createGitFs(workspace), dir: '/repo', defaultBranch: 'main' });
+    const paper = workspacePath('paper.md');
+    const comment = workspacePath('.markroot/comments/thread/messages/reply.yaml');
+    const unrelated = workspacePath('.markroot/comments/other/thread.yaml');
+    const author = { actorId: 'ada', displayName: 'Ada', email: 'ada@example.test' };
+    await workspace.writeFile(paper, '# Paper\n');
+    const repository = new IsomorphicGitRepository(workspace);
+    await repository.stage(paper);
+    await repository.commit('Initial document', author);
+    await workspace.writeFile(comment, 'body: First reply\n');
+    await workspace.writeFile(unrelated, 'document: other.md\n');
+    const candidate = await repository.prepareCommitCandidate(paper, [comment]);
+    expect(candidate?.paths).toEqual([comment]);
+    expect(candidate?.diff).toContain('First reply');
+    expect(candidate?.diff).not.toContain('other.md');
+    await workspace.writeFile(comment, 'body: Changed reply\n');
+    await expect(repository.commitCandidate(candidate!, 'Add comment', author)).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect((await repository.status()).find((entry) => entry.path === comment)?.state).toBe('untracked');
+    const fresh = await repository.prepareCommitCandidate(paper, [comment]);
+    await repository.commitCandidate(fresh!, 'Add comment', author);
+    expect(await repository.readFileAtRef(comment, 'HEAD')).toContain('Changed reply');
+    expect(await repository.readFileAtRef(paper, 'HEAD')).toBe('# Paper\n');
+    expect((await repository.status()).find((entry) => entry.path === unrelated)?.state).toBe('untracked');
+  });
+
   it('rejects stale candidates and restores the previous index after validation failure', async () => {
     const workspace = new MemoryWorkspace();
     await init({ fs: createGitFs(workspace), dir: '/repo', defaultBranch: 'main' });

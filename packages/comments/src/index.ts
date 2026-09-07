@@ -1,4 +1,5 @@
 import type { AuthorIdentity, SourceRange } from '@markroot/core';
+export { CommentStore } from './store.js';
 
 const THREAD_BLOCK = /\n?<!-- markroot:threads:v1\n([\s\S]*?)\n-->\s*$/;
 const ANCHOR = /<!-- markroot:anchor:v1 id=([0-9a-f-]+) edge=(start|end) -->/g;
@@ -9,152 +10,110 @@ export interface CommentMessage {
   readonly body: string;
   readonly createdAt: string;
 }
-
 export interface CommentSelector extends SourceRange {
   readonly exact: string;
   readonly prefix: string;
   readonly suffix: string;
   readonly blockLevel: boolean;
 }
-
+export interface CommentRevision {
+  readonly commit: string | null;
+  readonly contentHash: string;
+}
+export interface CommentResolution {
+  readonly revision: CommentRevision;
+  readonly selector: CommentSelector;
+  readonly author: AuthorIdentity;
+  readonly at: string;
+}
 export interface CommentThread {
   readonly id: string;
   readonly status: 'open' | 'resolved';
   readonly selector: CommentSelector;
   readonly messages: readonly CommentMessage[];
   readonly createdAt: string;
+  /** Derived from messages and resolution; never a shared counter in storage. */
   readonly updatedAt: string;
+  readonly sourceRevision?: CommentRevision;
+  readonly resolution?: CommentResolution;
 }
-
-interface ThreadEnvelope { readonly version: 1; readonly threads: readonly CommentThread[] }
-
 export interface ParsedComments {
   readonly cleanSource: string;
   readonly threads: readonly CommentThread[];
   readonly ranges: ReadonlyMap<string, SourceRange>;
   readonly orphans: readonly string[];
+  readonly needsReview?: readonly string[];
 }
 
-export function parseComments(source: string): ParsedComments {
-  const block = THREAD_BLOCK.exec(source);
-  const body = block ? source.slice(0, block.index) : source;
-  let threads: readonly CommentThread[] = [];
-  if (block?.[1]) {
-    try {
-      const envelope = JSON.parse(block[1]) as ThreadEnvelope;
-      if (envelope.version === 1 && Array.isArray(envelope.threads)) threads = envelope.threads;
-    } catch { threads = []; }
-  }
-  const positions = new Map<string, Partial<Record<'start' | 'end', number>>>();
-  for (const match of body.matchAll(ANCHOR)) {
-    const id = match[1]!;
-    const edge = match[2]! as 'start' | 'end';
-    const item = positions.get(id) ?? {};
-    item[edge] = match.index;
-    positions.set(id, item);
-  }
-  const ranges = new Map<string, SourceRange>();
-  const orphans: string[] = [];
-  for (const thread of threads) {
-    const position = positions.get(thread.id);
-    if (position?.start !== undefined && position.end !== undefined && position.end >= position.start) {
-      const startMarker = anchor(thread.id, 'start');
-      ranges.set(thread.id, { from: position.start + startMarker.length, to: position.end });
-    } else orphans.push(thread.id);
-  }
-  return { cleanSource: body, threads, ranges, orphans };
+export function createSelector(source: string, range: SourceRange, blockLevel = false): CommentSelector {
+  if (!Number.isInteger(range.from) || !Number.isInteger(range.to) || range.from < 0 || range.to <= range.from || range.to > source.length) throw new RangeError('Select a non-empty comment range.');
+  return { ...range, exact: source.slice(range.from, range.to), prefix: source.slice(Math.max(0, range.from - 32), range.from), suffix: source.slice(range.to, range.to + 32), blockLevel };
 }
 
-export function createThread(
-  source: string,
-  range: SourceRange,
-  body: string,
-  author: AuthorIdentity,
-  options: Readonly<{ blockLevel?: boolean; now?: string; id?: string }> = {},
-): { readonly source: string; readonly thread: CommentThread } {
-  if (!body.trim()) throw new Error('A comment body is required.');
-  if (range.from < 0 || range.to < range.from || range.to > source.length) throw new RangeError('Invalid comment range.');
-  const parsed = parseComments(source);
-  const id = options.id ?? crypto.randomUUID();
-  const now = options.now ?? new Date().toISOString();
-  const exact = parsed.cleanSource.slice(range.from, range.to);
-  const thread: CommentThread = Object.freeze({
-    id,
-    status: 'open',
-    selector: {
-      from: range.from,
-      to: range.to,
-      exact,
-      prefix: parsed.cleanSource.slice(Math.max(0, range.from - 32), range.from),
-      suffix: parsed.cleanSource.slice(range.to, range.to + 32),
-      blockLevel: options.blockLevel === true,
-    },
-    messages: [message(body, author, now)],
-    createdAt: now,
-    updatedAt: now,
-  });
-  const anchored = `${parsed.cleanSource.slice(0, range.from)}${anchor(id, 'start')}${exact}${anchor(id, 'end')}${parsed.cleanSource.slice(range.to)}`;
-  return { source: serialize(anchored, [...parsed.threads, thread]), thread };
-}
-
-export function replyToThread(source: string, threadId: string, body: string, author: AuthorIdentity, now = new Date().toISOString()): string {
-  return update(source, threadId, (thread) => ({ ...thread, messages: [...thread.messages, message(body, author, now)], updatedAt: now }));
-}
-
-export function setThreadStatus(source: string, threadId: string, status: CommentThread['status'], now = new Date().toISOString()): string {
-  return update(source, threadId, (thread) => ({ ...thread, status, updatedAt: now }));
-}
-
-export function deleteThread(source: string, threadId: string): string {
-  const parsed = parseComments(source);
-  const escaped = escapeRegExp(threadId);
-  const withoutAnchors = parsed.cleanSource.replace(new RegExp(`<!-- markroot:anchor:v1 id=${escaped} edge=(?:start|end) -->`, 'g'), '');
-  return serialize(withoutAnchors, parsed.threads.filter((thread) => thread.id !== threadId));
-}
-
-export function recoverOrphan(source: string, threadId: string): string {
-  const parsed = parseComments(source);
-  const thread = parsed.threads.find((candidate) => candidate.id === threadId);
-  if (!thread || !parsed.orphans.includes(threadId) || !thread.selector.exact) return source;
+/** Never guess between repeated passages or attach deleted text to an old offset. */
+export function locateSelector(source: string, selector: CommentSelector): SourceRange | undefined {
+  if (!selector.exact) return undefined;
   const candidates: number[] = [];
   let cursor = 0;
-  while ((cursor = parsed.cleanSource.indexOf(thread.selector.exact, cursor)) >= 0) { candidates.push(cursor); cursor += Math.max(1, thread.selector.exact.length); }
-  const ranked = candidates.filter((position) => {
-    const prefix = parsed.cleanSource.slice(Math.max(0, position - thread.selector.prefix.length), position);
-    const suffix = parsed.cleanSource.slice(position + thread.selector.exact.length, position + thread.selector.exact.length + thread.selector.suffix.length);
-    return (!thread.selector.prefix || prefix === thread.selector.prefix) && (!thread.selector.suffix || suffix === thread.selector.suffix);
+  while ((cursor = source.indexOf(selector.exact, cursor)) >= 0) { candidates.push(cursor); cursor += 1; }
+  const contextual = candidates.filter((from) => matchesContext(source, from, selector));
+  const matches = contextual.length === 1 ? contextual : candidates;
+  if (matches.length !== 1) return undefined;
+  return { from: matches[0]!, to: matches[0]! + selector.exact.length };
+}
+function matchesContext(source: string, from: number, selector: CommentSelector): boolean {
+  const to = from + selector.exact.length;
+  return source.slice(Math.max(0, from - selector.prefix.length), from) === selector.prefix && source.slice(to, to + selector.suffix.length) === selector.suffix;
+}
+
+export function locateComments(source: string, threads: readonly CommentThread[]): ParsedComments {
+  const ranges = new Map<string, SourceRange>();
+  const orphans: string[] = [];
+  const needsReview: string[] = [];
+  for (const thread of threads) {
+    const range = locateSelector(source, thread.selector);
+    if (range) ranges.set(thread.id, range); else orphans.push(thread.id);
+    if (thread.status === 'resolved') {
+      const resolvedRange = thread.resolution && locateSelector(source, thread.resolution.selector);
+      if (!resolvedRange || !matchesContext(source, resolvedRange.from, thread.resolution!.selector)) needsReview.push(thread.id);
+    }
+  }
+  return { cleanSource: source, threads, ranges, orphans, needsReview };
+}
+
+/** Read-only compatibility reader. New comments are always written as YAML sidecars. */
+export function parseComments(source: string): ParsedComments {
+  const block = THREAD_BLOCK.exec(source);
+  if (!block) return locateComments(source, []);
+  const envelope = JSON.parse(block[1]!) as { version: number; threads: CommentThread[] };
+  if (envelope.version !== 1 || !Array.isArray(envelope.threads)) throw new Error('Invalid embedded comment data; Markdown has been left unchanged.');
+  const body = source.slice(0, block.index);
+  const positions = new Map<string, Partial<Record<'start' | 'end', number>>>();
+  let removed = 0;
+  for (const match of body.matchAll(ANCHOR)) {
+    const edges = positions.get(match[1]!) ?? {};
+    edges[match[2] as 'start' | 'end'] = match.index - removed;
+    positions.set(match[1]!, edges);
+    removed += match[0].length;
+  }
+  const cleanSource = body.replace(ANCHOR, '');
+  const threads = envelope.threads.map((thread) => {
+    if (!thread.id || !thread.selector || !Array.isArray(thread.messages)) throw new Error('Invalid embedded comment thread; Markdown has been left unchanged.');
+    const edges = positions.get(thread.id);
+    const selector = edges?.start !== undefined && edges.end !== undefined && edges.end > edges.start
+      ? createSelector(cleanSource, { from: edges.start, to: edges.end }, thread.selector.blockLevel)
+      : thread.selector;
+    return { ...thread, selector };
   });
-  const positions = ranked.length === 1 ? ranked : candidates;
-  if (positions.length !== 1) return source;
-  const from = positions[0]!;
-  const to = from + thread.selector.exact.length;
-  const anchored = `${parsed.cleanSource.slice(0, from)}${anchor(threadId, 'start')}${thread.selector.exact}${anchor(threadId, 'end')}${parsed.cleanSource.slice(to)}`;
-  return serialize(anchored, parsed.threads);
+  return locateComments(cleanSource, threads);
 }
 
 export function stripCommentMarkup(source: string): string {
-  return parseComments(source).cleanSource.replace(ANCHOR, '');
+  // Rendering must remain possible while a malformed legacy envelope is repaired.
+  return source.replace(THREAD_BLOCK, '').replace(ANCHOR, '');
 }
 
-function update(source: string, id: string, mutate: (thread: CommentThread) => CommentThread): string {
-  const parsed = parseComments(source);
-  let found = false;
-  const threads = parsed.threads.map((thread) => {
-    if (thread.id !== id) return thread;
-    found = true;
-    return mutate(thread);
-  });
-  if (!found) throw new Error(`Comment thread not found: ${id}`);
-  return serialize(parsed.cleanSource, threads);
+export async function commentRevision(source: string, commit: string | null): Promise<CommentRevision> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(source));
+  return { commit, contentHash: [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('') };
 }
-
-function serialize(source: string, threads: readonly CommentThread[]): string {
-  const clean = source.replace(/\s+$/, '');
-  if (!threads.length) return `${clean}\n`;
-  const json = JSON.stringify({ version: 1, threads }, null, 2).replaceAll('--', '\\u002d\\u002d');
-  return `${clean}\n\n<!-- markroot:threads:v1\n${json}\n-->\n`;
-}
-
-function anchor(id: string, edge: 'start' | 'end'): string { return `<!-- markroot:anchor:v1 id=${id} edge=${edge} -->`; }
-function message(body: string, author: AuthorIdentity, createdAt: string): CommentMessage { return { id: crypto.randomUUID(), author, body: body.trim(), createdAt }; }
-function escapeRegExp(value: string): string { return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }

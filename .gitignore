@@ -58,3 +58,8 @@ Adobe After Effects Auto-Save/
 .env
 .env.*
 !.env.example
+
+# Comment sidecars are shared project data, including replies and deletion tombstones.
+!.markroot/
+!.markroot/comments/
+!.markroot/comments/**

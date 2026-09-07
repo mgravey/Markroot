@@ -10,7 +10,7 @@ import { resolveWorkspaceReference, throwIfAborted, workspacePath, type Operatio
 import { documentBlockAt, DocumentSession, searchDocument, type DocumentBlock, type DocumentSnapshot } from '@markroot/document';
 import { BasicDocumentEngine, type DocumentOutlineItem, type RenderArtifact } from '@markroot/rendering';
 import { FileSystemAccessWorkspace, ensureDirectoryPermission, type GuardedWorkspace, type WorkspaceEntry } from '@markroot/workspace';
-import { createThread, deleteThread, parseComments, recoverOrphan, replyToThread, setThreadStatus } from '@markroot/comments';
+import { CommentStore, commentRevision, createSelector, locateComments, parseComments, type CommentThread } from '@markroot/comments';
 import { IsomorphicGitRepository, type GitCommitCandidate, type GitCommitSummary, type GitFileStatus } from '@markroot/git';
 import { decideChange, mapReviewCompareOffset, mapReviewCurrentOffset, materializeReview, materializeReviewPresentation, type ReviewDraft } from '@markroot/review';
 import { parseExportOptions, type ExportFormat, type ExportResource } from '@markroot/export';
@@ -90,6 +90,13 @@ export function App() {
   const [commentBody, setCommentBody] = useState('');
   const [replyBodies, setReplyBodies] = useState<Record<string, string>>({});
   const [activeCommentId, setActiveCommentId] = useState<string>();
+  const [commentThreads, setCommentThreads] = useState<readonly CommentThread[]>([]);
+  const [commentBusy, setCommentBusy] = useState(false);
+  const commentWriteBusy = useRef(false);
+  const legacyComments = useRef<readonly CommentThread[]>([]);
+  const commentLoadRequest = useRef(0);
+  const commentRefreshRequest = useRef(0);
+  const commentStore = useMemo(() => workspace ? new CommentStore(workspace) : undefined, [workspace]);
   const [citations, setCitations] = useState<readonly CitationRecord[]>([]);
   const [citationQuery, setCitationQuery] = useState('');
   const [exportBusy, setExportBusy] = useState(false);
@@ -154,7 +161,7 @@ export function App() {
       ? { target: currentBlock.id, progress: Math.max(0, Math.min(1, (currentOffset - currentBlock.from) / Math.max(1, currentBlock.to - currentBlock.from))) }
       : { target: undefined, progress: 0 };
   }, [review, reviewPreviewSnapshot, presentedSnapshot, scrollTarget, scrollProgress]);
-  const comments = useMemo(() => snapshot ? parseComments(snapshot.source) : undefined, [snapshot?.source]);
+  const comments = useMemo(() => snapshot ? locateComments(snapshot.source, commentThreads) : undefined, [snapshot?.source, commentThreads]);
   const matches = presentedSnapshot ? searchDocument(presentedSnapshot, search, { regularExpression }) : [];
   const dark = resolvedDark(settings.theme);
   snapshotRef.current = presentedSnapshot;
@@ -214,10 +221,10 @@ export function App() {
   }, [trackedChangesVisible, previewSnapshot?.path, renderedComparisonBaseSource, engine, citations, settings.allowRemoteResources]);
 
   useEffect(() => {
-    if (!settings.autosave || !snapshot?.dirty) return;
+    if (!settings.autosave || !snapshot?.dirty || commentBusy) return;
     const timer = window.setTimeout(() => { void saveDocument(); }, 900);
     return () => window.clearTimeout(timer);
-  }, [settings.autosave, snapshot?.revision, snapshot?.dirty, workspace, fileVersion]);
+  }, [settings.autosave, snapshot?.revision, snapshot?.dirty, workspace, fileVersion, commentBusy]);
 
   useEffect(() => {
     if (!snapshot?.dirty || rootName === 'No folder open') return;
@@ -236,6 +243,12 @@ export function App() {
     window.addEventListener('focus', check);
     return () => window.removeEventListener('focus', check);
   }, [workspace, snapshot?.path, fileVersion]);
+
+  useEffect(() => {
+    const refresh = () => { void reloadComments().catch((error) => setNotice(error instanceof Error ? error.message : String(error))); };
+    window.addEventListener('focus', refresh);
+    return () => { window.removeEventListener('focus', refresh); commentLoadRequest.current += 1; };
+  }, [commentStore, session]);
 
   useEffect(() => {
     if (findOpen) window.setTimeout(() => searchInput.current?.focus(), 0);
@@ -320,6 +333,8 @@ export function App() {
   }
 
   async function chooseFolder() {
+    if (commentWriteBusy.current) { setNotice('Wait for the comment to finish saving.'); return; }
+    if (snapshot?.dirty && !window.confirm('Discard unsaved edits and open another folder?')) return;
     if (!('showDirectoryPicker' in window)) { setNotice('Markroot needs a Chromium desktop browser with folder access.'); return; }
     try {
       const handle = await (window as Window & { showDirectoryPicker(options: { mode: 'readwrite'; id: string }): Promise<FileSystemDirectoryHandle> }).showDirectoryPicker({ mode: 'readwrite', id: 'markroot-workspace' });
@@ -333,7 +348,14 @@ export function App() {
   }
 
   async function connectFolder(handle: FileSystemDirectoryHandle) {
+    if (commentWriteBusy.current) { setNotice('Wait for the comment to finish saving.'); return; }
     closeCommitDialog(false);
+    commentLoadRequest.current += 1;
+    legacyComments.current = [];
+    setCommentThreads([]);
+    sessionSubscription.current?.();
+    setSession(undefined);
+    setSnapshot(undefined);
     const next = new FileSystemAccessWorkspace(handle);
     const nextEntries = await documentEntries(next);
     setWorkspace(next);
@@ -360,7 +382,9 @@ export function App() {
   }
 
   async function openFile(path: WorkspacePath) {
-    if (!workspace) return;
+    if (!workspace || !commentStore) return;
+    if (commentWriteBusy.current) { setNotice('Wait for the comment to finish saving.'); return; }
+    const request = ++commentLoadRequest.current;
     if (snapshot?.dirty) {
       if (!window.confirm('Discard unsaved edits and open another file?')) return;
       await deletePendingSession(rootName, snapshot.path).catch(() => undefined);
@@ -372,11 +396,27 @@ export function App() {
       const pending = await loadPendingSession(rootName, path).catch(() => undefined);
       const restore = pending?.source !== undefined && pending.source !== source && window.confirm(`Recover browser-local edits from ${new Date(pending.updatedAt).toLocaleString()}?`);
       if (pending && !restore) await deletePendingSession(rootName, path).catch(() => undefined);
+      const selectedSource = restore && pending ? pending.source : source;
+      const legacy = parseComments(selectedSource);
+      // Browser recovery stores clean prose; keep migration data from the original disk file.
+      const diskLegacy = parseComments(source);
+      const legacyCommit = legacy.threads.length || diskLegacy.threads.length ? (git ? (await git.history(1).catch(() => []))[0]?.oid ?? null : null) : null;
+      const diskThreads = diskLegacy.threads.filter((thread) => !legacy.threads.some((item) => item.id === thread.id));
+      const legacyRevision = legacy.threads.length ? await commentRevision(legacy.cleanSource, legacyCommit) : undefined;
+      const diskRevision = diskThreads.length ? await commentRevision(diskLegacy.cleanSource, legacyCommit) : undefined;
+      const migrationThreads = [
+        ...legacy.threads.map((thread) => ({ ...thread, sourceRevision: legacyRevision! })),
+        ...diskThreads.map((thread) => ({ ...thread, sourceRevision: diskRevision! })),
+      ];
+      const sidecars = await commentStore.load(path);
+      if (request !== commentLoadRequest.current) return;
+      legacyComments.current = migrationThreads;
+      setCommentThreads([...sidecars, ...migrationThreads.filter((thread) => !sidecars.some((item) => item.id === thread.id))]);
       sessionSubscription.current?.();
       const next = new DocumentSession(path, source);
       sessionSubscription.current = next.subscribe(setSnapshot);
       setSession(next);
-      if (restore && pending) next.replace(pending.source, 'system');
+      if (legacy.cleanSource !== source) next.replace(legacy.cleanSource, 'system');
       const firstBlock = next.snapshot().blocks.find((block) => block.kind !== 'frontmatter') ?? next.snapshot().blocks[0];
       setFileVersion(stat.version);
       setGitBase(base === undefined ? undefined : { path, source: base });
@@ -393,7 +433,7 @@ export function App() {
       setActiveCommentId(undefined);
       setOutlineOpen(false);
       setPreviewAnchor(undefined);
-      setNotice(undefined);
+      setNotice(migrationThreads.length ? 'Embedded comments will move to YAML sidecars when you save. The editor now shows clean Markdown.' : undefined);
     } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
   }
 
@@ -499,8 +539,20 @@ export function App() {
   async function saveDocument(): Promise<DocumentSnapshot | undefined> {
     if (!workspace || !session) return undefined;
     const current = session.snapshot();
+    const migration = legacyComments.current;
+    const context = commentLoadRequest.current;
     try {
+      if (migration.length && commentStore) {
+        const commit = git ? (await git.history(1).catch(() => []))[0]?.oid ?? null : null;
+        await commentStore.importLegacy(current.path, migration, await commentRevision(current.source, commit));
+        await commentStore.load(current.path); // Validate persisted sidecars before removing legacy data.
+      }
       const stat = await workspace.writeFileGuarded(current.path, current.source, fileVersion);
+      if (context !== commentLoadRequest.current) return current;
+      if (migration.length && commentStore) {
+        legacyComments.current = [];
+        setCommentThreads(await commentStore.load(current.path));
+      }
       setFileVersion(stat.version);
       session.markSaved(current.revision);
       await deletePendingSession(rootName, current.path).catch(() => undefined);
@@ -536,7 +588,7 @@ export function App() {
       return;
     }
     try {
-      const candidate = await git.prepareCommitCandidate(saved.path);
+      const candidate = await git.prepareCommitCandidate(saved.path, await commentStore?.paths(saved.path));
       if (!candidate) {
         controller.abort();
         const prepared = await preparation.catch(() => undefined);
@@ -616,6 +668,7 @@ export function App() {
   async function refreshWorkspace() {
     if (!workspace) return;
     setEntries(await documentEntries(workspace));
+    await reloadComments();
     if (git) {
       setGitStatus(await git.status());
       if (snapshot?.path) setGitBase({ path: snapshot.path, source: await git.readFileAtRef(snapshot.path, 'HEAD').catch(() => '') });
@@ -624,6 +677,7 @@ export function App() {
 
   async function refreshGit() {
     if (!git) return;
+    await reloadComments();
     setGitStatus(await git.status());
     setBranches(await git.branches());
     setCurrentBranch(await git.currentBranch());
@@ -643,6 +697,7 @@ export function App() {
 
   async function checkoutBranch(ref: string) {
     if (!git) return;
+    if (commentWriteBusy.current) { setNotice('Wait for the comment to finish saving.'); return; }
     if (snapshot?.dirty) { setNotice('Save the open document before switching branches.'); return; }
     try {
       const openPath = snapshot?.path;
@@ -674,6 +729,7 @@ export function App() {
 
   async function mergeBranch(ref: string) {
     if (!git) return;
+    if (commentWriteBusy.current) { setNotice('Wait for the comment to finish saving.'); return; }
     if (snapshot?.dirty) { setNotice('Save the open document before merging.'); return; }
     try {
       const preview = await git.previewMerge(ref);
@@ -771,15 +827,43 @@ export function App() {
     if (match.blockId) { setScrollOrigin('command'); setScrollAlignment('reveal'); setScrollProgress(0); setScrollTarget(match.blockId); }
   }
 
-  function addComment() {
-    if (!session || !snapshot || selection.to <= selection.from || !commentBody.trim()) return;
+  async function reloadComments() {
+    if (!commentStore || !session || legacyComments.current.length || commentWriteBusy.current) return;
+    const context = commentLoadRequest.current;
+    const request = ++commentRefreshRequest.current;
+    const threads = await commentStore.load(session.snapshot().path);
+    if (context === commentLoadRequest.current && request === commentRefreshRequest.current) setCommentThreads(threads);
+  }
+
+  async function changeComment(operation: (store: CommentStore, current: DocumentSnapshot, revision: Awaited<ReturnType<typeof commentRevision>>) => Promise<void>) {
+    if (!commentStore || !workspace || !session || commentWriteBusy.current || review) return;
+    commentWriteBusy.current = true;
+    commentLoadRequest.current += 1;
+    setCommentBusy(true);
+    try {
+      // New anchors and resolutions refer to text that has actually been persisted.
+      const current = session.snapshot().dirty ? await saveDocument() : session.snapshot();
+      if (!current) return;
+      if (await workspace.readFile(current.path) !== current.source) throw new Error('The document changed outside Markroot. Reload it before commenting.');
+      const commit = git ? (await git.history(1).catch(() => []))[0]?.oid ?? null : null;
+      await operation(commentStore, current, await commentRevision(current.source, commit));
+      setCommentThreads(await commentStore.load(current.path));
+      if (git) setGitStatus(await git.status());
+      setNotice('Comment saved. Stage its YAML files in Git to include it in a commit.');
+    } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
+    finally { commentWriteBusy.current = false; setCommentBusy(false); }
+  }
+
+  async function addComment() {
+    if (!snapshot || selection.to <= selection.from || !commentBody.trim()) return;
     const selectedBlock = snapshot.blocks.find((block) => selection.from >= block.from && selection.to <= block.to);
     const blockLevel = !selectedBlock || ['frontmatter', 'raw', 'code'].includes(selectedBlock.kind);
     const range = blockLevel && selectedBlock ? { from: selectedBlock.from, to: selectedBlock.to } : selection;
-    try {
-      const result = createThread(snapshot.source, range, commentBody, settings.profile, { blockLevel });
-      applySource(result.source, 'comment'); setActiveCommentId(result.thread.id); setCommentBody(''); setNotice('Comment added to the document.');
-    } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
+    await changeComment(async (store, current, revision) => {
+      const id = await store.create(current.path, current.source, range, commentBody, settings.profile, revision, blockLevel);
+      setActiveCommentId(id);
+      setCommentBody('');
+    });
   }
 
   async function loadCitations() {
@@ -985,10 +1069,23 @@ export function App() {
         setReplies={setReplyBodies}
         onAdd={addComment}
         onNavigate={navigateComment}
-        onRepair={(id) => { if (snapshot) applySource(recoverOrphan(snapshot.source, id), 'comment'); }}
-        onReply={(id) => { if (!snapshot || !replyBodies[id]?.trim()) return; applySource(replyToThread(snapshot.source, id, replyBodies[id]!, settings.profile), 'comment'); setReplyBodies((all) => ({ ...all, [id]: '' })); }}
-        onStatus={(id, status) => { if (snapshot) applySource(setThreadStatus(snapshot.source, id, status), 'comment'); }}
-        onDelete={(id) => { if (snapshot && window.confirm('Delete this comment thread?')) { applySource(deleteThread(snapshot.source, id), 'comment'); if (activeCommentId === id) setActiveCommentId(undefined); } }}
+        busy={commentBusy || Boolean(review)}
+        onRepair={(id) => { void changeComment(async (store, current, revision) => {
+          await store.reattach(current.path, id, current.source, selection, revision);
+        }); }}
+        onReply={(id) => { if (!replyBodies[id]?.trim()) return; void changeComment(async (store, current) => {
+          await store.reply(current.path, id, replyBodies[id]!, settings.profile);
+          setReplyBodies((all) => ({ ...all, [id]: '' }));
+        }); }}
+        onStatus={(id, status) => { void changeComment(async (store, current, revision) => {
+          const range = locateComments(current.source, commentThreads).ranges.get(id);
+          if (status === 'resolved' && !range) throw new Error('Select the passage and reattach this comment before resolving it.');
+          await store.setStatus(current.path, id, status, status === 'resolved' ? { revision, selector: createSelector(current.source, range!), author: settings.profile, at: new Date().toISOString() } : undefined);
+        }); }}
+        onDelete={(id) => { if (window.confirm('Delete this comment thread?')) void changeComment(async (store, current) => {
+          await store.delete(current.path, id);
+          if (activeCommentId === id) setActiveCommentId(undefined);
+        }); }}
       />}
       {inspector === 'citations' && <CitationsPanel records={citations} query={citationQuery} setQuery={setCitationQuery}/>}
       {inspector === 'export' && <ExportPanel disabled={!snapshot} busy={exportBusy} progress={exportProgress} onCancel={() => exportController.current?.abort()} onExport={exportDocument}/>}
@@ -1028,8 +1125,8 @@ function ReviewPanel({ draft, activeChangeId, attributionBusy, onSelect, onDecid
   </div>;
 }
 
-function CommentsPanel({ parsed, activeId, selection, body, setBody, replies, setReplies, onAdd, onNavigate, onRepair, onReply, onStatus, onDelete }: { parsed: ReturnType<typeof parseComments> | undefined; activeId: string | undefined; selection: SourceRange; body: string; setBody(value: string): void; replies: Record<string, string>; setReplies(value: Record<string, string>): void; onAdd(): void; onNavigate(id: string): void; onRepair(id: string): void; onReply(id: string): void; onStatus(id: string, status: 'open' | 'resolved'): void; onDelete(id: string): void }) {
-  return <div className="inspector-body"><div className="selection-chip">Selected range: {selection.from}–{selection.to}</div><label className="field"><span>New comment</span><textarea value={body} onChange={(event) => setBody(event.target.value)} placeholder="Add a precise note…" rows={3}/></label><button className="primary wide" disabled={selection.to <= selection.from || !body.trim()} onClick={onAdd}><MessageSquare size={15}/>Add comment</button><div className="thread-list">{parsed?.threads.map((thread) => { const orphan = parsed.orphans.includes(thread.id); return <article key={thread.id} className={`${thread.status === 'resolved' ? 'resolved' : ''}${thread.id === activeId ? ' active' : ''}`}><header><button onClick={() => onNavigate(thread.id)}>{orphan ? 'orphan' : thread.status}</button>{orphan && <button onClick={() => onRepair(thread.id)}>Repair</button>}<button onClick={() => onStatus(thread.id, thread.status === 'open' ? 'resolved' : 'open')}>{thread.status === 'open' ? 'Resolve' : 'Reopen'}</button><button onClick={() => onDelete(thread.id)}><X size={13}/></button></header>{thread.messages.map((message) => <div className="message" key={message.id}><strong>{message.author.displayName}</strong><p>{message.body}</p><time>{new Date(message.createdAt).toLocaleString()}</time></div>)}<div className="reply"><input value={replies[thread.id] ?? ''} onChange={(event) => setReplies({ ...replies, [thread.id]: event.target.value })} placeholder="Reply…"/><button onClick={() => onReply(thread.id)}>Send</button></div></article>; })}</div>{parsed?.orphans.length ? <p className="warning">{parsed.orphans.length} thread(s) need anchor repair.</p> : null}</div>;
+function CommentsPanel({ busy, parsed, activeId, selection, body, setBody, replies, setReplies, onAdd, onNavigate, onRepair, onReply, onStatus, onDelete }: { busy: boolean; parsed: ReturnType<typeof locateComments> | undefined; activeId: string | undefined; selection: SourceRange; body: string; setBody(value: string): void; replies: Record<string, string>; setReplies(value: Record<string, string>): void; onAdd(): void; onNavigate(id: string): void; onRepair(id: string): void; onReply(id: string): void; onStatus(id: string, status: 'open' | 'resolved'): void; onDelete(id: string): void }) {
+  return <fieldset disabled={busy} className="inspector-body" style={{ border: 0, margin: 0, minWidth: 0 }}><div className="selection-chip">Selected range: {selection.from}–{selection.to}</div><label className="field"><span>New comment</span><textarea value={body} onChange={(event) => setBody(event.target.value)} placeholder="Add a precise note…" rows={3}/></label><button className="primary wide" disabled={selection.to <= selection.from || !body.trim()} onClick={onAdd}><MessageSquare size={15}/>Add comment</button><div className="thread-list">{parsed?.threads.map((thread) => { const orphan = parsed.orphans.includes(thread.id); return <article key={thread.id} className={`${thread.status === 'resolved' ? 'resolved' : ''}${thread.id === activeId ? ' active' : ''}`}><header><button onClick={() => onNavigate(thread.id)}>{orphan ? 'detached' : parsed.needsReview?.includes(thread.id) ? 'needs review' : thread.status}</button>{orphan && <button disabled={selection.to <= selection.from} onClick={() => onRepair(thread.id)}>Attach to selection</button>}<button onClick={() => onStatus(thread.id, thread.status === 'open' ? 'resolved' : 'open')}>{thread.status === 'open' ? 'Resolve' : 'Reopen'}</button><button onClick={() => onDelete(thread.id)}><X size={13}/></button></header>{thread.messages.map((message) => <div className="message" key={message.id}><strong>{message.author.displayName}</strong><p>{message.body}</p><time>{new Date(message.createdAt).toLocaleString()}</time></div>)}<div className="reply"><input value={replies[thread.id] ?? ''} onChange={(event) => setReplies({ ...replies, [thread.id]: event.target.value })} placeholder="Reply…"/><button onClick={() => onReply(thread.id)}>Send</button></div></article>; })}</div>{parsed?.orphans.length ? <p className="warning">{parsed.orphans.length} thread(s) are detached. Select their passage and choose Attach to selection.</p> : null}</fieldset>;
 }
 
 function CitationsPanel({ records, query, setQuery }: { records: readonly CitationRecord[]; query: string; setQuery(value: string): void }) {
@@ -1088,7 +1185,7 @@ async function documentEntries(workspace: GuardedWorkspace): Promise<readonly Wo
     for (const entry of await workspace.listFiles(parent)) {
       const name = entry.path.split('/').at(-1)!;
       if (entry.kind === 'directory') {
-        if (!['.git', 'node_modules', '.quarto', '_freeze'].includes(name)) { result.push(entry); await visit(entry.path); }
+        if (!['.git', '.markroot', 'node_modules', '.quarto', '_freeze'].includes(name)) { result.push(entry); await visit(entry.path); }
       } else result.push(entry);
     }
   };

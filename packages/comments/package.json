@@ -3,7 +3,15 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
-  "dependencies": { "@markroot/core": "workspace:*" },
-  "scripts": { "typecheck": "tsc -p tsconfig.json" }
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@markroot/core": "workspace:*",
+    "@markroot/workspace": "workspace:*",
+    "yaml": "^2.9.0"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  }
 }
