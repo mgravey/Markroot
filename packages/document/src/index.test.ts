@@ -58,3 +58,11 @@ describe('DocumentSession', () => {
     expect(mapDocumentBlocks('~~~\n```\n~~~~\nText\n').map((block) => block.kind)).toEqual(['code', 'paragraph']);
   });
 });
+
+it('keeps blank lines and label offsets inside display equations', () => {
+  const source = '---\nmetadata-files: [shared.yml]\n---\n# Background\n\n$$\ny = x\n\n\\text{example}\n$$ {#eq-demo}\n\n**Policy.** Synthetic.\n';
+  const blocks = mapDocumentBlocks(source);
+  expect(blocks.map((block) => block.kind)).toEqual(['frontmatter', 'heading', 'paragraph', 'paragraph']);
+  expect(blocks[2]?.text).toBe('$$\ny = x\n\n\\text{example}\n$$ {#eq-demo}\n');
+  for (const block of blocks) expect(source.slice(block.from, block.to)).toBe(block.text);
+});

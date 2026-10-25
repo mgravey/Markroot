@@ -1,11 +1,11 @@
 import { resolveWorkspaceReference, throwIfAborted, type OperationContext, type WorkspacePath } from '@markroot/core';
+import { documentResourceReferences, IMAGE_REFERENCE } from '@markroot/rendering';
 import type { DocumentSnapshot } from '@markroot/document';
 import type { ExportFormat, ExportResource, parseExportOptions } from '@markroot/export';
 import type { GuardedWorkspace } from '@markroot/workspace';
 import { isPdfFigurePath, renderPdfFigurePreview } from './pdf-preview.js';
 
-/** Markdown image references: `![alt](path "title")` with an optional `<…>`-wrapped path. Global; use with matchAll. */
-export const IMAGE_REFERENCE = /!\[(?:[^\[\]]|\[[^\]]*\])*\]\((<[^>]+>|[^\s)>]+)(?:\s+["'][^"']*["'])?\)/g;
+export { IMAGE_REFERENCE } from '@markroot/rendering';
 const NON_LOCAL_REFERENCE = /^(?:https?:|data:|blob:|#)/i;
 
 /**
@@ -61,20 +61,15 @@ export class PreviewUrlCache {
   }
 }
 
-export async function collectPreviewResources(workspace: GuardedWorkspace | undefined, snapshot: DocumentSnapshot, cache: PreviewResourceCache, signal?: AbortSignal): Promise<readonly ExportResource[]> {
+export async function collectPreviewResources(workspace: GuardedWorkspace | undefined, snapshot: DocumentSnapshot, cache: PreviewResourceCache, signal?: AbortSignal, workspacePaths: readonly string[] = []): Promise<readonly ExportResource[]> {
   if (!workspace) return [];
   const resources: ExportResource[] = [];
-  const seen = new Set<string>();
   const context = signal ? { signal } : undefined;
   throwIfAborted(context);
   cache.begin();
-  for (const match of snapshot.source.matchAll(IMAGE_REFERENCE)) {
+  for (const { reference, path } of documentResourceReferences(snapshot, workspacePaths)) {
     throwIfAborted(context);
-    const reference = unwrapReference(match[1]!);
-    if (NON_LOCAL_REFERENCE.test(reference) || seen.has(reference)) continue;
-    seen.add(reference);
     try {
-      const path = resolveWorkspaceReference(snapshot.path, reference);
       const stat = await workspace.stat(path, context);
       throwIfAborted(context);
       if (stat.kind !== 'file') continue;

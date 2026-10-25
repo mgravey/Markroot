@@ -69,3 +69,6 @@ Adobe After Effects Auto-Save/
 .markroot-hook-debug/
 # Local deterministic hook-test traces
 .markroot-hook-tests/
+
+# Local static-preview diagnostics (never commit private source documents)
+.markroot-static-preview-debug/

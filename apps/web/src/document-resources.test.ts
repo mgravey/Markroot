@@ -3,6 +3,7 @@ import { workspacePath } from '@markroot/core';
 import { DocumentSession } from '@markroot/document';
 import { MemoryWorkspace } from '@markroot/workspace';
 import { collectPreviewResources, IMAGE_REFERENCE, PreviewResourceCache } from './document-resources.js';
+import * as pdfPreview from './pdf-preview.js';
 import { deferred } from './hooks/hook-test-utils.js';
 
 const snapshot = (source: string) => new DocumentSession(workspacePath('docs/a.md'), source).snapshot();
@@ -112,4 +113,21 @@ describe('preview URL leases', () => {
     await expect(collectPreviewResources(workspace, snapshot('![x](x.png) ![y](y.png)'), new PreviewResourceCache(), controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
     expect(read).not.toHaveBeenCalled();
   });
+});
+
+it('loads statically resolved chunk figures beside a nested document using knitr root.dir', async () => {
+  const workspace = new MemoryWorkspace({ 'figures/signal.png': 'plot', 'figures/overview.pdf': 'not a real pdf' });
+  const doc = new DocumentSession(workspacePath('paper/report.qmd'), '---\nexecute: {echo: false}\nknitr:\n  opts_knit: {root.dir: ".."}\n---\n```{r fig-signal}\nfig("signal")\n```\n```{r fig-overview}\nknitr::include_graphics("figures/overview.pdf")\n```').snapshot();
+  const rasterize = vi.spyOn(pdfPreview, 'renderPdfFigurePreview').mockResolvedValue(new Blob(['rasterized page'], { type: 'image/png' }));
+  try {
+    const cache = new PreviewResourceCache();
+    const paths = ['figures/signal.png', 'figures/overview.pdf'];
+    const resources = await collectPreviewResources(workspace, doc, cache, undefined, paths);
+    expect(resources.map((resource) => resource.path)).toEqual(['../figures/signal.png', '../figures/overview.pdf']);
+    expect(await (resources[0]!.content as Blob).text()).toBe('plot');
+    expect((resources[1]!.content as Blob).type).toBe('image/png');
+    expect(await (resources[1]!.content as Blob).text()).toBe('rasterized page');
+    await collectPreviewResources(workspace, doc, cache, undefined, paths);
+    expect(rasterize).toHaveBeenCalledTimes(1);
+  } finally { rasterize.mockRestore(); }
 });

@@ -228,6 +228,10 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .preview pre { overflow: auto; padding: .824em; color: #d5e7e2; background: #111a18; border-radius: .412em; }
 .preview code { font-family: 'IBM Plex Mono', monospace; font-size: .86em; }
 .preview :not(pre) > code { padding: .12em .34em; color: var(--accent-strong); background: var(--accent-soft); border-radius: .205em; }
+.preview .mr-hidden { height: 0; min-height: 0; margin: 0; padding: 0; overflow: hidden; }
+.preview .chunk-output-placeholder, .preview .computed-caption { color: var(--muted); font-size: .85em; font-style: italic; }
+.preview .chunk-figure-placeholder { display: grid; place-items: center; min-height: 8em; padding: 1em; color: var(--muted); background: var(--surface-strong); border: 1px dashed var(--line); border-radius: .35em; font-size: .85em; }
+.preview :not(pre) > code.inline-expression { color: var(--muted); background: color-mix(in srgb, var(--muted) 8%, transparent); border-bottom: 1px dotted var(--line-strong); font-size: .8em; }
 .preview img { max-width: 100%; height: auto; }
 .remote-resource-placeholder { display: block; padding: 1.333em; color: var(--muted); background: var(--surface-strong); border: max(1px, .083em) dashed var(--line-strong); border-radius: .5em; font-family: 'Manrope', sans-serif; font-size: .706em; text-align: center; }
 mark { color: inherit; background: #ffd76a; border-radius: .118em; }

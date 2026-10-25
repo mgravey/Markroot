@@ -1,14 +1,18 @@
 import MarkdownIt from 'markdown-it';
 import katex from 'katex';
+import { decodeLatex } from '@markroot/citations';
+import { chunkCacheKey, prepareQuartoDocument, staticChunk, type QuartoDocument } from './quarto.js';
 import { stripCommentMarkup } from '@markroot/comments';
 import { throwIfAborted, type OperationContext } from '@markroot/core';
 import { closesCodeFence, mapDocumentBlocks, splitLines, type DocumentBlockKind, type DocumentSnapshot } from '@markroot/document';
+
+export { IMAGE_REFERENCE, documentResourceReferences, type DocumentResourceReference } from './quarto.js';
 
 export interface RenderDependency { readonly path: string; readonly content: string | Blob; /** Borrowed URL; the caller owns its lifetime. */ readonly objectUrl?: string }
 export type RenderCitationName = { readonly family: string; readonly given?: string } | { readonly literal: string };
 export interface RenderCitation { readonly key: string; readonly title?: string; readonly author?: string; readonly authors?: readonly RenderCitationName[]; readonly year?: string; readonly doi?: string }
 /** `allowRemoteResources` must be `true` for remote http(s) images to keep their `src`; otherwise they become placeholders. */
-export interface RenderRequest { readonly snapshot: DocumentSnapshot; readonly dependencies?: readonly RenderDependency[]; readonly citations?: readonly RenderCitation[]; readonly allowRemoteResources?: boolean }
+export interface RenderRequest { readonly snapshot: DocumentSnapshot; readonly workspacePaths?: readonly string[]; readonly dependencies?: readonly RenderDependency[]; readonly citations?: readonly RenderCitation[]; readonly allowRemoteResources?: boolean }
 export interface DocumentOutlineItem {
   readonly id: string;
   readonly blockId: string;
@@ -34,6 +38,11 @@ export interface DocumentEngine {
 }
 
 const markdown = new MarkdownIt({ html: false, linkify: true, typographer: true, breaks: false });
+markdown.renderer.rules.code_inline = (tokens, index) => {
+  const content = tokens[index]!.content;
+  const expression = /^(?:r|\{r\})\s+([\s\S]*)$/.exec(content);
+  return expression ? `<code class="inline-expression" title="Inline R expression — not executed">${escapeHtml(expression[1]!)}</code>` : `<code>${escapeHtml(content)}</code>`;
+};
 const REFERENCES_PLACEHOLDER = '<div data-markroot-references-placeholder="true"></div>';
 const RENDER_CACHE_LIMIT = 4000;
 
@@ -62,7 +71,7 @@ interface ScholarlyState {
   labels: [string, string][];
 }
 
-interface RenderContext { readonly citations: ReadonlyMap<string, RenderCitation>; readonly state: ScholarlyState; readonly nested?: boolean }
+interface RenderContext { readonly citations: ReadonlyMap<string, RenderCitation>; readonly state: ScholarlyState; readonly quarto: QuartoDocument; readonly nested?: boolean; readonly figureBody?: boolean }
 
 const citationGenerations = new WeakMap<readonly RenderCitation[], number>();
 let nextCitationGeneration = 1;
@@ -79,10 +88,10 @@ export class BasicDocumentEngine implements DocumentEngine {
     const citationMap = new Map(citationList.map((citation) => [citation.key, citation]));
     if (!citationGenerations.has(citationList)) citationGenerations.set(citationList, nextCitationGeneration++);
     const citationGeneration = citationGenerations.get(citationList)!;
-    const frontmatter = blocks.find((block) => block.kind === 'frontmatter');
+    const quarto = prepareQuartoDocument(request.snapshot, request.workspacePaths ?? []);
     const state: ScholarlyState = {
       figure: 0, table: 0, equation: 0, sections: [0, 0, 0, 0, 0, 0],
-      numberSections: frontMatterBoolean(frontmatter?.text ?? '', 'number-sections') !== false,
+      numberSections: quarto.numberSections,
       usedIds: new Set(), citations: [], outline: [], ids: [], labels: [],
     };
     const citations = new Set<string>();
@@ -96,13 +105,13 @@ export class BasicDocumentEngine implements DocumentEngine {
       throwIfAborted(context);
       const blockSource = stripCommentMarkup(block.text);
       const renderable = block.kind === 'code' ? blockSource : maskMarkdownHtmlComments(blockSource);
-      const rendered = this.renderCached(block.kind, renderable, citationGeneration, citationMap, state);
+      const rendered = this.renderCached(block.kind, renderable, citationGeneration, citationMap, state, quarto);
       rendered.citations.forEach((key) => citations.add(key));
       rendered.outline.forEach((item) => outline.push({ ...item, blockId: block.id, from: item.from + block.from }));
       rendered.labels.forEach(([id, label]) => { if (!labels.has(id)) labels.set(id, label); });
       // Fallback IDs historically counted all preceding outline entries (including figures/tables).
       const headingHtml = rendered.html.replace(/data-markroot-legacy-heading=""/g, `data-markroot-legacy-heading="mr-section-${outline.length - rendered.outline.length + 1}"`);
-      sections.push(`<section class="mr-block mr-${block.kind}" data-block-id="${block.id}" data-source-from="${block.from}" data-source-to="${block.to}">${shiftSourceOffsets(headingHtml, block.from)}</section>`);
+      sections.push(`<section class="mr-block mr-${block.kind}${rendered.html ? '' : ' mr-hidden'}" data-block-id="${block.id}" data-source-from="${block.from}" data-source-to="${block.to}">${shiftSourceOffsets(headingHtml, block.from)}</section>`);
     }
     const bodyHtml = sections.join('\n');
     const explicitReferences = bodyHtml.includes(REFERENCES_PLACEHOLDER);
@@ -128,15 +137,15 @@ export class BasicDocumentEngine implements DocumentEngine {
   }
 
   /** Renders one block, reusing a cached result when its text and the numbering state it observes are unchanged. */
-  private renderCached(kind: DocumentBlockKind, source: string, citationGeneration: number, citations: ReadonlyMap<string, RenderCitation>, state: ScholarlyState): BlockRender {
-    const key = `${kind}\u0000${state.numberSections ? 1 : 0}:${state.figure}:${state.table}:${state.equation}:${state.sections.join('.')}:${citationGeneration}\u0000${source}`;
+  private renderCached(kind: DocumentBlockKind, source: string, citationGeneration: number, citations: ReadonlyMap<string, RenderCitation>, state: ScholarlyState, quarto: QuartoDocument): BlockRender {
+    const key = `${kind}\u0000${state.numberSections ? 1 : 0}:${state.figure}:${state.table}:${state.equation}:${state.sections.join('.')}:${citationGeneration}\u0000${kind === 'code' || kind === 'div' ? chunkCacheKey(source, quarto) : ''}\u0000${source}`;
     let entry = this.cache.get(key);
     if (entry && identifiersStillResolve(entry.ids, state.usedIds)) {
       this.cache.delete(key);
       entry.ids.forEach(([, id]) => state.usedIds.add(id));
     } else {
       Object.assign(state, { citations: [], outline: [], ids: [], labels: [] });
-      const html = renderBlock(kind, source, 0, { citations, state });
+      const html = renderBlock(kind, source, 0, { citations, state, quarto });
       entry = { html, outline: state.outline, citations: state.citations, ids: state.ids, labels: state.labels, after: { figure: state.figure, table: state.table, equation: state.equation, sections: [...state.sections] } };
     }
     this.cache.set(key, entry);
@@ -259,7 +268,7 @@ const BRACKET_CITATION = String.raw`\[(?<cites>[^\[\]]*?(?<![\p{L}\p{N}_])@${CIT
 const TEXT_CITATION = String.raw`(?<![\p{L}\p{N}_\\@])@(?<key>${CITATION_KEY})`;
 /** Code spans, autolinks and link destinations come first so they are copied verbatim instead of being scanned. */
 const SCHOLARLY_PATTERN = new RegExp(`${CODE_OR_LINK}|${IMAGE}|${DISPLAY_MATH}|${INLINE_MATH}|${BRACKET_CITATION}|${TEXT_CITATION}`, 'gmu');
-const CAPTION_PATTERN = new RegExp(`${CODE_OR_LINK}|${INLINE_MATH}|${BRACKET_CITATION}`, 'gmu');
+const CAPTION_PATTERN = new RegExp(`${CODE_OR_LINK}|${INLINE_MATH}|${BRACKET_CITATION}|${TEXT_CITATION}`, 'gmu');
 const CITATION_KEYS = new RegExp(String.raw`(?<![\p{L}\p{N}_])@(${CITATION_KEY})`, 'gu');
 const CROSSREF_PREFIX = /^(?:fig|tbl|eq|sec)-/;
 
@@ -275,11 +284,45 @@ function restoreTokens(html: string, tokens: readonly Token[]): string {
 }
 
 function renderBlock(kind: string, source: string, from: number, context: RenderContext): string {
-  if (kind === 'code') return markdown.render(source);
+  if (kind === 'code') return renderChunk(source, from, context);
   if (kind === 'heading' && !context.nested) return renderHeading(source, from, context);
   if (kind === 'table') return renderTableBlock(source, from, context);
   if (kind === 'div') return renderDiv(source, from, context);
   return renderScholarlyMarkdown(source, from, context);
+}
+
+function renderChunk(source: string, from: number, context: RenderContext): string {
+  const chunk = staticChunk(source, context.quarto);
+  if (!chunk) return markdown.render(source);
+  const { options, label } = chunk;
+  if (options.include === false) return '';
+  const sourceHtml = options.echo === false ? '' : options.echo === 'fenced'
+    ? `<pre><code>${escapeHtml(source.trimEnd())}</code></pre>`
+    : `<pre><code class="language-${escapeAttribute(chunk.language)}">${escapeHtml(chunk.code)}</code></pre>`;
+  if (options.eval === false || options.output === false || options.results === 'hide') return sourceHtml;
+  if (label?.startsWith('fig-')) {
+    const { state } = context;
+    state.figure += 1;
+    const id = uniqueIdentifier(label, state);
+    state.labels.push([id, `Figure ${state.figure}`]);
+    const caption = chunk.caption ? renderCaptionInline(chunk.caption, from, context).replace(/ data-source-offset="\d+"/g, ` data-source-offset="${from}"`) : chunk.computedCaption ? '<span class="computed-caption">Caption computed by code (not executed)</span>' : '';
+    state.outline.push({ id, from, kind: 'figure', label: stripInlineMarkup(chunk.caption ?? '') || `Figure ${state.figure}`, number: String(state.figure) });
+    const width = typeof options['out-width'] === 'string' && /^\d+(?:\.\d+)?%$/.test(options['out-width']) ? ` data-figure-width="${options['out-width']}"` : '';
+    const image = chunk.image ? `<img src="${escapeHtml(chunk.image.reference)}" alt="${escapeHtml(stripInlineMarkup(chunk.caption ?? label))}"${width}>` : '<div class="chunk-figure-placeholder">Figure produced by code (not executed)</div>';
+    return `${sourceHtml}<figure id="${escapeAttribute(id)}" data-source-offset="${from}">${image}<figcaption><span class="figure-label">Figure ${state.figure}.</span>${caption ? ` ${caption}` : ''}</figcaption></figure>`;
+  }
+  // Labels signal intentional output, except conventional setup/configuration chunks.
+  const outputIntent = options.results === 'asis' || (label && !/^(?:setup|settings|config|options|packages|libraries|helpers|init)(?:[-_]|$)/i.test(label)) || options.output === true;
+  return sourceHtml || !outputIntent ? sourceHtml : `<p class="chunk-output-placeholder">Output of chunk${label ? ` ‘${escapeHtml(label)}’` : ''} is not available — code is not executed</p>`;
+}
+
+function renderCaptionReference(key: string, offset: number, context: RenderContext): string | undefined {
+  const citation = context.citations.get(key);
+  if (citation) {
+    context.state.citations.push(key);
+    return `<span class="citation citation-text" data-source-offset="${offset}">${citationAnchor(citation, key, citationLabel(citation, key, true))}</span>`;
+  }
+  return CROSSREF_PREFIX.test(key) ? `<a class="crossref" data-xref="${encodeURIComponent(key)}" data-source-offset="${offset}"></a>` : undefined;
 }
 
 /** Renders a fenced div's body as nested blocks so code, tables and inner divs keep their own rules. */
@@ -291,7 +334,22 @@ function renderDiv(source: string, from: number, context: RenderContext): string
   const body = lines.slice(1, closed ? -1 : undefined).join('');
   const header = /^[ \t]*:{3,}[ \t]*(?:\{([^}]*)\}|([^\s{}:]+))?/.exec(opening);
   const attributes = parsePandocAttributes(header?.[1] ?? (header?.[2] ? `.${header[2]}` : undefined));
-  const content = mapDocumentBlocks(body, { frontmatter: false })
+  const blocks = mapDocumentBlocks(body, { frontmatter: false });
+  if (attributes.id?.startsWith('fig-')) {
+    const { state } = context;
+    const number = ++state.figure;
+    const id = uniqueIdentifier(attributes.id, state);
+    state.labels.push([id, `Figure ${number}`]);
+    const last = blocks.at(-1);
+    const captionBlock = last?.kind === 'paragraph' && !/!\[/.test(last.text) && blocks.length > 1 ? last : undefined;
+    const captionSource = attributes.values.get('fig-cap') ?? captionBlock?.text.trim() ?? '';
+    state.outline.push({ id, from, kind: 'figure', label: stripInlineMarkup(captionSource) || `Figure ${number}`, number: String(number) });
+    const content = blocks.filter((block) => block !== captionBlock)
+      .map((block) => renderBlock(block.kind, block.text, from + opening.length + block.from, { ...context, nested: true, figureBody: true })).join('');
+    const caption = renderCaptionInline(captionSource, from + opening.length + (captionBlock?.from ?? 0), context);
+    return `<figure id="${escapeAttribute(id)}" data-source-offset="${from}">${content}<figcaption><span class="figure-label">Figure ${number}.</span>${caption ? ` ${caption}` : ''}</figcaption></figure>`;
+  }
+  const content = blocks
     .map((block) => renderBlock(block.kind, block.text, from + opening.length + block.from, { ...context, nested: true }))
     .join('');
   const columns = attributes.values.get('layout-ncol');
@@ -315,6 +373,13 @@ function renderScholarlyMarkdown(source: string, blockFrom: number, context: Ren
     const groups = match.groups!;
     const offset = blockFrom + match.index;
     if (groups.alt !== undefined) {
+      if (context.figureBody && !parsePandocAttributes(groups.attrs).id) {
+        const attrs = parsePandocAttributes(groups.attrs);
+        const title = groups.title ? ` title="${escapeHtml(groups.title)}"` : '';
+        const width = safeCssLength(attrs.values.get('width')) ? ` data-figure-width="${escapeHtml(attrs.values.get('width')!)}"` : '';
+        prepared += token(`<img src="${escapeHtml(unwrapReference(groups.src!))}" alt="${escapeHtml(attrs.values.get('fig-alt') ?? stripInlineMarkup(groups.alt))}" data-source-offset="${offset}"${width}${title}>`, match[0]);
+        continue;
+      }
       if (!groups.alt && !groups.attrs) { prepared += match[0]; continue; }
       state.figure += 1;
       const attributes = parsePandocAttributes(groups.attrs);
@@ -352,7 +417,7 @@ function renderScholarlyMarkdown(source: string, blockFrom: number, context: Ren
       const citation = citations.get(key);
       if (citation) {
         state.citations.push(key);
-        prepared += token(`<span class="citation citation-text" data-source-offset="${offset}" title="${escapeHtml(citation.title ?? key)}">${citationAnchor(citation, key, citationLabel(citation, key, true))}</span>`, match[0]);
+        prepared += token(`<span class="citation citation-text" data-source-offset="${offset}" title="${escapeHtml(displayText(citation.title ?? key))}">${citationAnchor(citation, key, citationLabel(citation, key, true))}</span>`, match[0]);
       } else if (CROSSREF_PREFIX.test(key)) prepared += token(`<a class="crossref" data-xref="${encodeURIComponent(key)}" data-source-offset="${offset}"></a>`, match[0]);
       else prepared += match[0];
     } else prepared += match[0];
@@ -362,7 +427,7 @@ function renderScholarlyMarkdown(source: string, blockFrom: number, context: Ren
   html = html
     .replace(/<p>\s*(<figure[\s\S]*?<\/figure>)\s*<\/p>/g, '$1')
     .replace(/<p>\s*(<span class="math-display"[\s\S]*?<\/span>)\s*<\/p>/g, '$1');
-  return renderFigures(renderHeadingIdentifiers(html), blockFrom, state);
+  return context.figureBody ? renderHeadingIdentifiers(html) : renderFigures(renderHeadingIdentifiers(html), blockFrom, state);
 }
 
 function renderBracketCitation(body: string, offset: number, context: RenderContext, withTitle: boolean): string {
@@ -370,7 +435,7 @@ function renderBracketCitation(body: string, offset: number, context: RenderCont
   const keys = [...body.matchAll(CITATION_KEYS)].map((item) => item[1]!);
   state.citations.push(...keys);
   const labels = keys.map((key) => citationAnchor(citations.get(key), key, citationLabel(citations.get(key), key, false)));
-  const title = withTitle ? keys.map((key) => citations.get(key)?.title).filter(Boolean).join('; ') : '';
+  const title = withTitle ? keys.map((key) => displayText(citations.get(key)?.title ?? '')).filter(Boolean).join('; ') : '';
   return `<span class="citation" data-source-offset="${offset}"${title ? ` title="${escapeHtml(title)}"` : ''}>(${labels.join('; ')})</span>`;
 }
 
@@ -381,7 +446,8 @@ function renderCaptionInline(source: string, sourceFrom: number, context: Render
     const offset = args.at(-3) as number;
     const html = groups.math !== undefined
       ? `<span class="math-inline" data-source-offset="${sourceFrom + offset}">${renderMath(groups.math, false)}</span>`
-      : groups.cites !== undefined ? renderBracketCitation(groups.cites, sourceFrom + offset, context, false) : undefined;
+      : groups.cites !== undefined ? renderBracketCitation(groups.cites, sourceFrom + offset, context, false)
+        : groups.key !== undefined ? renderCaptionReference(groups.key, sourceFrom + offset, context) : undefined;
     return html === undefined ? whole : `\ue000${tokens.push({ html, raw: whole }) - 1}\ue001`;
   });
   return restoreTokens(markdown.renderInline(prepared), tokens);
@@ -524,15 +590,15 @@ export function doiUrl(doi?: string): string | undefined {
 }
 
 function referenceLabel(citation: RenderCitation): string {
-  return [citation.author, citation.year ? `(${citation.year}).` : undefined, citation.title].filter(Boolean).join(' ');
+  return [displayText(citation.author ?? ''), citation.year ? `(${citation.year}).` : undefined, displayText(citation.title ?? '')].filter(Boolean).join(' ');
 }
 
 /** Structured names (corporate `literal` names stay whole) take precedence over splitting the display string. */
 function shortAuthor(citation: RenderCitation): string {
   const surname = (entry: string) => entry.includes(',') ? entry.split(',')[0]!.trim() : entry.split(/\s+/).at(-1)!;
   const names = citation.authors?.length
-    ? citation.authors.map((name) => 'literal' in name ? name.literal : name.family)
-    : (citation.author ?? '').split(/\s+and\s+/i).map((entry) => entry.trim()).filter(Boolean).map(surname);
+    ? citation.authors.map((name) => displayText('literal' in name ? name.literal : name.family))
+    : displayText(citation.author ?? '').split(/\s+and\s+/i).map((entry) => entry.trim()).filter(Boolean).map(surname);
   if (names.length > 2) return `${names[0]} et al.`;
   return names.join(' & ');
 }
@@ -588,12 +654,8 @@ function tableHeaderLabel(line: string): string {
   return line.split('|').map((cell) => stripInlineMarkup(cell)).filter(Boolean).slice(0, 3).join(' / ');
 }
 
-function frontMatterBoolean(source: string, key: string): boolean | undefined {
-  const frontMatter = /^---\s*\r?\n([\s\S]*?)\r?\n(?:---|\.\.\.)\s*(?:\r?\n|$)/.exec(source)?.[1];
-  if (!frontMatter) return undefined;
-  const value = new RegExp(`^\\s*${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*:\\s*(true|false)\\s*$`, 'im').exec(frontMatter)?.[1];
-  return value ? value.toLowerCase() === 'true' : undefined;
-}
+/** Avoid touching ordinary punctuation in names already decoded by the citation provider. */
+function displayText(value: string): string { return /[{}\\]/.test(value) ? decodeLatex(value) : value; }
 
 function findMissingImageWarnings(source: string, dependencies: readonly RenderDependency[]): readonly string[] {
   const available = new Set(dependencies.map((dependency) => dependency.path.replace(/^\.\//, '')));
@@ -608,7 +670,7 @@ function findMissingImageWarnings(source: string, dependencies: readonly RenderD
 
 function findExecutableWarnings(source: string): readonly string[] {
   return /```\{(?:python|r|julia|ojs|bash|sh|node|javascript)\b/i.test(source)
-    ? ['Code cells are shown as source and are never executed in Markroot.']
+    ? ['Code cells are never executed in Markroot; computed output may be unavailable.']
     : [];
 }
 
