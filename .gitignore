@@ -77,3 +77,6 @@ Adobe After Effects Auto-Save/
 
 # Local static-preview diagnostics (never commit private source documents)
 .markroot-static-preview-debug/
+
+# Local statistics profiling and synthetic-document diagnostics
+.markroot-statistics-debug/
