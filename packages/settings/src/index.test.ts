@@ -90,3 +90,14 @@ describe('settings', () => {
     expect(await loadPendingSession('paper', 'a.md')).toBeUndefined();
   });
 });
+
+describe('viewer width setting', () => {
+  it('defaults to the standard measure, keeps fit-pane, and clamps stored values', () => {
+    expect(normalizeSettings({}).viewerWidth).toBe(100);
+    expect(normalizeSettings({ viewerWidth: 0 }).viewerWidth).toBe(0);
+    expect(normalizeSettings({ viewerWidth: 10 }).viewerWidth).toBe(60);
+    expect(normalizeSettings({ viewerWidth: 999 }).viewerWidth).toBe(250);
+    expect(normalizeSettings({ viewerWidth: 132.4 }).viewerWidth).toBe(132);
+    expect(normalizeSettings({ viewerWidth: 'wide' }).viewerWidth).toBe(100);
+  });
+});

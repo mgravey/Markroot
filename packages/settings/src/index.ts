@@ -13,6 +13,8 @@ export interface MarkrootSettings {
   readonly viewerFont: PaneFont;
   readonly viewerFontSize: number;
   readonly viewerJustified: boolean;
+  /** Rendered content width as a percentage of the default measure; 0 fits the pane. */
+  readonly viewerWidth: number;
   readonly filesPaneWidth: number;
   readonly sourcePaneRatio: number;
   readonly outlineDepth: OutlineDepth;
@@ -69,6 +71,7 @@ export function defaultSettings(): MarkrootSettings {
     sourceFontSize: 14,
     viewerFont: 'serif',
     viewerFontSize: 17,
+    viewerWidth: 100,
     viewerJustified: false,
     filesPaneWidth: 250,
     sourcePaneRatio: 0.5,
@@ -95,6 +98,7 @@ export function normalizeSettings(stored: unknown, defaults: MarkrootSettings = 
     viewerFont: oneOf(value.viewerFont, FONTS, defaults.viewerFont),
     viewerFontSize: clampFontSize(value.viewerFontSize, defaults.viewerFontSize),
     viewerJustified: flag('viewerJustified'),
+    viewerWidth: value.viewerWidth === 0 ? 0 : Math.round(clampNumber(value.viewerWidth, MIN_VIEWER_WIDTH, MAX_VIEWER_WIDTH, defaults.viewerWidth)),
     filesPaneWidth: clampNumber(value.filesPaneWidth, 180, 420, defaults.filesPaneWidth),
     sourcePaneRatio: clampNumber(value.sourcePaneRatio, 0.25, 0.75, defaults.sourcePaneRatio),
     outlineDepth: normalizeOutlineDepth(value.outlineDepth),
@@ -295,6 +299,9 @@ function oneOf<T extends string>(value: unknown, allowed: readonly T[], fallback
 function clampFontSize(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? Math.max(12, Math.min(28, Math.round(value))) : fallback;
 }
+export const MIN_VIEWER_WIDTH = 60;
+export const MAX_VIEWER_WIDTH = 250;
+
 function clampNumber(value: unknown, min: number, max: number, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? Math.max(min, Math.min(max, value)) : fallback;
 }
