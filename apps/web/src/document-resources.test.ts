@@ -39,3 +39,42 @@ describe('preview resources', () => {
     expect(resources).toEqual([]);
   });
 });
+
+describe('preview URL leases', () => {
+  it('reuses a URL while artifacts overlap, revoking only after the last artifact releases it', async () => {
+    const { PreviewUrlCache } = await import('./document-resources.js');
+    const create = vi.spyOn(URL, 'createObjectURL');
+    const revoke = vi.spyOn(URL, 'revokeObjectURL');
+    const urls = new PreviewUrlCache();
+    const workspace = new MemoryWorkspace({ 'docs/x.png': 'old' });
+    const blobs = new PreviewResourceCache();
+    const firstResources = await collectPreviewResources(workspace, snapshot('![x](x.png)'), blobs);
+    const first = urls.acquire(firstResources);
+    const second = urls.acquire(await collectPreviewResources(workspace, snapshot('![x](x.png) edit'), blobs));
+    const oldUrl = first.dependencies[0]!.objectUrl;
+    expect(second.dependencies[0]!.objectUrl).toBe(oldUrl);
+    expect(create).toHaveBeenCalledTimes(1);
+    first.release();
+    expect(revoke).not.toHaveBeenCalled();
+    await workspace.writeFile(workspacePath('docs/x.png'), 'new');
+    const third = urls.acquire(await collectPreviewResources(workspace, snapshot('![x](x.png)'), blobs));
+    expect(third.dependencies[0]!.objectUrl).not.toBe(oldUrl);
+    blobs.clear(); // Folder replacement cannot invalidate HTML that is still mounted.
+    expect(revoke).not.toHaveBeenCalled();
+    second.release();
+    expect(revoke).toHaveBeenCalledWith(oldUrl);
+    third.release(); third.release();
+    expect(revoke).toHaveBeenCalledTimes(2);
+    vi.restoreAllMocks();
+  });
+
+  it('stops after stat when abort arrives before the next image read', async () => {
+    const workspace = new MemoryWorkspace({ 'docs/x.png': 'one', 'docs/y.png': 'two' });
+    const controller = new AbortController();
+    const stat = workspace.stat.bind(workspace);
+    const read = vi.spyOn(workspace, 'readBytes');
+    vi.spyOn(workspace, 'stat').mockImplementation(async (...args) => { const result = await stat(...args); controller.abort(); return result; });
+    await expect(collectPreviewResources(workspace, snapshot('![x](x.png) ![y](y.png)'), new PreviewResourceCache(), controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(read).not.toHaveBeenCalled();
+  });
+});

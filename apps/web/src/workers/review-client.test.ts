@@ -47,6 +47,23 @@ describe('review worker client', () => {
     await expect(failed).rejects.toMatchObject({ name: 'RangeError', message: 'boom' });
   });
 
+  it('terminates an attribution worker on abort and ignores a late response', async () => {
+    const { worker, createWorker } = fake();
+    const controller = new AbortController();
+    const result = attributeReviewChangesInWorker({ base: '', compare: '', changes: [] }, [], { createWorker, signal: controller.signal });
+    controller.abort(new DOMException('Superseded', 'AbortError'));
+    await expect(result).rejects.toThrow('Superseded');
+    worker.reply({ id: idOf(worker), type: 'attribution', attribution: [] });
+    expect(worker.terminate).toHaveBeenCalled();
+  });
+
+  it('terminates when posting the request throws', async () => {
+    const { worker, createWorker } = fake();
+    vi.spyOn(worker, 'postMessage').mockImplementation(() => { throw new DOMException('Cannot clone', 'DataCloneError'); });
+    await expect(createReviewDraftInWorker('', '', 'fp', { createWorker })).rejects.toThrow('Cannot clone');
+    expect(worker.terminate).toHaveBeenCalledTimes(1);
+  });
+
   it('returns attribution as a map', async () => {
     const { worker, createWorker } = fake();
     const result = attributeReviewChangesInWorker({ base: '', compare: '', changes: [] }, [], { createWorker });

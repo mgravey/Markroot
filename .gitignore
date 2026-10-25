@@ -66,3 +66,5 @@ Adobe After Effects Auto-Save/
 
 # Local hook/refactor diagnostics
 .markroot-hook-debug/
+# Local deterministic hook-test traces
+.markroot-hook-tests/

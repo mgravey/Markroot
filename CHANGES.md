@@ -73,3 +73,10 @@
 - Lease cached image URLs across artifacts and release after DOM replacement; stop resource reads on cancellation.
 - Cancel reviews on unmount/document loads, check stale review application, and clean up worker post failures.
 - Clear repository state on folder replacement; close AI preparation sessions on early exits.
+
+## Review fixes: regression tests
+
+- Exercise serialized saves, edits during writes, and stale queued/completed saves using deferred workspace writes.
+- Verify restored settings precede folder connection and resolved nested links reach the document loader.
+- Check shared URL leases across image versions/folder cache clears and DOM replacement/unmount.
+- Verify comparison supersession/unmount, too-large notices, attribution aborts, and worker post failures.

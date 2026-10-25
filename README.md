@@ -44,6 +44,8 @@ pnpm dev
 pnpm check
 ```
 
+Vitest includes deterministic jsdom hook tests for serialized saves, document replacement, workspace restore/link routing, review cancellation, and preview URL lifetimes. These use React DOM directly and deferred promises.
+
 Open the local HTTPS/localhost URL in a Chromium desktop browser. Firefox and Safari do not currently expose the required directory picker API.
 
 AI commit suggestions additionally require the Chrome Prompt API, compatible desktop hardware, an unmetered connection, and at least 22 GB free on the volume containing the Chrome profile. The feature is disabled by default. Selecting it in Settings immediately asks Chrome to create a local session, which triggers Gemini Nano's browser-managed download when needed and reports preparation progress inline. Chrome API rejections are shown as red errors; a slow download is never treated as a failure based only on elapsed time. This browser component download may not appear in the page's DevTools Network panel; inspect `chrome://on-device-internals` for authoritative model status. Only the candidate Git diff is processed by the on-device model, and Markroot does not use a cloud fallback.
