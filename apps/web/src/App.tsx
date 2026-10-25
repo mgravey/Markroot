@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  AlignJustify, BookOpen, CircleAlert, CircleDot, Code2, Columns2, Download, FileCode2,
+  AlignJustify, BarChart3, BookOpen, CircleAlert, CircleDot, Code2, Columns2, Download, FileCode2,
   ExternalLink, Files, GitBranch, GitCompare, GitFork, ListTree, MessageSquare, PanelRight,
   RefreshCw, Save, Search, Settings2, X,
 } from 'lucide-react';
@@ -24,6 +24,8 @@ import { useEvent } from './hooks/useEvent.js';
 import { useSystemDark } from './hooks/useSystemDark.js';
 import { usePreviewRender } from './hooks/usePreviewRender.js';
 import { useExport } from './hooks/useExport.js';
+import { BuildInfo } from './components/BuildInfo.js';
+import { useDocumentStatistics } from './hooks/useDocumentStatistics.js';
 import { useAiCommit } from './hooks/useAiCommit.js';
 import { useGitRepository } from './hooks/useGitRepository.js';
 import { useComments } from './hooks/useComments.js';
@@ -43,8 +45,9 @@ const ReviewPanel = lazy(() => import('./panels/ReviewPanel.js').then((module) =
 const CitationsPanel = lazy(() => import('./panels/CitationsPanel.js').then((module) => ({ default: module.CitationsPanel })));
 const CommentsPanel = lazy(() => import('./panels/CommentsPanel.js').then((module) => ({ default: module.CommentsPanel })));
 const SettingsPanel = lazy(() => import('./panels/SettingsPanel.js').then((module) => ({ default: module.SettingsPanel })));
+const StatisticsPanel = lazy(() => import('./panels/StatisticsPanel.js').then((module) => ({ default: module.StatisticsPanel })));
 
-type Inspector = 'history' | 'git' | 'review' | 'comments' | 'citations' | 'export' | 'settings' | undefined;
+type Inspector = 'statistics' | 'history' | 'git' | 'review' | 'comments' | 'citations' | 'export' | 'settings' | undefined;
 type RightMode = 'visual' | 'preview';
 const EMPTY_WARNINGS: readonly string[] = [];
 
@@ -52,6 +55,7 @@ export function App() {
   const [settings, setSettings] = useState<MarkrootSettings>(defaultSettings);
   const [rightMode, setRightMode] = useState<RightMode>('preview');
   const [inspector, setInspector] = useState<Inspector>();
+  const [includeCaptions, setIncludeCaptions] = useState(true);
   const [search, setSearch] = useState('');
   const [regularExpression, setRegularExpression] = useState(false);
   const [matchCursor, setMatchCursor] = useState(-1);
@@ -115,6 +119,7 @@ export function App() {
   const reviewState = useReview({ git, workspace, snapshot, scroll, setSelection, setSourceCursorTarget, applySource: applyReviewedSource, setNotice, reportError, onOpened: showReview, onApplied: hideInspector });
   const { review, presentation: reviewPresentation, presentedSnapshot: reviewPresentedSnapshot, previewSnapshot: reviewPreviewSnapshot, trackChanges: reviewTrackChanges, activeTrackChange, activeSourceTrackChange, renderedChanges: renderedReviewChanges, renderedDecisions: renderedReviewDecisions, reset: resetReview, select: selectReviewChange } = reviewState;
   const presentedSnapshot = historyPreview.snapshot ?? reviewPresentedSnapshot;
+  const statistics = useDocumentStatistics(presentedSnapshot, selection, citations, includeCaptions);
   const previewSnapshot = historyPreview.snapshot ?? reviewPreviewSnapshot ?? presentedSnapshot;
   const comparisonBaseSource = historyPreview.active ? historyPreview.base : reviewPresentation?.base ?? (gitBase?.path === presentedSnapshot?.path ? gitBase?.source : undefined);
   const renderedComparisonBaseSource = review?.base ?? comparisonBaseSource;
@@ -430,6 +435,7 @@ export function App() {
         {inspectorToggle('history', 'History', <GitFork size={17}/>)}
         {inspectorToggle('git', 'Git', <GitBranch size={17}/>)}
         {inspectorToggle('export', 'Export', <Download size={17}/>)}
+        {inspectorToggle('statistics', 'Statistics', <BarChart3 size={17}/>)}
         {inspectorToggle('settings', 'Settings', <Settings2 size={17}/>)}
       </div>
     </header>
@@ -448,7 +454,7 @@ export function App() {
     </aside>
 
     <main className={`workspace ${detachedViewerRoot ? 'viewer-detached' : ''}`} ref={workspacePane} style={{ '--source-width': `${settings.sourcePaneRatio * 100}%` } as CSSProperties}>
-      {!presentedSnapshot ? <div className="welcome"><BrandMark className="welcome-symbol"/><h1>Your local writing workspace</h1><p>Choose a folder, then open a Markdown or QMD file. Source, preview, comments, and Git stay together on this device.</p>{!workspace && <><button className="primary" onClick={() => void chooseFolder().catch(reportError)}>Open folder</button><RecentProjects projects={recentProjects} onSelect={(project) => void selectProject(project).catch(reportError)} onRemove={(id) => void removeProject(id).catch(reportError)}/></>}</div>
+      {!presentedSnapshot ? <div className="welcome"><BrandMark className="welcome-symbol"/><h1>Your local writing workspace</h1><p>Choose a folder, then open a Markdown or QMD file. Source, preview, comments, and Git stay together on this device.</p>{!workspace && <><button className="primary" onClick={() => void chooseFolder().catch(reportError)}>Open folder</button><RecentProjects projects={recentProjects} onSelect={(project) => void selectProject(project).catch(reportError)} onRemove={(id) => void removeProject(id).catch(reportError)}/></>}<footer className="welcome-footer"><BuildInfo full/></footer></div>
       : <>
         <section className="pane source-pane"><div className="pane-title"><Code2 size={15}/><span>{review ? 'Source · branch review' : 'Source'}</span>{trackChangesToggle}<span className="spacer"/>{detachedViewerRoot && <><button className="detached-indicator" onClick={() => detachedViewerWindow.current?.focus()} title="Focus the detached viewer"><ExternalLink size={13}/>Viewer detached</button><button className="viewer-option" onClick={reattachViewer} title="Return viewer to this window" aria-label="Reattach viewer"><Columns2 size={15}/></button></>}<span>{settings.sourceFontSize}px · Ln {currentLine}</span></div><ScrollBound store={scroll} render={(position) => { const location = sourceScrollLocation(position, review, reviewPreviewSnapshot, presentedSnapshot); return <SourceEditor key={presentedSnapshot.path} path={presentedSnapshot.path} workspacePaths={workspacePaths} value={presentedSnapshot.source} comparisonBase={review ? undefined : comparisonBaseSource} trackChangesOverride={reviewTrackChanges} showTrackChanges={trackedChangesVisible} activeTrackChange={activeSourceTrackChange} readOnly={Boolean(review) || historyPreview.active} blocks={presentedSnapshot.blocks} search={search} regularExpression={regularExpression} dark={dark} fontFamily={settings.sourceFont} fontSize={settings.sourceFontSize} activeBlock={location.target} scrollTarget={position.origin === 'source' ? undefined : location.target} scrollProgress={location.progress} scrollAlignment={position.alignment} cursorTarget={sourceCursorTarget} goToLine={goToLine} onChange={applySource} onSelection={selectSource} onTrackChangeActivate={selectReviewChange} onScroll={navigateFromSourceScroll} onSave={saveFromEditor} onFind={openFind}/>; }}/></section>
         {!detachedViewerRoot && <><PaneResizer label="Resize source and viewer panes" value={settings.sourcePaneRatio} min={0.25} max={0.75} keyboardStep={0.02} pixelsPerUnit={workspacePaneWidth} onChange={resizeSourcePane}/><section className="pane right-pane">{viewerToolbar(false)}<div className="right-scroll" style={viewerWidthStyle}>{renderViewerContent()}</div></section></>}
@@ -463,9 +469,15 @@ export function App() {
       {inspector === 'comments' && <CommentsPanel parsed={comments} activeId={activeCommentId} selection={selection} body={commentState.body} setBody={commentState.setBody} replies={commentState.replies} setReplies={commentState.setReplies} onAdd={() => { void commentState.add().catch(reportError); }} onNavigate={navigateComment} busy={commentState.busy || Boolean(review) || historyPreview.active} onRepair={commentState.repair} onReply={commentState.reply} onStatus={commentState.setStatus} onDelete={commentState.remove}/>}
       {inspector === 'citations' && <CitationsPanel records={citations} query={citationQuery} setQuery={setCitationQuery}/>}
       {inspector === 'export' && <ExportPanel disabled={!snapshot} busy={exports.busy} progress={exports.progress} onCancel={exports.cancel} onExport={exports.exportDocument}/>}
+      {inspector === 'statistics' && <StatisticsPanel document={statistics?.document} selection={statistics?.selection} includeCaptions={includeCaptions} pending={Boolean(presentedSnapshot) && !statistics} onIncludeCaptionsChange={setIncludeCaptions} onNavigate={(section) => {
+        const item = renderedSnapshot?.source === presentedSnapshot?.source ? rendered?.outline?.find((entry) => entry.kind === 'section' && entry.from === section.from) : undefined;
+        if (item) navigateOutline(item);
+        else navigateFromRight(section.blockId, section.from);
+      }}/>}
       {inspector === 'settings' && <SettingsPanel settings={settings} aiModelSetup={aiModelSetup} onChange={updateSettings} onAiCommitSuggestionsChange={updateAiCommitSuggestions}/>}
       </Suspense>
     </aside>}
+    <footer className="status-bar"><span>{presentedSnapshot ? (presentedSnapshot.dirty ? 'Unsaved changes' : 'Saved locally') : 'Local writing workspace'}</span><span className="spacer"/>{presentedSnapshot && <button onClick={() => setInspector('statistics')} title="Open document statistics" aria-label="Open document statistics">{statistics ? `${statistics.document.textOnly.words.toLocaleString()} words` : 'Counting…'}</button>}<BuildInfo/></footer>
   </div>{commitDialog && <Suspense fallback={null}><CommitProposalDialog phase={commitDialog.phase} progress={commitDialog.progress} proposal={commitDialog.proposal} fileCount={commitDialog.candidate?.paths.length ?? 0} ignored={commitDialog.candidate?.ignored} onProposalChange={changeProposal} onAccept={() => void acceptAiCommit().catch(reportError)} onRegenerate={() => void regenerateCommitProposal().catch(reportError)} onCancel={cancelAiCommit}/></Suspense>} {detachedViewerRoot && createPortal(<main className="detached-viewer"><div className="detached-viewer-title"><BrandMark className="detached-viewer-mark"/><strong>Markroot</strong><span>{snapshot?.path ?? 'Viewer'}</span></div>{viewerToolbar(true)}<div className="right-scroll" style={viewerWidthStyle}>{renderViewerContent()}</div></main>, detachedViewerRoot)}</>;
 }
 
@@ -494,7 +506,7 @@ function isAbortError(error: unknown): boolean { return error instanceof DOMExce
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 // The default measure (47.059em ≈ 800px at 17px) scales with the viewer font size.
 function viewerMaxWidth(percent: number): string { return percent === 0 ? 'none' : `${(47.059 * percent / 100).toFixed(3)}em`; }
-function panelTitle(panel: Exclude<Inspector, undefined>): string { return ({ history: 'History', git: 'Local Git', review: 'Track Changes', comments: 'Comments', citations: 'Citations', export: 'Export', settings: 'Settings' })[panel]; }
+function panelTitle(panel: Exclude<Inspector, undefined>): string { return ({ statistics: 'Statistics', history: 'History', git: 'Local Git', review: 'Track Changes', comments: 'Comments', citations: 'Citations', export: 'Export', settings: 'Settings' })[panel]; }
 function lineAt(source: string, offset: number): number { return source.slice(0, offset).split('\n').length; }
 
 

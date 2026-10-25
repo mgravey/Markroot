@@ -32,6 +32,8 @@ The visual identity uses a rooted pilcrow, with a Lottie-ready After Effects sou
 - Live system/light/dark themes, global save/find shortcuts, folder-scoped async operations, and leased preview image URLs
 - App behavior composed from workspace, save, review, navigation, comment, preview, export, and Git hooks
 - Light and dark themes
+- UTC build-date identity (with timestamp and optional Git revision) in the status bar, Settings, and welcome footer; development servers display `dev`
+- Debounced document and selection statistics with text-only/citation-label counts, caption inclusion, scholarly object totals, and clickable H1 word breakdowns
 
 Markroot deliberately does not execute QMD code cells, upload files, provide accounts, or connect to Git remotes.
 

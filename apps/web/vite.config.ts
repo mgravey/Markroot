@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
@@ -10,19 +11,32 @@ const pandocWasmAsAsset = {
   },
 };
 
-export default defineConfig({
-  plugins: [pandocWasmAsAsset, react()],
-  base: './',
-  assetsInclude: ['**/*.wasm'],
-  build: {
-    target: 'es2022', assetsInlineLimit: 0,
-    rollupOptions: { output: { manualChunks(id) {
-      if (/\/node_modules\/(?:react|react-dom|scheduler)\//.test(id)) return 'react';
-      if (/\/node_modules\/@codemirror\/(?:state|view)\//.test(id)) return 'codemirror-core';
-      if (/\/node_modules\/(?:@codemirror|@lezer)\//.test(id)) return 'codemirror';
-      if (id.includes('/node_modules/katex/')) return 'katex';
-      return undefined;
-    } } },
-  },
-  worker: { format: 'es' },
+export default defineConfig(({ command }) => {
+  const timestamp = new Date().toISOString();
+  let commit = process.env.GITHUB_SHA?.trim().slice(0, 7);
+  if (!commit) {
+    try { commit = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); }
+    catch { /* Source archives can be built without Git metadata. */ }
+  }
+  const build = { date: command === 'serve' ? 'dev' : timestamp.slice(0, 10), timestamp, ...(commit ? { commit } : {}) };
+  return {
+    define: { __MARKROOT_BUILD__: JSON.stringify(build) },
+    plugins: [pandocWasmAsAsset, react(), {
+      name: 'markroot-build-meta',
+      transformIndexHtml: () => [{ tag: 'meta', attrs: { name: 'markroot-build', content: [build.date, build.timestamp, commit].filter(Boolean).join(' · ') }, injectTo: 'head' as const }],
+    }],
+    base: './',
+    assetsInclude: ['**/*.wasm'],
+    build: {
+      target: 'es2022', assetsInlineLimit: 0,
+      rollupOptions: { output: { manualChunks(id: string) {
+        if (/\/node_modules\/(?:react|react-dom|scheduler)\//.test(id)) return 'react';
+        if (/\/node_modules\/@codemirror\/(?:state|view)\//.test(id)) return 'codemirror-core';
+        if (/\/node_modules\/(?:@codemirror|@lezer)\//.test(id)) return 'codemirror';
+        if (id.includes('/node_modules/katex/')) return 'katex';
+        return undefined;
+      } } },
+    },
+    worker: { format: 'es' },
+  };
 });
