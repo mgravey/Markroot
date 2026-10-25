@@ -42,6 +42,9 @@ export class MemoryWorkspace implements GuardedWorkspace {
   private readonly nodes = new Map<string, MutableNode>();
   private clock = 1;
 
+  /** Memory workspaces have no slow browser I/O in flight; matches FileSystemAccessWorkspace.close(). */
+  close(): void {}
+
   constructor(seed?: Readonly<Record<string, string | Uint8Array>>) {
     for (const [path, value] of Object.entries(seed ?? {})) {
       const normalized = workspacePath(path);
@@ -169,14 +172,25 @@ export class FileSystemAccessWorkspace implements GuardedWorkspace {
   readonly skippedEntries = new Set<string>();
   /** Content hashes of files as last read or written, keyed by their coarse `mtime:size` version. */
   private readonly knownContent = new Map<string, { readonly version: string; readonly hash: string }>();
+  /** Resolved directory handles by path, so each operation is one browser call instead of one per path segment. */
+  private readonly directories = new Map<string, Promise<FileSystemDirectoryHandle>>();
+  private closed = false;
   constructor(readonly root: FileSystemDirectoryHandle, options: FileSystemAccessWorkspaceOptions = {}) { this.lockName = `markroot:workspace:${options.id ?? root.name}`; }
 
+  /** Stops all further access, including in-flight Git scans of a folder the user switched away from. */
+  close(): void { this.closed = true; this.directories.clear(); }
+
   async listFiles(path?: WorkspacePath, context?: OperationContext): Promise<readonly WorkspaceEntry[]> {
+    return this.withFreshDirectories(path, () => this.listEntries(path, context));
+  }
+
+  private async listEntries(path: WorkspacePath | undefined, context?: OperationContext): Promise<readonly WorkspaceEntry[]> {
     const dir = await this.directory(path, false, context);
     const entries: WorkspaceEntry[] = [];
     try {
       for await (const [name, handle] of (dir as IterableDirectoryHandle).entries()) {
         throwIfAborted(context);
+        this.assertOpen();
         const raw = path ? `${path}/${name}` : name;
         // workspacePath() would rewrite `a\b` to `a/b`; skip names that cannot round-trip instead of failing the listing.
         if (name.includes('\\') || name.includes('/') || name === '.' || name === '..') { this.skippedEntries.add(raw); continue; }
@@ -258,6 +272,8 @@ export class FileSystemAccessWorkspace implements GuardedWorkspace {
     } catch (error) {
       if (!(error instanceof MarkrootError && error.code === 'NOT_FOUND') && !hasDomExceptionName(error, 'TypeMismatchError')) throw error;
     }
+    // Existence checks must ask the browser: a cached handle can outlive a folder deleted elsewhere.
+    this.forgetDirectories(path);
     try { await this.directory(path, false, context); return { path, kind: 'directory', size: 0 }; }
     catch (cause) { throw mapFsError(cause, path); }
   }
@@ -293,6 +309,7 @@ export class FileSystemAccessWorkspace implements GuardedWorkspace {
 
   async remove(path: WorkspacePath, options?: Readonly<{ recursive?: boolean }>, context?: OperationContext): Promise<void> {
     throwIfAborted(context);
+    this.forgetDirectories(path);
     const [parent, name] = splitPath(path);
     try { await (await this.directory(parent, false, context) as IterableDirectoryHandle).removeEntry(name, { recursive: options?.recursive === true }); }
     catch (cause) { throw mapFsError(cause, path); }
@@ -303,7 +320,8 @@ export class FileSystemAccessWorkspace implements GuardedWorkspace {
     const handle: FileSystemHandle & MovableHandle = kind === 'file' ? await this.fileHandle(source, false, context) : await this.directory(source, false, context);
     if (typeof handle.move === 'function') {
       const [parent, name] = splitPath(destination);
-      try { await handle.move(await this.directory(parent, false, context), name); this.knownContent.delete(source); return; }
+      // A moved handle follows its entry, so the cached handle for the old path must not be reused.
+      try { await handle.move(await this.directory(parent, false, context), name); this.forgetDirectories(source); this.knownContent.delete(source); return; }
       catch (cause) { if (!hasDomExceptionName(cause, 'NotSupportedError') && !(cause instanceof TypeError)) throw mapFsError(cause, source); }
     }
     if (kind === 'file') await this.writeBytes(destination, await this.readBytes(source, context), context);
@@ -332,21 +350,48 @@ export class FileSystemAccessWorkspace implements GuardedWorkspace {
     }
   }
 
+  private assertOpen(): void { if (this.closed) throw new DOMException('This folder was closed.', 'AbortError'); }
+
   private async directory(path: WorkspacePath | undefined, create: boolean, context?: OperationContext): Promise<FileSystemDirectoryHandle> {
     throwIfAborted(context);
-    let current = this.root;
-    for (const part of path?.split('/') ?? []) {
-      try { current = await current.getDirectoryHandle(part, { create }); }
-      catch (cause) { throw mapFsError(cause, path!); }
-      throwIfAborted(context);
+    this.assertOpen();
+    if (!path) return this.root;
+    const cached = this.directories.get(path);
+    if (cached) return cached;
+    const [parent, name] = splitPath(path);
+    const resolving = this.directory(parent, create, context).then(async (directory) => {
+      try { return await directory.getDirectoryHandle(name, { create }); }
+      catch (cause) { throw mapFsError(cause, path); }
+    });
+    this.directories.set(path, resolving);
+    // Missing directories are not cached, so a folder created later is found.
+    resolving.catch(() => { if (this.directories.get(path) === resolving) this.directories.delete(path); });
+    const directory = await resolving;
+    throwIfAborted(context);
+    this.assertOpen();
+    return directory;
+  }
+
+  /** Evicts a path and its descendants after it was removed, moved, or found missing. */
+  private forgetDirectories(path: string): void {
+    for (const key of this.directories.keys()) if (key === path || key.startsWith(`${path}/`)) this.directories.delete(key);
+  }
+
+  /** Retries once without cached handles when a directory was renamed or deleted outside Markroot. */
+  private async withFreshDirectories<T>(path: WorkspacePath | undefined, run: () => Promise<T>): Promise<T> {
+    try { return await run(); } catch (error) {
+      if (!path || !(error instanceof MarkrootError && error.code === 'NOT_FOUND') || !this.directories.size) throw error;
+      this.forgetDirectories(path.split('/')[0]!);
+      return run();
     }
-    return current;
   }
 
   private async fileHandle(path: WorkspacePath, create: boolean, context?: OperationContext): Promise<FileSystemFileHandle> {
-    const [parent, name] = splitPath(path);
-    try { return await (await this.directory(parent, create, context)).getFileHandle(name, { create }); }
-    catch (cause) { throw mapFsError(cause, path); }
+    return this.withFreshDirectories(path, async () => {
+      const [parent, name] = splitPath(path);
+      try { return await (await this.directory(parent, create, context)).getFileHandle(name, { create }); }
+      catch (cause) { throw mapFsError(cause, path); }
+    });
   }
 }
 
@@ -367,8 +412,9 @@ function splitPath(path: WorkspacePath): [WorkspacePath | undefined, string] {
 function parentPath(path: WorkspacePath): WorkspacePath | undefined { return splitPath(path)[0]; }
 function encode(value: string | Uint8Array): Uint8Array { return typeof value === 'string' ? new TextEncoder().encode(value) : value.slice(); }
 
-function mapFsError(cause: unknown, path: WorkspacePath): MarkrootError {
+function mapFsError(cause: unknown, path: WorkspacePath): MarkrootError | DOMException {
   const name = typeof cause === 'object' && cause && 'name' in cause ? String(cause.name) : '';
+  if (cause instanceof DOMException && name === 'AbortError') return cause;
   if (name === 'NotFoundError' || (cause instanceof MarkrootError && cause.code === 'NOT_FOUND')) return new MarkrootError('NOT_FOUND', `Entry not found: ${path}`, undefined, { cause });
   if (name === 'NotAllowedError' || name === 'SecurityError') return new MarkrootError('PERMISSION_DENIED', `Permission denied: ${path}`, undefined, { cause });
   if (cause instanceof MarkrootError) return cause;

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { workspacePath } from '@markroot/core';
+import { workspacePath, type WorkspacePath } from '@markroot/core';
 import { FileSystemAccessWorkspace, MemoryWorkspace, listTree } from './index.js';
 
 describe('MemoryWorkspace', () => {
@@ -174,5 +174,42 @@ describe('FileSystemAccessWorkspace safety', () => {
     expect([...workspace.skippedEntries].sort()).toEqual(['bad\\', 'bad\\name.md']);
     expect(workspace.lockName).toBe('markroot:workspace:ws-1');
     expect(new FileSystemAccessWorkspace(asRoot(root)).lockName).toBe('markroot:workspace:project');
+  });
+});
+
+describe('FileSystemAccessWorkspace directory cache and closing', () => {
+  it('resolves each directory once across operations instead of walking from the root every time', async () => {
+    const root = new FakeDirectory('root');
+    for (const name of ['a.md', 'b.md', 'c.md']) root.put(`deep/er/est/${name}`, name);
+    const lookups = vi.spyOn(FakeDirectory.prototype, 'getDirectoryHandle');
+    const workspace = new FileSystemAccessWorkspace(asRoot(root));
+    for (const name of ['a.md', 'b.md', 'c.md']) expect(await workspace.readFile(`deep/er/est/${name}` as WorkspacePath)).toBe(name);
+    await workspace.listFiles('deep/er/est' as WorkspacePath);
+    expect(lookups).toHaveBeenCalledTimes(3);
+    lookups.mockRestore();
+  });
+
+  it('notices folders renamed or deleted outside Markroot', async () => {
+    const root = new FakeDirectory('root');
+    root.put('notes/a.md', 'old');
+    const workspace = new FileSystemAccessWorkspace(asRoot(root));
+    expect(await workspace.readFile('notes/a.md' as WorkspacePath)).toBe('old');
+    root.children.delete('notes');
+    await expect(workspace.stat('notes' as WorkspacePath)).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    root.put('notes/a.md', 'recreated');
+    expect(await workspace.readFile('notes/a.md' as WorkspacePath)).toBe('recreated');
+    expect((await workspace.listFiles('notes' as WorkspacePath)).map((entry) => entry.path)).toEqual(['notes/a.md']);
+  });
+
+  it('rejects every operation with AbortError once closed', async () => {
+    const root = new FakeDirectory('root');
+    root.put('sub/a.md', 'x');
+    const workspace = new FileSystemAccessWorkspace(asRoot(root));
+    await workspace.readFile('sub/a.md' as WorkspacePath);
+    workspace.close();
+    for (const operation of [() => workspace.readFile('sub/a.md' as WorkspacePath), () => workspace.listFiles(), () => workspace.stat('sub' as WorkspacePath), () => workspace.writeFile('b.md' as WorkspacePath, 'y')]) {
+      await expect(operation()).rejects.toMatchObject({ name: 'AbortError' });
+    }
+    expect(root.children.has('b.md')).toBe(false);
   });
 });
