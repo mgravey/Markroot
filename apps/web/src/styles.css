@@ -205,7 +205,7 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .detached-viewer .viewer-toolbar { border-bottom-color: var(--line-strong); }
 .detached-viewer .right-scroll { background: var(--surface-strong); }
 
-.visual-editor, .preview { --viewer-side-padding: clamp(1.647em, 6vw, 4.235em); max-width: 47.059em; min-height: 100%; margin: auto; padding: 2em var(--viewer-side-padding) 5.882em; font-family: var(--viewer-font, 'Source Serif 4', Georgia, serif); font-size: var(--viewer-size, 17px); line-height: 1.72; }
+.visual-editor, .preview { --viewer-side-padding: clamp(1.647em, 6vw, 4.235em); max-width: var(--viewer-max-width, 47.059em); min-height: 100%; margin: auto; padding: 2em var(--viewer-side-padding) 5.882em; font-family: var(--viewer-font, 'Source Serif 4', Georgia, serif); font-size: var(--viewer-size, 17px); line-height: 1.72; }
 .preview.has-comments { --comment-lane-width: min(8em, calc(var(--viewer-side-padding) + var(--viewer-side-padding) - .47em)); padding-right: var(--comment-lane-width); padding-left: max(.47em, calc(var(--viewer-side-padding) + var(--viewer-side-padding) - 8em)); }
 .visual-editor.justified .visual-block p, .visual-editor.justified .visual-block li, .visual-editor.justified .visual-block blockquote { text-align: justify; text-justify: inter-word; hyphens: auto; }
 .visual-block { position: relative; min-height: 1.06em; margin: 0 0 1.05em; border-radius: .235em; }
@@ -397,3 +397,12 @@ mark { color: inherit; background: #ffd76a; border-radius: .118em; }
 .recent-projects h2 { margin: 0 0 6px; color: var(--muted); font-size: 11px; font-weight: 600; }
 .notice .project-notice-remove { display: inline-block; width: auto; height: auto; padding: 4px 6px; white-space: nowrap; color: var(--ink); text-decoration: underline; }
 @media (max-width: 760px) { .project-switcher { flex: 1; } }
+
+/* Rendered width setting */
+.viewer-width-field > label:first-child { color: var(--muted); font-size: 12px; font-weight: 600; }
+.viewer-width-field > div { display: flex; align-items: center; gap: 8px; }
+.viewer-width-field input[type="range"] { flex: 1; min-width: 0; padding: 0; background: transparent; border: 0; accent-color: var(--accent); }
+.viewer-width-field output { min-width: 3.2em; color: var(--ink); font: 12px 'IBM Plex Mono', monospace; text-align: right; }
+.viewer-width-field button { min-height: 26px; padding: 0 8px; color: var(--accent-strong); background: var(--accent-soft); border-radius: 5px; font-size: 11px; }
+.viewer-width-field button:disabled { opacity: .45; }
+.viewer-width-field .check { margin: 2px 0 0; }
