@@ -10,12 +10,17 @@
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "vitest run",
     "test:watch": "vitest",
-    "boundaries": "node scripts/check-boundaries.mjs",
-    "check": "pnpm boundaries && pnpm typecheck && pnpm test && pnpm build"
+    "boundaries": "node --test scripts/check-boundaries.test.mjs && node scripts/check-boundaries.mjs",
+    "lint": "eslint . --max-warnings 0",
+    "check": "pnpm boundaries && pnpm lint && pnpm typecheck && pnpm test && pnpm build"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
+    "@vitest/coverage-v8": "3.2.7",
+    "eslint": "^10.13.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
     "typescript": "^5.9.2",
-    "vitest": "^3.2.4"
+    "typescript-eslint": "^8.72.0",
+    "vitest": "3.2.7"
   }
 }

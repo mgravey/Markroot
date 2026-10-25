@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { centeredScrollTop, ScrollIntentGate, viewportCenter } from './scroll-sync.js';
+import { blockProgress, centeredScrollTop, ScrollIntentGate, viewportCenter } from './scroll-sync.js';
 
 describe('center-line alignment', () => {
   it('uses the true vertical midpoint as the shared reference line', () => {
@@ -14,6 +14,15 @@ describe('center-line alignment', () => {
   it('clamps alignment naturally at the document boundaries', () => {
     expect(centeredScrollTop(0, 100, 600, 2_000)).toBe(0);
     expect(centeredScrollTop(1_300, 500, 600, 2_000)).toBe(1_400);
+  });
+});
+
+describe('blockProgress', () => {
+  it('maps offsets to a clamped fraction of the block', () => {
+    expect(blockProgress(15, { from: 10, to: 20 })).toBe(0.5);
+    expect(blockProgress(5, { from: 10, to: 20 })).toBe(0);
+    expect(blockProgress(30, { from: 10, to: 20 })).toBe(1);
+    expect(blockProgress(10, { from: 10, to: 10 })).toBe(0);
   });
 });
 

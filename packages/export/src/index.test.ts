@@ -1,23 +1,40 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BrowserDocumentExporter, exportFilename, parseExportOptions, preparePandocInput } from './index.js';
 
-const { convert } = vi.hoisted(() => ({ convert: vi.fn() }));
+const { convert, typst } = vi.hoisted(() => ({
+  convert: vi.fn(),
+  typst: { instances: [] as Array<Record<string, ReturnType<typeof vi.fn>>>, failInit: 0, log: [] as string[] },
+}));
 
 vi.mock('pandoc-wasm', () => ({ convert }));
+vi.mock('@myriaddreamin/typst.ts', () => ({ MemoryAccessModel: class {} }));
+vi.mock('@myriaddreamin/typst.ts/contrib/snippet', () => ({
+  TypstSnippet: class {
+    static withAccessModel() { return {}; }
+    static preloadFontData() { return {}; }
+    use = vi.fn();
+    setCompilerInitOptions = vi.fn();
+    getCompiler = vi.fn(async () => { if (typst.failInit > 0) { typst.failInit -= 1; throw new Error('wasm init failed'); } });
+    resetShadow = vi.fn(async () => { typst.log.push('reset'); });
+    mapShadow = vi.fn(async (path: string) => { typst.log.push(`map ${path}`); await new Promise((resolve) => setTimeout(resolve, 1)); });
+    pdf = vi.fn(async () => { typst.log.push('pdf'); return new Uint8Array([37, 80, 68, 70]); });
+    constructor() { typst.instances.push(this as unknown as Record<string, ReturnType<typeof vi.fn>>); }
+  },
+}));
 
 describe('browser document export', () => {
   beforeEach(() => convert.mockReset());
 
   it('uses flat temporary files while preserving nested source references by extension', () => {
     const prepared = preparePandocInput(
-      '![Plot](../figures/result.pdf)\n\nbibliography: ../references/library.bib',
+      '---\nbibliography: ../references/library.bib\n---\n![Plot](../figures/result.pdf)',
       [
         { path: '../figures/result.pdf', content: new Blob(['png'], { type: 'image/png' }) },
         { path: '../references/library.bib', content: new Blob(['@article{x}'], { type: 'text/plain' }) },
       ],
     );
 
-    expect(prepared.source).toBe('![Plot](markroot-resource-1.png)\n\nbibliography: markroot-resource-2.bib');
+    expect(prepared.source).toBe('---\nbibliography: markroot-resource-2.bib\n---\n![Plot](markroot-resource-1.png)');
     expect(Object.keys(prepared.files)).toEqual(['markroot-resource-1.png', 'markroot-resource-2.bib']);
   });
 
@@ -120,5 +137,56 @@ format:
       expect.objectContaining({ 'markroot-justified-reference.docx': expect.any(Blob) }),
     );
     fetchReference.mockRestore();
+  });
+
+  it('rewrites only destinations and front-matter values, never prose, code or longer names', () => {
+    const prepared = preparePandocInput([
+      '---', 'bibliography: refs.bib', 'css: [a.png, "b.css"]', '---',
+      'See a.png and data.png in prose. ![A](a.png) ![D](data.png) [link](./a.png "t") ![B](<b c.png>)',
+      '[ref]: a.png', '<img src="a.png">', '```', '![A](a.png)', '```', '',
+    ].join('\n'), [
+      { path: 'a.png', content: 'A' }, { path: 'refs.bib', content: '@misc{x}' }, { path: 'b.css', content: 'p{}' }, { path: 'b c.png', content: 'B' },
+    ]);
+    expect(prepared.source).toBe([
+      '---', 'bibliography: markroot-resource-2.bib', 'css: [markroot-resource-1.png, "markroot-resource-3.css"]', '---',
+      'See a.png and data.png in prose. ![A](markroot-resource-1.png) ![D](data.png) [link](markroot-resource-1.png "t") ![B](<markroot-resource-4.png>)',
+      '[ref]: markroot-resource-1.png', '<img src="markroot-resource-1.png">', '```', '![A](a.png)', '```', '',
+    ].join('\n'));
+  });
+
+  it('passes Typst template partials to Pandoc beside the flattened template', async () => {
+    convert.mockResolvedValue({ stdout: '= Report', stderr: '', warnings: [], files: {}, mediaFiles: {} });
+    const fetchFont = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(new Blob(['font']), { status: 200 }));
+    await new BrowserDocumentExporter().export({
+      format: 'pdf', source: '# Report', filename: 'report.qmd', typstTemplate: 'templates/report.typ', typstTemplatePartials: ['templates/page.typ'],
+      resources: [{ path: 'templates/report.typ', content: '$page()$' }, { path: 'templates/page.typ', content: 'PAGE' }],
+    });
+    expect(convert).toHaveBeenCalledWith(expect.objectContaining({ template: 'markroot-resource-1.typ' }), '# Report', expect.objectContaining({ 'page.typ': 'PAGE', 'markroot-resource-1.typ': '$page()$' }));
+    fetchFont.mockRestore();
+  });
+
+  describe('PDF compiler lifecycle', () => {
+    afterEach(() => vi.restoreAllMocks());
+
+    it('retries Typst initialization after a failure and serializes concurrent compiles', async () => {
+      convert.mockResolvedValue({ stdout: '= Report', stderr: '', warnings: [], files: {}, mediaFiles: {} });
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(new Blob(['font']), { status: 200 }));
+      vi.resetModules();
+      const { BrowserDocumentExporter: FreshExporter } = await import('./index.js');
+      const exporter = new FreshExporter();
+      typst.failInit = 1;
+      const created = typst.instances.length;
+      await expect(exporter.export({ format: 'pdf', source: '# A', filename: 'a.qmd' })).rejects.toThrow(/wasm init failed/);
+      typst.failInit = 0;
+      typst.log.length = 0;
+      const resources = [{ path: 'x.txt', content: 'x' }];
+      const results = await Promise.all([
+        exporter.export({ format: 'pdf', source: '# A', filename: 'a.qmd', resources }),
+        exporter.export({ format: 'pdf', source: '# B', filename: 'b.qmd', resources }),
+      ]);
+      expect(results.map((result) => result.blob.type)).toEqual(['application/pdf', 'application/pdf']);
+      expect(typst.instances.length - created).toBe(2);
+      expect(typst.log).toEqual(['reset', 'map /main.typ', 'map /markroot-resource-1.txt', 'pdf', 'reset', 'map /main.typ', 'map /markroot-resource-1.txt', 'pdf']);
+    });
   });
 });

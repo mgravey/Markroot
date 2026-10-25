@@ -26,6 +26,8 @@ The visual identity uses a rooted pilcrow, with a Lottie-ready After Effects sou
 - Worker-isolated HTML/DOCX export through Pandoc WASM and PDF export through Pandoc-to-Typst plus Typst WASM, including documents and resources stored in nested folders, header-selected DOCX/HTML/Typst templates, and setting-based paragraph justification when no template styling is supplied
 - Download, native Save As, and save-beside-source export targets with visible step-by-step progress and cancellation
 - Browser-only settings, local author profiles, and IndexedDB crash-recovery drafts
+- Live system/light/dark themes, global save/find shortcuts, folder-scoped async operations, and leased preview image URLs
+- App behavior composed from workspace, save, review, navigation, comment, preview, export, and Git hooks
 - Light and dark themes
 
 Markroot deliberately does not execute QMD code cells, upload files, provide accounts, or connect to Git remotes.
@@ -34,13 +36,17 @@ This is not yet a production release. Native-Git interoperability, the full Pand
 
 ## Development
 
-Requirements: Node.js 22+ and pnpm 11+.
+Requirements: Node.js 22.13+ and pnpm 11+.
 
 ```sh
 pnpm install
 pnpm dev
 pnpm check
 ```
+
+Vitest includes deterministic jsdom hook tests for serialized saves, document replacement, workspace restore/link routing, review cancellation, and preview URL lifetimes. These use React DOM directly and deferred promises.
+
+`pnpm check` runs dependency boundaries, ESLint, strict TypeScript checks, tests, and the production build. Use `pnpm lint` for type-aware promise/assertion checks and React hook rules, or `pnpm vitest run --coverage` for V8 text/HTML coverage reports in `coverage/` (no thresholds). Workspace boundaries check imports, re-exports, private paths, cycles, and unused `@markroot/*` declarations.
 
 Open the local HTTPS/localhost URL in a Chromium desktop browser. Firefox and Safari do not currently expose the required directory picker API.
 

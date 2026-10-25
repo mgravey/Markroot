@@ -5,7 +5,11 @@ import typstCompilerWasmUrl from '@myriaddreamin/typst-ts-web-compiler/wasm?url'
 import sourceSerifUrl from './assets/SourceSerif4-Regular.ttf?url';
 import justifiedReferenceDocxUrl from './assets/JustifiedReference.docx?url';
 
-let typstConfigured = false;
+type TypstSnippetInstance = InstanceType<typeof import('@myriaddreamin/typst.ts/contrib/snippet').TypstSnippet>;
+/** Lazily configured local Typst compiler; cleared when initialization fails so a later export can retry. */
+let typstCompiler: Promise<TypstSnippetInstance> | undefined;
+/** Serializes PDF compiles: the compiler's shadow file system is shared state. */
+let typstQueue: Promise<unknown> = Promise.resolve();
 
 export type ExportFormat = 'html' | 'docx' | 'pdf';
 export interface ExportResource { readonly path: string; readonly content: string | Blob }
@@ -18,6 +22,8 @@ export interface ExportRequest {
   readonly htmlTemplate?: string;
   readonly htmlCss?: readonly string[];
   readonly typstTemplate?: string;
+  /** Template partials, exposed to Pandoc beside the (flattened) template under their file names. */
+  readonly typstTemplatePartials?: readonly string[];
   readonly justified?: boolean;
 }
 export interface ExportResult { readonly format: ExportFormat; readonly blob: Blob; readonly filename: string; readonly warnings: readonly string[] }
@@ -86,37 +92,25 @@ export class BrowserDocumentExporter implements Exporter {
       }
       context?.onProgress?.({ phase: 'pandoc', completed: 1, total, message: 'Converting Markdown to Typst' });
       const typstTemplate = mappedPath(request.typstTemplate, prepared);
-      const typstResult = await convert({ from: 'markdown+fenced_divs+tex_math_dollars', to: 'typst', standalone: true, citeproc: true, ...(typstTemplate ? { template: typstTemplate } : {}) }, prepared.source, prepared.files) as PandocResult;
+      const typstFiles = typstTemplate ? withTemplatePartials(prepared, request.typstTemplatePartials ?? []) : prepared.files;
+      const typstResult = await convert({ from: 'markdown+fenced_divs+tex_math_dollars', to: 'typst', standalone: true, citeproc: true, ...(typstTemplate ? { template: typstTemplate } : {}) }, prepared.source, typstFiles) as PandocResult;
       const convertedTypstSource = requirePandocText(typstResult, 'Typst');
       const typstSource = request.justified !== undefined && !typstTemplate ? `#set par(justify: ${request.justified})\n${convertedTypstSource}` : convertedTypstSource;
       throwIfAborted(context);
       context?.onProgress?.({ phase: 'typst', completed: 2, total, message: 'Compiling PDF locally' });
-      const [{ $typst, MemoryAccessModel }, { TypstSnippet }] = await Promise.all([
-        import('@myriaddreamin/typst.ts'),
-        import('@myriaddreamin/typst.ts/contrib/snippet'),
-      ]);
-      if (!typstConfigured) {
-        const fontResponse = await fetch(sourceSerifUrl);
-        if (!fontResponse.ok) throw new Error(`Bundled PDF font could not be loaded (${fontResponse.status}).`);
-        const font = new Uint8Array(await fontResponse.arrayBuffer());
-        $typst.use(
-          TypstSnippet.withAccessModel(new MemoryAccessModel()),
-          TypstSnippet.preloadFontData(font),
-        );
-        $typst.setCompilerInitOptions({
-          getModule: () => typstCompilerWasmUrl,
-        });
-        typstConfigured = true;
-      }
-      await $typst.resetShadow();
-      await $typst.mapShadow('/main.typ', new TextEncoder().encode(typstSource));
-      for (const [path, content] of Object.entries(prepared.files)) {
-        const bytes = typeof content === 'string'
-          ? new TextEncoder().encode(content)
-          : new Uint8Array(await content.arrayBuffer());
-        await $typst.mapShadow(`/${path}`, bytes);
-      }
-      const pdf = await $typst.pdf({ mainFilePath: '/main.typ' });
+      const pdf = await serializeTypst(async () => {
+        const typst = await loadTypstCompiler();
+        throwIfAborted(context);
+        await typst.resetShadow();
+        await typst.mapShadow('/main.typ', new TextEncoder().encode(typstSource));
+        for (const [path, content] of Object.entries(prepared.files)) {
+          const bytes = typeof content === 'string'
+            ? new TextEncoder().encode(content)
+            : new Uint8Array(await content.arrayBuffer());
+          await typst.mapShadow(`/${path}`, bytes);
+        }
+        return typst.pdf({ mainFilePath: '/main.typ' });
+      });
       if (!pdf?.byteLength) throw new Error('Typst did not return a PDF document.');
       throwIfAborted(context);
       const copied = new Uint8Array(pdf.byteLength);
@@ -128,6 +122,43 @@ export class BrowserDocumentExporter implements Exporter {
       throw new MarkrootError('EXPORT_ERROR', `${request.format.toUpperCase()} export failed: ${detail}`, undefined, { cause });
     }
   }
+}
+
+function serializeTypst<T>(task: () => Promise<T>): Promise<T> {
+  const run = typstQueue.then(task, task);
+  typstQueue = run.catch(() => undefined);
+  return run;
+}
+
+function loadTypstCompiler(): Promise<TypstSnippetInstance> {
+  typstCompiler ??= (async () => {
+    const [{ MemoryAccessModel }, { TypstSnippet }] = await Promise.all([
+      import('@myriaddreamin/typst.ts'),
+      import('@myriaddreamin/typst.ts/contrib/snippet'),
+    ]);
+    const fontResponse = await fetch(sourceSerifUrl);
+    if (!fontResponse.ok) throw new Error(`Bundled PDF font could not be loaded (${fontResponse.status}).`);
+    const font = new Uint8Array(await fontResponse.arrayBuffer());
+    const typst = new TypstSnippet();
+    typst.use(TypstSnippet.withAccessModel(new MemoryAccessModel()), TypstSnippet.preloadFontData(font));
+    typst.setCompilerInitOptions({ getModule: () => typstCompilerWasmUrl });
+    await typst.getCompiler();
+    return typst;
+  })();
+  const pending = typstCompiler;
+  pending.catch(() => { if (typstCompiler === pending) typstCompiler = undefined; });
+  return pending;
+}
+
+/** Pandoc resolves `$name()$` partials beside the template, which is flattened to the root of the virtual file system. */
+function withTemplatePartials(prepared: PreparedPandocInput, partials: readonly string[]): Readonly<Record<string, string | Blob>> {
+  const files = { ...prepared.files };
+  for (const partial of partials) {
+    const mapped = prepared.paths.get(partial);
+    const name = partial.replaceAll('\\', '/').split('/').at(-1);
+    if (mapped && name && !(name in files)) files[name] = prepared.files[mapped]!;
+  }
+  return files;
 }
 
 function mappedPath(path: string | undefined, prepared: PreparedPandocInput): string | undefined {
@@ -152,9 +183,42 @@ export function preparePandocInput(source: string, resources: readonly ExportRes
     paths.set(resource.path, filename);
     files[filename] = resource.content;
   }
-  const replacements = [...paths.entries()].sort(([left], [right]) => right.length - left.length);
-  const rewritten = replacements.reduce((value, [path, filename]) => value.replaceAll(path, filename), source);
-  return { source: rewritten, files, paths };
+  return { source: paths.size ? rewriteResourceReferences(source, paths) : source, files, paths };
+}
+
+/**
+ * Rewrites resource references only where Pandoc reads them as paths: link and image
+ * destinations, reference definitions, raw HTML src/href attributes and front-matter
+ * scalar values. Prose and fenced code are left untouched.
+ */
+function rewriteResourceReferences(source: string, paths: ReadonlyMap<string, string>): string {
+  const lines = source.match(/[^\r\n]*(?:\r\n|\r|\n|$)/g)?.filter(Boolean) ?? [];
+  const lookup = (reference: string) => paths.get(reference) ?? paths.get(reference.replace(/^\.\//, ''));
+  const destination = (reference: string) => {
+    const unwrapped = /^<([^>]*)>$/.exec(reference)?.[1];
+    const mapped = lookup(unwrapped ?? reference);
+    return mapped ? (unwrapped !== undefined ? `<${mapped}>` : mapped) : reference;
+  };
+  const frontmatterEnd = lines[0]?.trim() === '---' && lines[1]?.trim()
+    ? lines.findIndex((line, index) => index > 0 && /^(?:---|\.\.\.)$/.test(line.trim()))
+    : -1;
+  let fence: string | undefined;
+  return lines.map((line, index) => {
+    if (index < frontmatterEnd) {
+      return line.replace(/^(\s*(?:-\s+)?(?:[^\s:#][^:#]*:\s+)?)(\[[^\]]*\]|(["'])(.*?)\3|[^\s#\[][^#]*?)(\s*(?:#.*)?\r?\n?)$/, (whole, prefix: string, value: string, quote: string | undefined, quoted: string | undefined, suffix: string) => {
+        if (value.startsWith('[')) return `${prefix}[${value.slice(1, -1).split(',').map((item) => item.replace(/^(\s*)(["']?)(.*?)\2(\s*)$/, (entry, before: string, mark: string, inner: string, after: string) => { const mapped = lookup(inner); return mapped ? `${before}${mark}${mapped}${mark}${after}` : entry; })).join(',')}]${suffix}`;
+        const mapped = lookup(quote ? quoted! : value);
+        return mapped ? `${prefix}${quote ?? ''}${mapped}${quote ?? ''}${suffix}` : whole;
+      });
+    }
+    const fenceMatch = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (fence) { if (fenceMatch && fenceMatch[1]![0] === fence[0] && fenceMatch[1]!.length >= fence.length && !line.slice(fenceMatch[0].length).trim()) fence = undefined; return line; }
+    if (fenceMatch) { fence = fenceMatch[1]; return line; }
+    return line
+      .replace(/(\]\(\s*)(<[^>\r\n]*>|[^\s()<>]+(?:\([^\s()]*\)[^\s()]*)*)/g, (_whole, before: string, reference: string) => `${before}${destination(reference)}`)
+      .replace(/^( {0,3}\[[^\]]+\]:\s*)(<[^>\r\n]*>|\S+)/, (_whole, before: string, reference: string) => `${before}${destination(reference)}`)
+      .replace(/(<[A-Za-z][^>]*?\b(?:src|href)\s*=\s*)(["'])([^"']*)\2/g, (whole, before: string, quote: string, reference: string) => { const mapped = lookup(reference); return mapped ? `${before}${quote}${mapped}${quote}` : whole; });
+  }).join('');
 }
 
 export function exportFilename(filename: string, format: ExportFormat): string {

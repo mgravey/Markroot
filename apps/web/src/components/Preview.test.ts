@@ -35,3 +35,15 @@ describe('preview local resources', () => {
     expect(mapSourceOffset(source, rendered, source.indexOf('carefully written') + 'carefully written'.length)).toBe(to);
   });
 });
+
+describe('preview workspace links', () => {
+  it('resolves document-relative links inside the folder only', async () => {
+    const { resolveWorkspaceLink } = await import('./preview-utils.js');
+    expect(resolveWorkspaceLink('chapter2.md', 'docs/chapter1.md')).toEqual({ path: 'docs/chapter2.md' });
+    expect(resolveWorkspaceLink('../notes/a%20b.qmd?x=1#sec-intro', 'docs/chapter1.md')).toEqual({ path: 'notes/a b.qmd', fragment: 'sec-intro' });
+    expect(resolveWorkspaceLink('../../outside.md', 'docs/chapter1.md')).toBeUndefined();
+    expect(resolveWorkspaceLink('https://example.org', 'a.md')).toBeUndefined();
+    expect(resolveWorkspaceLink('javascript:alert(1)', 'a.md')).toBeUndefined();
+    expect(resolveWorkspaceLink('#local', 'a.md')).toBeUndefined();
+  });
+});

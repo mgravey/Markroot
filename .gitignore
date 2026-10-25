@@ -25,7 +25,8 @@ vite.config.*.timestamp-*
 .rollup.cache/
 .pandoc-work/
 .cache/
-.eslintcache
+# Local ESLint caches, including alternate cache filenames
+.eslintcache*
 *.tsbuildinfo
 .DS_Store
 # Local export outputs
@@ -63,3 +64,8 @@ Adobe After Effects Auto-Save/
 !.markroot/
 !.markroot/comments/
 !.markroot/comments/**
+
+# Local hook/refactor diagnostics
+.markroot-hook-debug/
+# Local deterministic hook-test traces
+.markroot-hook-tests/

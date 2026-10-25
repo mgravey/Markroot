@@ -1,14 +1,15 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import { basicSetup } from 'codemirror';
 import { markdown } from '@codemirror/lang-markdown';
 import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
 import { SearchQuery, setSearchQuery } from '@codemirror/search';
-import { Compartment, EditorState, RangeSet, RangeSetBuilder, StateEffect, StateField, type Extension, type Text } from '@codemirror/state';
+import { Compartment, EditorState, Transaction, RangeSet, RangeSetBuilder, StateEffect, StateField, type Extension, type Text } from '@codemirror/state';
 import { Decoration, EditorView, GutterMarker, WidgetType, gutter, keymap, type DecorationSet } from '@codemirror/view';
 import { tags } from '@lezer/highlight';
 import { documentBlockAt, type DocumentBlock } from '@markroot/document';
 import { relativeWorkspaceReference, type SourceRange, type WorkspacePath } from '@markroot/core';
-import { isScrollKey, ScrollIntentGate, viewportCenter } from './scroll-sync.js';
+import { blockProgress, isScrollKey, ScrollIntentGate, viewportCenter } from './scroll-sync.js';
+import { fontStack, type ViewerFont } from './dom-utils.js';
 import { editorLineChanges, type EditorLineChange, type EditorLineChangeKind } from '../editor-line-changes.js';
 import { editorTrackChanges, type EditorTrackChange } from '../editor-track-changes.js';
 
@@ -25,7 +26,7 @@ interface Props {
   search: string;
   regularExpression: boolean;
   dark: boolean;
-  fontFamily: 'serif' | 'sans' | 'mono';
+  fontFamily: ViewerFont;
   fontSize: number;
   activeBlock?: string | undefined;
   scrollTarget?: string | undefined;
@@ -49,8 +50,8 @@ export function SourceEditor(props: Props) {
   const appearance = useRef(new Compartment());
   const editing = useRef(new Compartment());
   const latest = useRef(props);
-  const lineChanges = useMemo(() => editorLineChanges(props.comparisonBase, props.value), [props.comparisonBase, props.value]);
-  const trackChanges = useMemo(() => props.showTrackChanges ? props.trackChangesOverride ?? editorTrackChanges(props.comparisonBase, props.value) : [], [props.showTrackChanges, props.trackChangesOverride, props.comparisonBase, props.value]);
+  const emitted = useRef<string | undefined>(undefined);
+  const diffed = useRef<{ value?: string; doc?: Text; base?: string | undefined; trackDoc?: Text; trackBase?: string | undefined; track: readonly EditorTrackChange[] }>({ track: [] });
   latest.current = props;
 
   useEffect(() => {
@@ -64,7 +65,11 @@ export function SourceEditor(props: Props) {
         { key: 'Mod-f', preventDefault: true, run: () => { latest.current.onFind(); return true; } },
       ]),
       EditorView.updateListener.of((update) => {
-        if (update.docChanged && !changing.current) latest.current.onChange(update.state.doc.toString());
+        if (update.docChanged && !changing.current) {
+          const next = update.state.doc.toString();
+          emitted.current = next;
+          latest.current.onChange(next);
+        }
         if (update.selectionSet) {
           const selection = update.state.selection.main;
           latest.current.onSelection({ from: selection.from, to: selection.to });
@@ -117,7 +122,7 @@ export function SourceEditor(props: Props) {
         const position = editor.posAtCoords({ x: viewport.left + Math.min(80, viewport.width / 2), y: viewportCenter(viewport) }) ?? editor.viewport.from;
         const block = documentBlockAt(latest.current.blocks, position);
         if (!block) return;
-        latest.current.onScroll(block.id, Math.max(0, Math.min(1, (position - block.from) / Math.max(1, block.to - block.from))));
+        latest.current.onScroll(block.id, blockProgress(position, block));
       });
     };
     const beginPointer = () => scrollIntent.current.beginPointer();
@@ -144,6 +149,7 @@ export function SourceEditor(props: Props) {
       editor.destroy();
       view.current = undefined;
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- Create one editor per mount; effects below synchronize content, appearance and editability.
   }, []);
 
   useEffect(() => {
@@ -156,22 +162,50 @@ export function SourceEditor(props: Props) {
 
   useEffect(() => {
     const editor = view.current;
-    if (!editor) return;
+    // The common typing echo: the parent hands back the exact string this editor just emitted.
+    if (!editor || props.value === emitted.current) return;
+    // Forget the echo once the parent diverges, so a later external value equal to an old emission still syncs.
+    emitted.current = undefined;
     const previous = editor.state.doc.toString();
     if (previous === props.value) return;
     const change = minimalDocumentChange(previous, props.value);
     changing.current = true;
-    editor.dispatch({ changes: change });
+    // External syncs (file loads, visual edits, review decisions) must not become undoable local edits.
+    editor.dispatch({ changes: change, annotations: Transaction.addToHistory.of(false) });
     changing.current = false;
   }, [props.value]);
 
   useEffect(() => {
-    view.current?.dispatch({ effects: setLineChanges.of(lineChanges) });
-  }, [lineChanges]);
-
-  useEffect(() => {
-    view.current?.dispatch({ effects: setTrackChanges.of({ changes: trackChanges, active: props.activeTrackChange }) });
-  }, [trackChanges, props.activeTrackChange]);
+    const editor = view.current;
+    if (!editor) return;
+    // Diffs against HEAD are recomputed from the live document; while typing they are debounced and the
+    // existing decorations are mapped through each change so they stay anchored until the refresh lands.
+    const refresh = () => {
+      const { comparisonBase, showTrackChanges, trackChangesOverride, activeTrackChange } = latest.current;
+      const doc = editor.state.doc;
+      const cache = diffed.current;
+      let text: string | undefined;
+      const source = () => text ??= doc.toString();
+      const effects: StateEffect<unknown>[] = [];
+      if (cache.doc !== doc || cache.base !== comparisonBase) {
+        Object.assign(cache, { doc, base: comparisonBase });
+        effects.push(setLineChanges.of(editorLineChanges(comparisonBase, source())));
+      }
+      let track: readonly EditorTrackChange[] = [];
+      if (showTrackChanges && trackChangesOverride) track = trackChangesOverride;
+      else if (showTrackChanges) {
+        if (cache.trackDoc !== doc || cache.trackBase !== comparisonBase) Object.assign(cache, { trackDoc: doc, trackBase: comparisonBase, track: editorTrackChanges(comparisonBase, source()) });
+        track = cache.track;
+      }
+      effects.push(setTrackChanges.of({ changes: track, active: activeTrackChange }));
+      editor.dispatch({ effects });
+    };
+    const typing = diffed.current.value !== undefined && diffed.current.value !== props.value && !props.trackChangesOverride;
+    diffed.current.value = props.value;
+    if (!typing) { refresh(); return; }
+    const timer = window.setTimeout(refresh, DECORATION_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [props.value, props.comparisonBase, props.showTrackChanges, props.trackChangesOverride, props.activeTrackChange]);
 
   useEffect(() => {
     view.current?.dispatch({ effects: setActiveTrackChange.of(props.activeTrackChange) });
@@ -231,6 +265,8 @@ export function SourceEditor(props: Props) {
   return <div className="source-editor" ref={host} aria-label="Markdown source editor" />;
 }
 
+const DECORATION_DEBOUNCE_MS = 250;
+
 function minimalDocumentChange(previous: string, next: string): { readonly from: number; readonly to: number; readonly insert: string } {
   let from = 0;
   const shared = Math.min(previous.length, next.length);
@@ -259,7 +295,7 @@ const setLineChanges = StateEffect.define<readonly EditorLineChange[]>();
 
 class LineChangeMarker extends GutterMarker {
   constructor(readonly kind: EditorLineChangeKind) { super(); }
-  toDOM() {
+  override toDOM() {
     const marker = document.createElement('span');
     marker.className = `cm-line-change-marker ${this.kind}`;
     marker.title = `${this.kind[0]!.toUpperCase()}${this.kind.slice(1)} line compared with HEAD`;
@@ -287,7 +323,7 @@ const setActiveTrackChange = StateEffect.define<ActiveTrackChange | undefined>()
 
 class DeletedTextWidget extends WidgetType {
   constructor(readonly value: string, readonly active: boolean, readonly changeId?: string) { super(); }
-  eq(other: DeletedTextWidget) { return this.value === other.value && this.active === other.active && this.changeId === other.changeId; }
+  override eq(other: DeletedTextWidget) { return this.value === other.value && this.active === other.active && this.changeId === other.changeId; }
   toDOM() {
     const deleted = document.createElement('span');
     deleted.className = `cm-track-delete${this.active ? ' cm-review-active' : ''}`;
@@ -296,7 +332,7 @@ class DeletedTextWidget extends WidgetType {
     if (this.changeId) deleted.dataset.reviewChangeId = this.changeId;
     return deleted;
   }
-  ignoreEvent() { return true; }
+  override ignoreEvent() { return true; }
 }
 
 const trackChangesField = StateField.define<DecorationSet>({
@@ -398,12 +434,6 @@ function positionCentered(editor: EditorView, position: number): boolean {
   const viewport = editor.scrollDOM.getBoundingClientRect();
   const positionCenter = (coords.top + coords.bottom) / 2;
   return Math.abs(positionCenter - viewportCenter(viewport)) <= 1;
-}
-
-function fontStack(font: Props['fontFamily']): string {
-  if (font === 'serif') return '"Source Serif 4", Georgia, serif';
-  if (font === 'sans') return '"Manrope", system-ui, sans-serif';
-  return '"IBM Plex Mono", "SFMono-Regular", Consolas, monospace';
 }
 
 function markdownPathAtCursor(source: string, offset: number, path: string): string {

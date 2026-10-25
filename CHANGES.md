@@ -1,5 +1,13 @@
 # Changes
 
+## Strict lint and compiler checks
+
+- Added flat-config ESLint with type-aware promise/thenable/assertion checks and React hook rules, integrated immediately after dependency boundaries in `pnpm check`.
+- Enabled switch fallthrough, override, and unused binding checks in every package/app through the shared TypeScript base; removed dead code and redundant assertions.
+- Updated effect dependencies and delayed folder-restore/focus-error callbacks while preserving deliberate editor and review-rendering lifetimes with targeted explanations.
+- Added the version-matched Vitest V8 coverage provider without thresholds.
+- Parsed workspace imports and re-exports with TypeScript for boundary/cycle checks, rejected unused workspace dependency declarations, and added checker regression tests.
+
 ## YAML comment sidecars
 
 - Replaced embedded comment writing with Git-tracked `.markroot/comments/<thread-id>/thread.yaml` and independent YAML reply files, keeping Markdown clean and concurrent replies mergeable.
@@ -65,3 +73,18 @@
 - Initialized the browser `Buffer` implementation required by isomorphic-git's ESM bundle, fixing the `Buffer is not defined` repository startup failure.
 - Added a live detachable visual/rendered viewer for second-window and multi-monitor workflows, including reattach/focus controls and cross-window-safe navigation, scrolling, figures, search, typography, and visual editing.
 - Added workspace dependency-boundary and cycle enforcement.
+
+## Review fixes: app composition and lifetimes
+
+- Extract workspace/document loading, serialized saves, and pane navigation from App.
+- Guard queued saves and asynchronous completions against document/folder replacement; preserve dirty revisions and recovery drafts during saves.
+- Lease cached image URLs across artifacts and release after DOM replacement; stop resource reads on cancellation.
+- Cancel reviews on unmount/document loads, check stale review application, and clean up worker post failures.
+- Clear repository state on folder replacement; close AI preparation sessions on early exits.
+
+## Review fixes: regression tests
+
+- Exercise serialized saves, edits during writes, and stale queued/completed saves using deferred workspace writes.
+- Verify restored settings precede folder connection and resolved nested links reach the document loader.
+- Check shared URL leases across image versions/folder cache clears and DOM replacement/unmount.
+- Verify comparison supersession/unmount, too-large notices, attribution aborts, and worker post failures.

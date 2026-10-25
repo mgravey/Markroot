@@ -1,5 +1,5 @@
 import type { AuthorIdentity, SourceRange } from '@markroot/core';
-export { CommentStore } from './store.js';
+export { CommentStore, type BrokenCommentThread, type CommentLoadResult } from './store.js';
 
 const THREAD_BLOCK = /\n?<!-- markroot:threads:v1\n([\s\S]*?)\n-->\s*$/;
 const ANCHOR = /<!-- markroot:anchor:v1 id=([0-9a-f-]+) edge=(start|end) -->/g;
@@ -75,7 +75,7 @@ export function locateComments(source: string, threads: readonly CommentThread[]
     if (range) ranges.set(thread.id, range); else orphans.push(thread.id);
     if (thread.status === 'resolved') {
       const resolvedRange = thread.resolution && locateSelector(source, thread.resolution.selector);
-      if (!resolvedRange || !matchesContext(source, resolvedRange.from, thread.resolution!.selector)) needsReview.push(thread.id);
+      if (!resolvedRange || !matchesContext(source, resolvedRange.from, thread.resolution.selector)) needsReview.push(thread.id);
     }
   }
   return { cleanSource: source, threads, ranges, orphans, needsReview };

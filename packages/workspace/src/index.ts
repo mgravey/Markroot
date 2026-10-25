@@ -133,7 +133,7 @@ export class MemoryWorkspace implements GuardedWorkspace {
     parts.pop();
     let current = '';
     for (const part of parts) {
-      current = current ? `${current}/${part}` : part!;
+      current = current ? `${current}/${part}` : part;
       if (!this.nodes.has(current)) this.nodes.set(current, { kind: 'directory', modifiedAt: this.clock++ });
     }
   }
@@ -144,6 +144,7 @@ interface PermissionCapableHandle {
   queryPermission?(options: { mode: PermissionMode }): Promise<PermissionState>;
   requestPermission?(options: { mode: PermissionMode }): Promise<PermissionState>;
 }
+interface MovableHandle { move?(parent: FileSystemDirectoryHandle, name: string): Promise<void> }
 interface IterableDirectoryHandle extends FileSystemDirectoryHandle {
   entries(): AsyncIterableIterator<[string, FileSystemHandle]>;
   removeEntry(name: string, options?: FileSystemRemoveOptions): Promise<void>;
@@ -157,9 +158,18 @@ export async function ensureDirectoryPermission(root: FileSystemDirectoryHandle,
   return await handle.requestPermission?.(options) ?? 'denied';
 }
 
+export interface FileSystemAccessWorkspaceOptions {
+  /** Stable workspace identity (e.g. settings' workspaceIdFor); folder names are not unique. */
+  readonly id?: string;
+}
+
 export class FileSystemAccessWorkspace implements GuardedWorkspace {
   readonly lockName: string;
-  constructor(readonly root: FileSystemDirectoryHandle) { this.lockName = `markroot:workspace:${root.name}`; }
+  /** Entries the browser listed but no workspace path can represent (e.g. names containing `\`). */
+  readonly skippedEntries = new Set<string>();
+  /** Content hashes of files as last read or written, keyed by their coarse `mtime:size` version. */
+  private readonly knownContent = new Map<string, { readonly version: string; readonly hash: string }>();
+  constructor(readonly root: FileSystemDirectoryHandle, options: FileSystemAccessWorkspaceOptions = {}) { this.lockName = `markroot:workspace:${options.id ?? root.name}`; }
 
   async listFiles(path?: WorkspacePath, context?: OperationContext): Promise<readonly WorkspaceEntry[]> {
     const dir = await this.directory(path, false, context);
@@ -167,23 +177,32 @@ export class FileSystemAccessWorkspace implements GuardedWorkspace {
     try {
       for await (const [name, handle] of (dir as IterableDirectoryHandle).entries()) {
         throwIfAborted(context);
-        entries.push({ path: workspacePath(path ? `${path}/${name}` : name), kind: handle.kind });
+        const raw = path ? `${path}/${name}` : name;
+        // workspacePath() would rewrite `a\b` to `a/b`; skip names that cannot round-trip instead of failing the listing.
+        if (name.includes('\\') || name.includes('/') || name === '.' || name === '..') { this.skippedEntries.add(raw); continue; }
+        entries.push({ path: workspacePath(raw), kind: handle.kind });
       }
     } catch (cause) { throw mapFsError(cause, path ?? ('.' as WorkspacePath)); }
     return entries.sort((a, b) => a.path.localeCompare(b.path));
   }
 
+  /** Text reads (documents, sidecars) remember a content hash for guarded writes; binary/Git reads do not pay for it. */
   async readFile(path: WorkspacePath, context?: OperationContext): Promise<string> {
-    return new TextDecoder().decode(await this.readBytes(path, context));
+    const { bytes, file } = await this.read(path, context);
+    this.knownContent.set(path, { version: fileVersion(file), hash: await contentHash(bytes) });
+    return new TextDecoder().decode(bytes);
   }
 
-  async readBytes(path: WorkspacePath, context?: OperationContext): Promise<Uint8Array> {
+  async readBytes(path: WorkspacePath, context?: OperationContext): Promise<Uint8Array> { return (await this.read(path, context)).bytes; }
+
+  private async read(path: WorkspacePath, context?: OperationContext): Promise<{ readonly bytes: Uint8Array; readonly file: File }> {
     throwIfAborted(context);
     try {
       const handle = await this.fileHandle(path, false, context);
-      const bytes = new Uint8Array(await (await handle.getFile()).arrayBuffer());
+      const file = await handle.getFile();
+      const bytes = new Uint8Array(await file.arrayBuffer());
       throwIfAborted(context);
-      return bytes;
+      return { bytes, file };
     } catch (cause) { throw mapFsError(cause, path); }
   }
 
@@ -202,7 +221,7 @@ export class FileSystemAccessWorkspace implements GuardedWorkspace {
       const handle = await this.fileHandle(path, true, context);
       const writable = await handle.createWritable();
       try {
-        await writable.write(content.slice() as FileSystemWriteChunkType);
+        await writable.write(content.slice());
         throwIfAborted(context);
         await writable.close();
       } catch (cause) { await writable.abort(cause).catch(() => undefined); throw cause; }
@@ -215,9 +234,18 @@ export class FileSystemAccessWorkspace implements GuardedWorkspace {
       if (expectedVersion !== undefined) {
         const current = await this.stat(path, context);
         if (current.version !== expectedVersion) throw new MarkrootError('CONFLICT', `File changed outside Markroot: ${path}`);
+        // `mtime:size` misses same-size edits within the timestamp resolution; re-check the content we last saw.
+        const known = this.knownContent.get(path);
+        if (known?.version === expectedVersion) {
+          const file = await (await this.fileHandle(path, false, context)).getFile();
+          if (await contentHash(new Uint8Array(await file.arrayBuffer())) !== known.hash) throw new MarkrootError('CONFLICT', `File changed outside Markroot: ${path}`);
+        }
       }
-      await this.writeFile(path, content, context);
-      return this.stat(path, context);
+      const bytes = new TextEncoder().encode(content);
+      await this.writeBytes(path, bytes, context);
+      const stat = await this.stat(path, context);
+      if (stat.version) this.knownContent.set(path, { version: stat.version, hash: await contentHash(bytes) });
+      return stat;
     });
   }
 
@@ -226,7 +254,7 @@ export class FileSystemAccessWorkspace implements GuardedWorkspace {
     try {
       const handle = await this.fileHandle(path, false, context);
       const file = await handle.getFile();
-      return { path, kind: 'file', size: file.size, modifiedAt: file.lastModified, version: `${file.lastModified}:${file.size}` };
+      return { path, kind: 'file', size: file.size, modifiedAt: file.lastModified, version: fileVersion(file) };
     } catch (error) {
       if (!(error instanceof MarkrootError && error.code === 'NOT_FOUND') && !hasDomExceptionName(error, 'TypeMismatchError')) throw error;
     }
@@ -246,20 +274,21 @@ export class FileSystemAccessWorkspace implements GuardedWorkspace {
 
   async move(source: WorkspacePath, destination: WorkspacePath, options?: Readonly<{ overwrite?: boolean }>, context?: OperationContext): Promise<void> {
     if (source === destination || destination.startsWith(`${source}/`)) throw new MarkrootError('INVALID_PATH', 'Cannot move an entry into itself.');
+    const { kind } = await this.stat(source, context);
     let targetExists = true;
     try { await this.stat(destination, context); } catch (error) {
       if (error instanceof MarkrootError && error.code === 'NOT_FOUND') targetExists = false;
       else throw error;
     }
     if (targetExists && !options?.overwrite) throw new MarkrootError('CONFLICT', `Entry exists: ${destination}`);
-    if (targetExists) await this.remove(destination, { recursive: true }, context);
-    const sourceStat = await this.stat(source, context);
-    if (sourceStat.kind === 'file') await this.writeBytes(destination, await this.readBytes(source, context), context);
-    else {
-      await this.createDirectory(destination, { recursive: true }, context);
-      await this.copyChildren(source, destination, context);
-    }
-    await this.remove(source, { recursive: true }, context);
+    const [parent, name] = splitPath(destination);
+    if (parent) await this.createDirectory(parent, { recursive: true }, context);
+    if (!targetExists) return this.relocate(source, kind, destination, context);
+    // Never delete the destination before the source is safely staged beside it.
+    const staging = workspacePath(`${parent ? `${parent}/` : ''}.${name}.markroot-move-${crypto.randomUUID()}`);
+    await this.relocate(source, kind, staging, context);
+    await this.remove(destination, { recursive: true }, context);
+    await this.relocate(staging, kind, destination, context);
   }
 
   async remove(path: WorkspacePath, options?: Readonly<{ recursive?: boolean }>, context?: OperationContext): Promise<void> {
@@ -269,12 +298,37 @@ export class FileSystemAccessWorkspace implements GuardedWorkspace {
     catch (cause) { throw mapFsError(cause, path); }
   }
 
-  private async copyChildren(source: WorkspacePath, destination: WorkspacePath, context?: OperationContext): Promise<void> {
-    for (const entry of await this.listFiles(source, context)) {
-      const suffix = entry.path.slice(source.length + 1);
-      const target = workspacePath(`${destination}/${suffix}`);
-      if (entry.kind === 'file') await this.writeBytes(target, await this.readBytes(entry.path, context), context);
-      else { await this.createDirectory(target, { recursive: true }, context); await this.copyChildren(entry.path, target, context); }
+  /** Native FileSystemHandle.move() when available; otherwise copy, then delete the source. */
+  private async relocate(source: WorkspacePath, kind: WorkspaceEntryKind, destination: WorkspacePath, context?: OperationContext): Promise<void> {
+    const handle: FileSystemHandle & MovableHandle = kind === 'file' ? await this.fileHandle(source, false, context) : await this.directory(source, false, context);
+    if (typeof handle.move === 'function') {
+      const [parent, name] = splitPath(destination);
+      try { await handle.move(await this.directory(parent, false, context), name); this.knownContent.delete(source); return; }
+      catch (cause) { if (!hasDomExceptionName(cause, 'NotSupportedError') && !(cause instanceof TypeError)) throw mapFsError(cause, source); }
+    }
+    if (kind === 'file') await this.writeBytes(destination, await this.readBytes(source, context), context);
+    else { await this.createDirectory(destination, { recursive: true }, context); await this.copyChildren(await this.directory(source, false, context), await this.directory(destination, false, context), context); }
+    await this.remove(source, { recursive: true }, context);
+    this.knownContent.delete(source);
+  }
+
+  /** Raw handles preserve names listFiles intentionally hides; never delete a partially copied source. */
+  private async copyChildren(source: FileSystemDirectoryHandle, destination: FileSystemDirectoryHandle, context?: OperationContext): Promise<void> {
+    for await (const [name, entry] of (source as IterableDirectoryHandle).entries()) {
+      throwIfAborted(context);
+      if (entry.kind === 'directory') {
+        await this.copyChildren(await source.getDirectoryHandle(name), await destination.getDirectoryHandle(name, { create: true }), context);
+      } else {
+        const file = await (await source.getFileHandle(name)).getFile();
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        throwIfAborted(context);
+        const writable = await (await destination.getFileHandle(name, { create: true })).createWritable();
+        try {
+          await writable.write(bytes);
+          throwIfAborted(context);
+          await writable.close();
+        } catch (cause) { await writable.abort(cause).catch(() => undefined); throw cause; }
+      }
     }
   }
 
@@ -319,6 +373,12 @@ function mapFsError(cause: unknown, path: WorkspacePath): MarkrootError {
   if (name === 'NotAllowedError' || name === 'SecurityError') return new MarkrootError('PERMISSION_DENIED', `Permission denied: ${path}`, undefined, { cause });
   if (cause instanceof MarkrootError) return cause;
   return new MarkrootError('WORKSPACE_ERROR', `Workspace operation failed: ${path}`, undefined, { cause });
+}
+
+function fileVersion(file: File): string { return `${file.lastModified}:${file.size}`; }
+async function contentHash(bytes: Uint8Array): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes.slice()));
+  return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
 function hasDomExceptionName(error: unknown, name: string): boolean {

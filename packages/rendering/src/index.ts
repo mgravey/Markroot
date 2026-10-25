@@ -1,11 +1,13 @@
 import MarkdownIt from 'markdown-it';
 import katex from 'katex';
 import { stripCommentMarkup } from '@markroot/comments';
-import { MarkrootError, throwIfAborted, type OperationContext } from '@markroot/core';
-import type { DocumentSnapshot } from '@markroot/document';
+import { throwIfAborted, type OperationContext } from '@markroot/core';
+import { closesCodeFence, mapDocumentBlocks, splitLines, type DocumentBlockKind, type DocumentSnapshot } from '@markroot/document';
 
-export interface RenderDependency { readonly path: string; readonly content: string | Blob }
-export interface RenderCitation { readonly key: string; readonly title?: string; readonly author?: string; readonly year?: string; readonly doi?: string }
+export interface RenderDependency { readonly path: string; readonly content: string | Blob; /** Borrowed URL; the caller owns its lifetime. */ readonly objectUrl?: string }
+export type RenderCitationName = { readonly family: string; readonly given?: string } | { readonly literal: string };
+export interface RenderCitation { readonly key: string; readonly title?: string; readonly author?: string; readonly authors?: readonly RenderCitationName[]; readonly year?: string; readonly doi?: string }
+/** `allowRemoteResources` must be `true` for remote http(s) images to keep their `src`; otherwise they become placeholders. */
 export interface RenderRequest { readonly snapshot: DocumentSnapshot; readonly dependencies?: readonly RenderDependency[]; readonly citations?: readonly RenderCitation[]; readonly allowRemoteResources?: boolean }
 export interface DocumentOutlineItem {
   readonly id: string;
@@ -33,75 +35,18 @@ export interface DocumentEngine {
 
 const markdown = new MarkdownIt({ html: false, linkify: true, typographer: true, breaks: false });
 const REFERENCES_PLACEHOLDER = '<div data-markroot-references-placeholder="true"></div>';
+const RENDER_CACHE_LIMIT = 4000;
 
-export class BasicDocumentEngine implements DocumentEngine {
-  readonly id = 'markroot-basic';
-  async render(request: RenderRequest, context?: OperationContext): Promise<RenderArtifact> {
-    throwIfAborted(context);
-    const clean = stripCommentMarkup(request.snapshot.source);
-    const renderSource = maskMarkdownHtmlComments(clean);
-    const blocks = request.snapshot.blocks;
-    const resources = createResourceUrls(request.dependencies ?? []);
-    const citationMap = new Map((request.citations ?? []).map((citation) => [citation.key, citation]));
-    const state: ScholarlyState = {
-      figure: 0,
-      table: 0,
-      equation: 0,
-      sections: [0, 0, 0, 0, 0, 0],
-      citations: new Set(),
-      crossrefs: buildCrossReferences(renderSource),
-      outline: [],
-      usedIds: new Set(),
-      numberSections: frontMatterBoolean(renderSource, 'number-sections') !== false,
-    };
-    const bodyHtml = blocks
-      .filter((block) => block.kind !== 'frontmatter')
-      .map((block) => {
-        const blockSource = stripCommentMarkup(block.text);
-        const renderableBlock = block.kind === 'code' ? blockSource : maskMarkdownHtmlComments(blockSource);
-        return `<section class="mr-block mr-${block.kind}" data-block-id="${block.id}" data-source-from="${block.from}" data-source-to="${block.to}">${renderBlock(block.kind, renderableBlock, block.from, block.id, citationMap, resources.urls, state)}</section>`;
-      })
-      .join('\n');
-    const references = renderReferences(state.citations, citationMap, bodyHtml.includes(REFERENCES_PLACEHOLDER));
-    const html = bodyHtml.includes(REFERENCES_PLACEHOLDER)
-      ? bodyHtml.replace(REFERENCES_PLACEHOLDER, references).replaceAll(REFERENCES_PLACEHOLDER, '')
-      : bodyHtml + references;
-    return {
-      revision: request.snapshot.revision,
-      html,
-      warnings: [
-        ...(request.snapshot.path.endsWith('.qmd') ? findExecutableWarnings(renderSource) : []),
-        ...findMissingImageWarnings(renderSource, request.dependencies ?? []),
-      ],
-      anchors: blocks.map(({ id, from, to }) => ({ id, from, to })),
-      engine: this.id,
-      objectUrls: resources.objectUrls,
-      outline: state.outline,
-    };
-  }
-}
-
-export class PandocDocumentEngine implements DocumentEngine {
-  readonly id = 'pandoc-wasm';
-  async render(request: RenderRequest, context?: OperationContext): Promise<RenderArtifact> {
-    throwIfAborted(context);
-    try {
-      const { convert } = await import('pandoc-wasm');
-      const files = Object.fromEntries((request.dependencies ?? []).map((file) => [file.path, file.content]));
-      const clean = maskMarkdownHtmlComments(stripCommentMarkup(request.snapshot.source));
-      const result = await convert({ from: 'markdown+fenced_divs+tex_math_dollars', to: 'html5', citeproc: true, standalone: false }, clean, files);
-      throwIfAborted(context);
-      return {
-        revision: request.snapshot.revision,
-        html: typeof result.stdout === 'string' ? result.stdout : '',
-        warnings: [...result.warnings.map((warning: unknown) => typeof warning === 'string' ? warning : JSON.stringify(warning)), ...findExecutableWarnings(clean)],
-        anchors: request.snapshot.blocks.map(({ id, from, to }) => ({ id, from, to })),
-        engine: this.id,
-      };
-    } catch (cause) {
-      throw new MarkrootError('RENDER_ERROR', 'Pandoc could not render this document.', undefined, { cause });
-    }
-  }
+type OutlineDraft = Omit<DocumentOutlineItem, 'blockId'>;
+interface Counters { readonly figure: number; readonly table: number; readonly equation: number; readonly sections: readonly number[] }
+/** A block rendered at source offset 0, plus every side effect needed to replay it against the document state. */
+interface BlockRender {
+  readonly html: string;
+  readonly outline: readonly OutlineDraft[];
+  readonly citations: readonly string[];
+  readonly ids: readonly (readonly [base: string, id: string])[];
+  readonly labels: readonly (readonly [id: string, label: string])[];
+  readonly after: Counters;
 }
 
 interface ScholarlyState {
@@ -109,11 +54,138 @@ interface ScholarlyState {
   table: number;
   equation: number;
   sections: number[];
-  citations: Set<string>;
-  crossrefs: ReadonlyMap<string, string>;
-  outline: DocumentOutlineItem[];
-  usedIds: Set<string>;
-  numberSections: boolean;
+  readonly numberSections: boolean;
+  readonly usedIds: Set<string>;
+  citations: string[];
+  outline: OutlineDraft[];
+  ids: [string, string][];
+  labels: [string, string][];
+}
+
+interface RenderContext { readonly citations: ReadonlyMap<string, RenderCitation>; readonly state: ScholarlyState; readonly nested?: boolean }
+
+const citationGenerations = new WeakMap<readonly RenderCitation[], number>();
+let nextCitationGeneration = 1;
+
+export class BasicDocumentEngine implements DocumentEngine {
+  readonly id = 'markroot-basic';
+  private readonly cache = new Map<string, BlockRender>();
+
+  async render(request: RenderRequest, context?: OperationContext): Promise<RenderArtifact> {
+    throwIfAborted(context);
+    const renderSource = maskMarkdownHtmlComments(stripCommentMarkup(request.snapshot.source));
+    const blocks = request.snapshot.blocks;
+    const citationList = request.citations ?? [];
+    const citationMap = new Map(citationList.map((citation) => [citation.key, citation]));
+    if (!citationGenerations.has(citationList)) citationGenerations.set(citationList, nextCitationGeneration++);
+    const citationGeneration = citationGenerations.get(citationList)!;
+    const frontmatter = blocks.find((block) => block.kind === 'frontmatter');
+    const state: ScholarlyState = {
+      figure: 0, table: 0, equation: 0, sections: [0, 0, 0, 0, 0, 0],
+      numberSections: frontMatterBoolean(frontmatter?.text ?? '', 'number-sections') !== false,
+      usedIds: new Set(), citations: [], outline: [], ids: [], labels: [],
+    };
+    const citations = new Set<string>();
+    const outline: DocumentOutlineItem[] = [];
+    const labels = new Map<string, string>();
+    const sections: string[] = [];
+    let lastYield = Date.now();
+    for (const block of blocks) {
+      if (block.kind === 'frontmatter') continue;
+      if (Date.now() - lastYield > 12) { await new Promise((resolve) => setTimeout(resolve, 0)); lastYield = Date.now(); }
+      throwIfAborted(context);
+      const blockSource = stripCommentMarkup(block.text);
+      const renderable = block.kind === 'code' ? blockSource : maskMarkdownHtmlComments(blockSource);
+      const rendered = this.renderCached(block.kind, renderable, citationGeneration, citationMap, state);
+      rendered.citations.forEach((key) => citations.add(key));
+      rendered.outline.forEach((item) => outline.push({ ...item, blockId: block.id, from: item.from + block.from }));
+      rendered.labels.forEach(([id, label]) => { if (!labels.has(id)) labels.set(id, label); });
+      // Fallback IDs historically counted all preceding outline entries (including figures/tables).
+      const headingHtml = rendered.html.replace(/data-markroot-legacy-heading=""/g, `data-markroot-legacy-heading="mr-section-${outline.length - rendered.outline.length + 1}"`);
+      sections.push(`<section class="mr-block mr-${block.kind}" data-block-id="${block.id}" data-source-from="${block.from}" data-source-to="${block.to}">${shiftSourceOffsets(headingHtml, block.from)}</section>`);
+    }
+    const bodyHtml = sections.join('\n');
+    const explicitReferences = bodyHtml.includes(REFERENCES_PLACEHOLDER);
+    const references = renderReferences(citations, citationMap, explicitReferences);
+    let placed = false;
+    const placedHtml = explicitReferences
+      ? bodyHtml.replaceAll(REFERENCES_PLACEHOLDER, () => placed ? '' : (placed = true, references))
+      : bodyHtml + references;
+    const html = resolveCrossReferences(resolveLegacyHeadingAliases(placedHtml, state.usedIds, labels), labels);
+    const resources = createResourceUrls(request.dependencies ?? []);
+    return {
+      revision: request.snapshot.revision,
+      html: replaceResourceUrls(html, resources.urls, request.allowRemoteResources === true),
+      warnings: [
+        ...(request.snapshot.path.endsWith('.qmd') ? findExecutableWarnings(renderSource) : []),
+        ...findMissingImageWarnings(renderSource, request.dependencies ?? []),
+      ],
+      anchors: blocks.map(({ id, from, to }) => ({ id, from, to })),
+      engine: this.id,
+      objectUrls: resources.objectUrls,
+      outline,
+    };
+  }
+
+  /** Renders one block, reusing a cached result when its text and the numbering state it observes are unchanged. */
+  private renderCached(kind: DocumentBlockKind, source: string, citationGeneration: number, citations: ReadonlyMap<string, RenderCitation>, state: ScholarlyState): BlockRender {
+    const key = `${kind}\u0000${state.numberSections ? 1 : 0}:${state.figure}:${state.table}:${state.equation}:${state.sections.join('.')}:${citationGeneration}\u0000${source}`;
+    let entry = this.cache.get(key);
+    if (entry && identifiersStillResolve(entry.ids, state.usedIds)) {
+      this.cache.delete(key);
+      entry.ids.forEach(([, id]) => state.usedIds.add(id));
+    } else {
+      Object.assign(state, { citations: [], outline: [], ids: [], labels: [] });
+      const html = renderBlock(kind, source, 0, { citations, state });
+      entry = { html, outline: state.outline, citations: state.citations, ids: state.ids, labels: state.labels, after: { figure: state.figure, table: state.table, equation: state.equation, sections: [...state.sections] } };
+    }
+    this.cache.set(key, entry);
+    if (this.cache.size > RENDER_CACHE_LIMIT) this.cache.delete(this.cache.keys().next().value!);
+    Object.assign(state, { figure: entry.after.figure, table: entry.after.table, equation: entry.after.equation, sections: [...entry.after.sections] });
+    return entry;
+  }
+}
+
+function identifiersStillResolve(ids: BlockRender['ids'], used: ReadonlySet<string>): boolean {
+  const trial = new Set<string>();
+  return ids.every(([base, id]) => {
+    let candidate = base;
+    let suffix = 2;
+    while (used.has(candidate) || trial.has(candidate)) candidate = `${base}-${suffix++}`;
+    trial.add(candidate);
+    return candidate === id;
+  });
+}
+
+function shiftSourceOffsets(html: string, from: number): string {
+  return from ? html.replace(/ data-source-offset="(\d+)"/g, (_whole, offset: string) => ` data-source-offset="${Number(offset) + from}"`) : html;
+}
+
+/** Real ID spans work with Preview's querySelector and preserve block/source navigation. */
+function resolveLegacyHeadingAliases(html: string, primaryIds: ReadonlySet<string>, labels: Map<string, string>): string {
+  // Bibliography and other generated ids must be reserved as well as numbered block ids.
+  const used = new Set([...primaryIds, ...[...html.matchAll(/ id="([^"]*)"/g)].map((match) => match[1]!)]);
+  return html.replace(/<span data-markroot-legacy-heading="([^"]*)" data-primary-id="([^"]*)" data-source-offset="(\d+)"><\/span>/g, (_whole, base: string, primary: string, offset: string) => {
+    const legacy = decodeURIComponent(base);
+    const id = decodeURIComponent(primary);
+    if (legacy === id) return '';
+    let alias = legacy;
+    let suffix = 2;
+    while (used.has(alias)) alias = `${legacy}-${suffix++}`;
+    used.add(alias);
+    const label = labels.get(id);
+    if (label) labels.set(alias, label);
+    return `<span id="${escapeAttribute(alias)}" data-source-offset="${offset}" aria-hidden="true"></span>`;
+  });
+}
+
+/** Cross-references are resolved after all blocks render, from the numbers the renderer actually assigned. */
+function resolveCrossReferences(html: string, labels: ReadonlyMap<string, string>): string {
+  return html.replace(/<a class="crossref" data-xref="([^"]*)" data-source-offset="(\d+)"><\/a>/g, (_whole, encoded: string, offset: string) => {
+    const key = decodeURIComponent(encoded);
+    const label = labels.get(key);
+    return label ? `<a class="crossref" href="#${escapeAttribute(key)}" data-source-offset="${offset}">${escapeHtml(label)}</a>` : escapeHtml(`@${key}`);
+  });
 }
 
 /**
@@ -121,7 +193,7 @@ interface ScholarlyState {
  * line endings. Literal comment syntax inside inline or fenced code is kept.
  */
 export function maskMarkdownHtmlComments(source: string): string {
-  const lines = source.match(/.*(?:\r?\n|$)/g)?.filter(Boolean) ?? [];
+  const lines = splitLines(source);
   let fence: { marker: '`' | '~'; length: number } | undefined;
   let inlineTicks = 0;
   let inComment = false;
@@ -131,7 +203,7 @@ export function maskMarkdownHtmlComments(source: string): string {
     const fenceMatch = /^ {0,3}(`{3,}|~{3,})/.exec(line);
     if (!inComment && inlineTicks === 0 && fence) {
       output += line;
-      if (fenceMatch?.[1]?.[0] === fence.marker && fenceMatch[1].length >= fence.length) fence = undefined;
+      if (closesCodeFence(line, fence)) fence = undefined;
       continue;
     }
     if (!inComment && inlineTicks === 0 && fenceMatch?.[1]) {
@@ -176,122 +248,159 @@ export function maskMarkdownHtmlComments(source: string): string {
   return output;
 }
 
-function renderBlock(kind: string, source: string, blockFrom: number, blockId: string, citations: ReadonlyMap<string, RenderCitation>, resources: ReadonlyMap<string, string>, state: ScholarlyState): string {
-  if (kind === 'heading') return renderHeading(source, blockFrom, blockId, citations, state);
-  if (kind === 'table') return renderTableBlock(source, blockFrom, blockId, citations, resources, state);
-  if (kind === 'div') {
-    if (isReferencesPlaceholder(source)) return REFERENCES_PLACEHOLDER;
-    const layout = /^:::\s*\{[^}]*layout-ncol\s*=\s*([2-4])[^}]*\}\s*\n([\s\S]*?)\n:::\s*$/m.exec(source.trim());
-    if (layout) return `<div class="figure-layout layout-cols-${layout[1]}">${renderScholarlyMarkdown(layout[2]!, blockFrom + source.indexOf(layout[2]!), blockId, citations, resources, state)}</div>`;
-    const match = /^:::\s*\{?\.?callout-([\w-]+)[^\n]*\}?\s*\n([\s\S]*?)\n:::\s*$/m.exec(source.trim());
-    if (match) return `<aside class="callout callout-${escapeAttribute(match[1]!)}">${renderScholarlyMarkdown(match[2]!, blockFrom + source.indexOf(match[2]!), blockId, citations, resources, state)}</aside>`;
-  }
-  return renderScholarlyMarkdown(source, blockFrom, blockId, citations, resources, state);
+const CODE_OR_LINK = String.raw`(?<!\x60)(?<ticks>\x60+)(?!\x60)[\s\S]*?(?<!\x60)\k<ticks>(?!\x60)|<[A-Za-z][A-Za-z0-9+.\-]{1,31}:[^\s<>]*>|\]\((?:<[^>\n]*>|[^\s()<>]*(?:\([^\s()<>]*\)[^\s()<>]*)*)(?:\s+(?:"[^"\n]*"|'[^'\n]*'))?\s*\)|^ {0,3}\[[^\]\n]+\]:[ \t]*\S+|\b(?:https?|ftp):\/\/[^\s<>]+`;
+const CITATION_KEY = String.raw`[\p{L}\p{N}_](?:[\p{L}\p{N}_:.#%&+?~\/\-]*[\p{L}\p{N}_])?`;
+const IMAGE = String.raw`!\[(?<alt>(?:[^\[\]]|\[[^\]]*\])*)\]\((?<src><[^>]+>|[^\s)>]+)(?:\s+["'](?<title>[^"']*)["'])?\)\s*(?:\{(?<attrs>[^}]*)\})?`;
+const DISPLAY_MATH = String.raw`\$\$(?<display>[\s\S]+?)\$\$(?:\s*\{#(?<eqid>[\p{L}\p{N}_:.\-]+)\})?`;
+/** Pandoc tex_math_dollars: no space after the opening or before the closing `$`, and no digit right after it. */
+const INLINE_MATH = String.raw`(?<![\\$])\$(?![\s$])(?<math>[^$\n]*?[^\s\\$])\$(?!\d)`;
+/** A bracketed citation needs a word-initial `@key`; `[..](url)` and `[..][ref]` are links, not citations. */
+const BRACKET_CITATION = String.raw`\[(?<cites>[^\[\]]*?(?<![\p{L}\p{N}_])@${CITATION_KEY}[^\[\]]*)\](?![(\[])`;
+const TEXT_CITATION = String.raw`(?<![\p{L}\p{N}_\\@])@(?<key>${CITATION_KEY})`;
+/** Code spans, autolinks and link destinations come first so they are copied verbatim instead of being scanned. */
+const SCHOLARLY_PATTERN = new RegExp(`${CODE_OR_LINK}|${IMAGE}|${DISPLAY_MATH}|${INLINE_MATH}|${BRACKET_CITATION}|${TEXT_CITATION}`, 'gmu');
+const CAPTION_PATTERN = new RegExp(`${CODE_OR_LINK}|${INLINE_MATH}|${BRACKET_CITATION}`, 'gmu');
+const CITATION_KEYS = new RegExp(String.raw`(?<![\p{L}\p{N}_])@(${CITATION_KEY})`, 'gu');
+const CROSSREF_PREFIX = /^(?:fig|tbl|eq|sec)-/;
+
+interface Token { readonly html: string; readonly raw: string }
+
+/**
+ * Substitutes placeholder tokens in text content only. Inside tags (attribute values)
+ * and code elements a token is restored as its escaped source text.
+ */
+function restoreTokens(html: string, tokens: readonly Token[]): string {
+  const raw = (value: string) => value.replace(/\ue000(\d+)\ue001/g, (marker, index: string) => tokens[Number(index)] ? escapeHtml(tokens[Number(index)]!.raw) : marker);
+  return html.replace(/<(code|pre)\b[^>]*>[\s\S]*?<\/\1>|<[^>]*>|\ue000(\d+)\ue001/g, (whole, _tag: string | undefined, index: string | undefined) => index !== undefined ? tokens[Number(index)]?.html ?? whole : raw(whole));
 }
 
-function renderScholarlyMarkdown(source: string, blockFrom: number, blockId: string, citations: ReadonlyMap<string, RenderCitation>, resources: ReadonlyMap<string, string>, state: ScholarlyState): string {
-  const replacements: string[] = [];
-  const token = (html: string): string => {
-    const key = `MRROOTTOKEN${replacements.length}END`;
-    replacements.push(html);
-    return key;
-  };
-  const pattern = /!\[((?:[^\[\]]|\[[^\]]*\])*)\]\((<[^>]+>|[^\s)>]+)(?:\s+["']([^"']*)["'])?\)\s*(?:\{([^}]*)\})?|\$\$([\s\S]+?)\$\$\s*(?:\{#([\w:.-]+)\})?|(?<!\\)\$(?!\$)([^$\n]+?)(?<!\\)\$|\[([^\]]*@[A-Za-z0-9_:.+-]+[^\]]*)\]|(^|[\s(])@([A-Za-z0-9_:.+-]*[A-Za-z0-9_:+-])/gm;
+function renderBlock(kind: string, source: string, from: number, context: RenderContext): string {
+  if (kind === 'code') return markdown.render(source);
+  if (kind === 'heading' && !context.nested) return renderHeading(source, from, context);
+  if (kind === 'table') return renderTableBlock(source, from, context);
+  if (kind === 'div') return renderDiv(source, from, context);
+  return renderScholarlyMarkdown(source, from, context);
+}
+
+/** Renders a fenced div's body as nested blocks so code, tables and inner divs keep their own rules. */
+function renderDiv(source: string, from: number, context: RenderContext): string {
+  if (isReferencesPlaceholder(source)) return REFERENCES_PLACEHOLDER;
+  const lines = splitLines(source);
+  const opening = lines[0] ?? '';
+  const closed = lines.length > 1 && /^[ \t]*:{3,}[ \t]*\r?\n?$/.test(lines.at(-1)!);
+  const body = lines.slice(1, closed ? -1 : undefined).join('');
+  const header = /^[ \t]*:{3,}[ \t]*(?:\{([^}]*)\}|([^\s{}:]+))?/.exec(opening);
+  const attributes = parsePandocAttributes(header?.[1] ?? (header?.[2] ? `.${header[2]}` : undefined));
+  const content = mapDocumentBlocks(body, { frontmatter: false })
+    .map((block) => renderBlock(block.kind, block.text, from + opening.length + block.from, { ...context, nested: true }))
+    .join('');
+  const columns = attributes.values.get('layout-ncol');
+  if (columns && /^[2-4]$/.test(columns)) return `<div class="figure-layout layout-cols-${columns}">${content}</div>`;
+  const callout = attributes.classes.find((name) => name.startsWith('callout-'));
+  if (callout) return `<aside class="callout ${escapeAttribute(callout)}">${content}</aside>`;
+  const id = attributes.id ? ` id="${escapeAttribute(uniqueIdentifier(attributes.id, context.state))}"` : '';
+  const classes = attributes.classes.length ? ` class="${escapeAttribute(attributes.classes.join(' '))}"` : '';
+  return `<div${id}${classes}>${content}</div>`;
+}
+
+function renderScholarlyMarkdown(source: string, blockFrom: number, context: RenderContext): string {
+  const { citations, state } = context;
+  const tokens: Token[] = [];
+  const token = (html: string, raw: string): string => `\ue000${tokens.push({ html, raw }) - 1}\ue001`;
   let prepared = '';
   let cursor = 0;
-  for (const match of source.matchAll(pattern)) {
+  for (const match of source.matchAll(SCHOLARLY_PATTERN)) {
     prepared += source.slice(cursor, match.index);
-    const offset = blockFrom + match.index;
-    if (match[1] !== undefined) {
-      if (!match[1] && !match[4]) prepared += match[0];
-      else {
-        state.figure += 1;
-        const attributes = parsePandocAttributes(match[4]);
-        const figureId = uniqueIdentifier(attributes.id ?? `mr-figure-${state.figure}`, state.usedIds);
-        const figureLabel = stripInlineMarkup(match[1]) || `Figure ${state.figure}`;
-        state.outline.push({ id: figureId, blockId, from: offset, kind: 'figure', label: figureLabel, number: String(state.figure) });
-        const caption = renderCaptionInline(match[1], offset + 2, citations, state);
-        const title = match[3] ? `title="${escapeHtml(match[3])}"` : '';
-        const alignment = figureAlignment(attributes.values.get('fig-align'));
-        const captionLocation = attributes.values.get('fig-cap-location') === 'top' ? 'top' : 'bottom';
-        const figureClass = alignment ? ` class="figure-align-${alignment}"` : '';
-        const imageAttributes = [
-          `src="${escapeHtml(unwrapReference(match[2]!))}"`,
-          `alt="${escapeHtml(attributes.values.get('fig-alt') ?? stripInlineMarkup(match[1]))}"`,
-          title,
-          safeCssLength(attributes.values.get('width')) ? `data-figure-width="${escapeHtml(attributes.values.get('width')!)}"` : '',
-          safeCssLength(attributes.values.get('height')) ? `data-figure-height="${escapeHtml(attributes.values.get('height')!)}"` : '',
-        ].filter(Boolean).join(' ');
-        const image = `<img ${imageAttributes}>`;
-        const figureCaption = `<figcaption><span class="figure-label">Figure ${state.figure}.</span>${caption ? ` ${caption}` : ''}</figcaption>`;
-        const content = captionLocation === 'top' ? `${figureCaption}${image}` : `${image}${figureCaption}`;
-        prepared += token(`<figure id="${escapeAttribute(figureId)}"${figureClass} data-source-offset="${offset}" data-caption-location="${captionLocation}">${content}</figure>`);
-      }
-    } else if (match[5] !== undefined) {
-      state.equation += 1;
-      prepared += token(`<span class="math-display"${match[6] ? ` id="${escapeAttribute(match[6])}"` : ''} data-source-offset="${offset}">${renderMath(match[5].trim(), true)}<span class="equation-number">(${state.equation})</span></span>`);
-    } else if (match[7] !== undefined) {
-      prepared += token(`<span class="math-inline" data-source-offset="${offset}">${renderMath(match[7], false)}</span>`);
-    } else if (match[8] !== undefined) {
-      const keys = [...match[8].matchAll(/@([A-Za-z0-9_:.+-]+)/g)].map((item) => item[1]!);
-      keys.forEach((key) => state.citations.add(key));
-      const labels = keys.map((key) => citationLabel(citations.get(key), key, false));
-      const title = keys.map((key) => citations.get(key)?.title).filter(Boolean).join('; ');
-      prepared += token(`<span class="citation" data-source-offset="${offset}"${title ? ` title="${escapeHtml(title)}"` : ''}>(${labels.map((label, index) => citationAnchor(citations.get(keys[index]!), keys[index]!, label)).join('; ')})</span>`);
-    } else {
-      const prefix = match[9] ?? '';
-      const key = match[10]!;
-      const citation = citations.get(key);
-      const crossref = state.crossrefs.get(key);
-      if (!citation && crossref) prepared += `${prefix}${token(`<a class="crossref" href="#${escapeAttribute(key)}" data-source-offset="${offset + prefix.length}">${escapeHtml(crossref)}</a>`)}`;
-      else if (!citation) prepared += match[0];
-      else {
-        state.citations.add(key);
-        prepared += `${prefix}${token(`<span class="citation citation-text" data-source-offset="${offset + prefix.length}" title="${escapeHtml(citation.title ?? key)}">${citationAnchor(citation, key, citationLabel(citation, key, true))}</span>`)}`;
-      }
-    }
     cursor = match.index + match[0].length;
+    const groups = match.groups!;
+    const offset = blockFrom + match.index;
+    if (groups.alt !== undefined) {
+      if (!groups.alt && !groups.attrs) { prepared += match[0]; continue; }
+      state.figure += 1;
+      const attributes = parsePandocAttributes(groups.attrs);
+      const figureId = uniqueIdentifier(attributes.id ?? `mr-figure-${state.figure}`, state);
+      if (attributes.id && CROSSREF_PREFIX.test(attributes.id)) state.labels.push([figureId, `Figure ${state.figure}`]);
+      const figureLabel = stripInlineMarkup(groups.alt) || `Figure ${state.figure}`;
+      state.outline.push({ id: figureId, from: offset, kind: 'figure', label: figureLabel, number: String(state.figure) });
+      const caption = renderCaptionInline(groups.alt, offset + 2, context);
+      const title = groups.title ? `title="${escapeHtml(groups.title)}"` : '';
+      const alignment = figureAlignment(attributes.values.get('fig-align'));
+      const captionLocation = attributes.values.get('fig-cap-location') === 'top' ? 'top' : 'bottom';
+      const figureClass = alignment ? ` class="figure-align-${alignment}"` : '';
+      const imageAttributes = [
+        `src="${escapeHtml(unwrapReference(groups.src!))}"`,
+        `alt="${escapeHtml(attributes.values.get('fig-alt') ?? stripInlineMarkup(groups.alt))}"`,
+        title,
+        safeCssLength(attributes.values.get('width')) ? `data-figure-width="${escapeHtml(attributes.values.get('width')!)}"` : '',
+        safeCssLength(attributes.values.get('height')) ? `data-figure-height="${escapeHtml(attributes.values.get('height')!)}"` : '',
+      ].filter(Boolean).join(' ');
+      const image = `<img ${imageAttributes}>`;
+      const figureCaption = `<figcaption><span class="figure-label">Figure ${state.figure}.</span>${caption ? ` ${caption}` : ''}</figcaption>`;
+      const content = captionLocation === 'top' ? `${figureCaption}${image}` : `${image}${figureCaption}`;
+      prepared += token(`<figure id="${escapeAttribute(figureId)}"${figureClass} data-source-offset="${offset}" data-caption-location="${captionLocation}">${content}</figure>`, match[0]);
+    } else if (groups.display !== undefined) {
+      state.equation += 1;
+      const id = groups.eqid ? uniqueIdentifier(groups.eqid, state) : undefined;
+      if (id && CROSSREF_PREFIX.test(groups.eqid!)) state.labels.push([id, `Equation ${state.equation}`]);
+      prepared += token(`<span class="math-display"${id ? ` id="${escapeAttribute(id)}"` : ''} data-source-offset="${offset}">${renderMath(groups.display.trim(), true)}<span class="equation-number">(${state.equation})</span></span>`, match[0]);
+    } else if (groups.math !== undefined) {
+      prepared += token(`<span class="math-inline" data-source-offset="${offset}">${renderMath(groups.math, false)}</span>`, match[0]);
+    } else if (groups.cites !== undefined) {
+      prepared += token(renderBracketCitation(groups.cites, offset, context, true), match[0]);
+    } else if (groups.key !== undefined) {
+      const key = groups.key;
+      const citation = citations.get(key);
+      if (citation) {
+        state.citations.push(key);
+        prepared += token(`<span class="citation citation-text" data-source-offset="${offset}" title="${escapeHtml(citation.title ?? key)}">${citationAnchor(citation, key, citationLabel(citation, key, true))}</span>`, match[0]);
+      } else if (CROSSREF_PREFIX.test(key)) prepared += token(`<a class="crossref" data-xref="${encodeURIComponent(key)}" data-source-offset="${offset}"></a>`, match[0]);
+      else prepared += match[0];
+    } else prepared += match[0];
   }
   prepared += source.slice(cursor);
-  let html = markdown.render(prepared);
-  replacements.forEach((replacement, index) => { html = html.replaceAll(`MRROOTTOKEN${index}END`, replacement); });
+  let html = restoreTokens(markdown.render(prepared), tokens);
   html = html
     .replace(/<p>\s*(<figure[\s\S]*?<\/figure>)\s*<\/p>/g, '$1')
     .replace(/<p>\s*(<span class="math-display"[\s\S]*?<\/span>)\s*<\/p>/g, '$1');
-  html = renderHeadingIdentifiers(replaceResourceUrls(html, resources));
-  return renderFigures(html, blockFrom, blockId, state);
+  return renderFigures(renderHeadingIdentifiers(html), blockFrom, state);
 }
 
-function renderCaptionInline(source: string, sourceFrom: number, citations: ReadonlyMap<string, RenderCitation>, state: ScholarlyState): string {
-  const replacements: string[] = [];
-  const prepared = source.replace(/\[([^\]]*@[A-Za-z0-9_:.+-]+[^\]]*)\]|(?<!\\)\$(?!\$)([^$\n]+?)(?<!\\)\$/g, (whole, citationBody: string | undefined, mathBody: string | undefined, offset: number) => {
-    const key = `MRROOTCAPTION${replacements.length}END`;
-    if (mathBody !== undefined) replacements.push(`<span class="math-inline" data-source-offset="${sourceFrom + offset}">${renderMath(mathBody, false)}</span>`);
-    else {
-      const keys = [...citationBody!.matchAll(/@([A-Za-z0-9_:.+-]+)/g)].map((item) => item[1]!);
-      keys.forEach((citationKey) => state.citations.add(citationKey));
-      replacements.push(`<span class="citation" data-source-offset="${sourceFrom + offset}">(${keys.map((citationKey) => citationAnchor(citations.get(citationKey), citationKey, citationLabel(citations.get(citationKey), citationKey, false))).join('; ')})</span>`);
-    }
-    return key;
+function renderBracketCitation(body: string, offset: number, context: RenderContext, withTitle: boolean): string {
+  const { citations, state } = context;
+  const keys = [...body.matchAll(CITATION_KEYS)].map((item) => item[1]!);
+  state.citations.push(...keys);
+  const labels = keys.map((key) => citationAnchor(citations.get(key), key, citationLabel(citations.get(key), key, false)));
+  const title = withTitle ? keys.map((key) => citations.get(key)?.title).filter(Boolean).join('; ') : '';
+  return `<span class="citation" data-source-offset="${offset}"${title ? ` title="${escapeHtml(title)}"` : ''}>(${labels.join('; ')})</span>`;
+}
+
+function renderCaptionInline(source: string, sourceFrom: number, context: RenderContext): string {
+  const tokens: Token[] = [];
+  const prepared = source.replace(CAPTION_PATTERN, (whole: string, ...args: unknown[]) => {
+    const groups = args.at(-1) as Record<string, string | undefined>;
+    const offset = args.at(-3) as number;
+    const html = groups.math !== undefined
+      ? `<span class="math-inline" data-source-offset="${sourceFrom + offset}">${renderMath(groups.math, false)}</span>`
+      : groups.cites !== undefined ? renderBracketCitation(groups.cites, sourceFrom + offset, context, false) : undefined;
+    return html === undefined ? whole : `\ue000${tokens.push({ html, raw: whole }) - 1}\ue001`;
   });
-  let html = markdown.renderInline(prepared);
-  replacements.forEach((replacement, index) => { html = html.replaceAll(`MRROOTCAPTION${index}END`, replacement); });
-  return html;
+  return restoreTokens(markdown.renderInline(prepared), tokens);
 }
 
 function renderMath(expression: string, displayMode: boolean): string {
   return katex.renderToString(expression, { displayMode, output: 'mathml', throwOnError: false, strict: 'ignore' });
 }
 
-function renderHeading(source: string, blockFrom: number, blockId: string, citations: ReadonlyMap<string, RenderCitation>, state: ScholarlyState): string {
+function renderHeading(source: string, blockFrom: number, context: RenderContext): string {
+  const { state } = context;
   const match = /^\s*(#{1,6})\s+([\s\S]*?)\s*$/.exec(source);
-  if (!match) return markdown.render(source);
+  if (!match) return renderScholarlyMarkdown(source, blockFrom, context);
   const level = match[1]!.length;
   const attributeMatch = /\s+\{([^{}]*)\}\s*$/.exec(match[2]!);
   const attributes = parsePandocAttributes(attributeMatch?.[1]);
   const headingSource = attributeMatch ? match[2]!.slice(0, attributeMatch.index).trimEnd() : match[2]!.trimEnd();
   const label = stripInlineMarkup(headingSource);
-  const id = uniqueIdentifier(attributes.id ?? (slugify(label) || `mr-section-${state.outline.length + 1}`), state.usedIds);
+  const id = uniqueIdentifier(attributes.id ?? (slugify(label) || 'mr-section'), state);
   const unnumbered = attributes.classes.includes('unnumbered');
   let number: string | undefined;
   if (state.numberSections && !unnumbered) {
@@ -299,37 +408,44 @@ function renderHeading(source: string, blockFrom: number, blockId: string, citat
     for (let index = level; index < state.sections.length; index += 1) state.sections[index] = 0;
     number = state.sections.slice(0, level).filter((value) => value > 0).join('.');
   }
-  state.outline.push({ id, blockId, from: blockFrom, kind: 'section', label, level, ...(number ? { number } : {}) });
+  state.labels.push([id, number ? `Section ${number}` : 'Section']);
+  state.outline.push({ id, from: blockFrom, kind: 'section', label, level, ...(number ? { number } : {}) });
   const classes = unnumbered ? ' class="unnumbered"' : '';
   const numberHtml = number ? `<span class="section-number">${number}</span> ` : '';
-  return `<h${level} id="${escapeAttribute(id)}"${classes} data-source-offset="${blockFrom}">${numberHtml}${renderCaptionInline(headingSource, blockFrom + source.indexOf(headingSource), citations, state)}</h${level}>`;
+  // Allocate aliases after all primary IDs are known, so an alias cannot change another heading's ID.
+  const legacyBase = legacySlugify(label);
+  const legacy = attributes.id || legacyBase === (slugify(label) || 'mr-section') ? '' : `<span data-markroot-legacy-heading="${encodeURIComponent(legacyBase)}" data-primary-id="${encodeURIComponent(id)}" data-source-offset="${blockFrom}"></span>`;
+  return `<h${level} id="${escapeAttribute(id)}"${classes} data-source-offset="${blockFrom}">${legacy}${numberHtml}${renderCaptionInline(headingSource, blockFrom + source.indexOf(headingSource), context)}</h${level}>`;
 }
 
-function renderTableBlock(source: string, blockFrom: number, blockId: string, citations: ReadonlyMap<string, RenderCitation>, resources: ReadonlyMap<string, string>, state: ScholarlyState): string {
-  const lines = source.trimEnd().split(/\r?\n/);
+function renderTableBlock(source: string, blockFrom: number, context: RenderContext): string {
+  const { state } = context;
+  const lines = source.trimEnd().split(/\r\n|\r|\n/);
   const last = lines.at(-1) ?? '';
   const captionMatch = /^\s*(?::|Table:)\s*(.*?)(?:\s+\{([^{}]*)\})?\s*$/i.exec(last);
   const tableSource = captionMatch ? lines.slice(0, -1).join('\n') : source;
-  let tableHtml = replaceResourceUrls(markdown.render(tableSource), resources);
-  if (!/<table\b/i.test(tableHtml)) return renderScholarlyMarkdown(source, blockFrom, blockId, citations, resources, state);
+  let tableHtml = markdown.render(tableSource);
+  if (!/<table\b/i.test(tableHtml)) return renderScholarlyMarkdown(source, blockFrom, context);
   state.table += 1;
   const attributes = parsePandocAttributes(captionMatch?.[2]);
-  const tableId = uniqueIdentifier(attributes.id ?? `mr-table-${state.table}`, state.usedIds);
+  const tableId = uniqueIdentifier(attributes.id ?? `mr-table-${state.table}`, state);
+  if (attributes.id && CROSSREF_PREFIX.test(attributes.id)) state.labels.push([tableId, `Table ${state.table}`]);
   const captionSource = captionMatch?.[1]?.trim() ?? '';
   const fallbackLabel = tableHeaderLabel(lines[0] ?? '') || `Table ${state.table}`;
   const label = stripInlineMarkup(captionSource) || fallbackLabel;
-  state.outline.push({ id: tableId, blockId, from: blockFrom, kind: 'table', label, number: String(state.table) });
-  const caption = captionSource ? ` ${renderCaptionInline(captionSource, blockFrom + source.lastIndexOf(captionSource), citations, state)}` : '';
+  state.outline.push({ id: tableId, from: blockFrom, kind: 'table', label, number: String(state.table) });
+  const caption = captionSource ? ` ${renderCaptionInline(captionSource, blockFrom + source.lastIndexOf(captionSource), context)}` : '';
   tableHtml = tableHtml.trim();
   return `<figure class="table-figure" id="${escapeAttribute(tableId)}" data-source-offset="${blockFrom}"><figcaption><span class="table-label">Table ${state.table}.</span>${caption}</figcaption><div class="table-scroll">${tableHtml}</div></figure>`;
 }
 
-function renderFigures(html: string, blockFrom: number, blockId: string, state: ScholarlyState): string {
-  return html.replace(/<p>\s*(<img\s+[^>]*alt="([^"]*)"[^>]*>)\s*(?:\{#([\w:.-]+)[^}]*\})?\s*<\/p>/g, (whole, image: string, caption: string, id: string | undefined) => {
+function renderFigures(html: string, blockFrom: number, state: ScholarlyState): string {
+  return html.replace(/<p>\s*(<img\s+[^>]*alt="([^"]*)"[^>]*>)\s*(?:\{#([\p{L}\p{N}_:.\-]+)[^}]*\})?\s*<\/p>/gu, (whole, image: string, caption: string, id: string | undefined) => {
     if (!caption && !id) return whole;
     state.figure += 1;
-    const figureId = uniqueIdentifier(id ?? `mr-figure-${state.figure}`, state.usedIds);
-    state.outline.push({ id: figureId, blockId, from: blockFrom, kind: 'figure', label: stripInlineMarkup(caption) || `Figure ${state.figure}`, number: String(state.figure) });
+    const figureId = uniqueIdentifier(id ?? `mr-figure-${state.figure}`, state);
+    if (id && CROSSREF_PREFIX.test(id)) state.labels.push([figureId, `Figure ${state.figure}`]);
+    state.outline.push({ id: figureId, from: blockFrom, kind: 'figure', label: stripInlineMarkup(caption) || `Figure ${state.figure}`, number: String(state.figure) });
     return `<figure id="${escapeAttribute(figureId)}" data-source-offset="${blockFrom}">${image}<figcaption><span class="figure-label">Figure ${state.figure}.</span> ${caption}</figcaption></figure>`;
   });
 }
@@ -340,7 +456,7 @@ function createResourceUrls(dependencies: readonly RenderDependency[]): { urls: 
   if (typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') return { urls, objectUrls };
   for (const dependency of dependencies) {
     const blob = dependency.content instanceof Blob ? dependency.content : new Blob([dependency.content]);
-    const url = URL.createObjectURL(blob);
+    const url = dependency.objectUrl ?? URL.createObjectURL(blob);
     objectUrls.push(url);
     const path = dependency.path.replace(/^\.\//, '');
     urls.set(path, url);
@@ -349,12 +465,16 @@ function createResourceUrls(dependencies: readonly RenderDependency[]): { urls: 
   return { urls, objectUrls };
 }
 
-function replaceResourceUrls(html: string, resources: ReadonlyMap<string, string>): string {
+/** Maps local images to object URLs, flags missing ones and, unless allowed, blocks remote images without fetching them. */
+function replaceResourceUrls(html: string, resources: ReadonlyMap<string, string>, allowRemoteResources: boolean): string {
   return html.replace(/<img\b([^>]*?)\bsrc="([^"]+)"([^>]*)>/g, (whole, before: string, path: string, after: string) => {
     const local = resources.get(path.replace(/^\.\//, ''));
     if (local) return `<img${before}src="${local}" data-image-source="${escapeHtml(path)}"${after}>`;
-    if (/^(?:[a-z][a-z0-9+.-]*:|#)/i.test(path)) return whole;
     const alt = /\balt="([^"]*)"/.exec(whole)?.[1] ?? '';
+    if (/^(?:https?:)?\/\//i.test(path)) {
+      return allowRemoteResources ? whole : `<span class="remote-resource-placeholder" role="img" data-remote-resource-blocked="true" aria-label="${alt ? `Remote image blocked: ${alt}` : 'Remote image blocked'}">${alt ? `Remote image blocked: ${alt}` : 'Remote image blocked'}</span>`;
+    }
+    if (/^(?:[a-z][a-z0-9+.-]*:|#)/i.test(path)) return whole;
     return `<span class="image-missing" role="img" aria-label="Image unavailable: ${escapeHtml(alt || path)}"><strong>Image unavailable</strong><code>${escapeHtml(path)}</code></span>`;
   });
 }
@@ -372,54 +492,19 @@ function renderReferences(keys: ReadonlySet<string>, citations: ReadonlyMap<stri
 }
 
 function isReferencesPlaceholder(source: string): boolean {
-  const lines = source.trim().split(/\r?\n/);
-  const opening = /^:::\s*\{([^}]*)\}\s*$/.exec(lines[0] ?? '');
-  const closing = /^:::\s*$/.test(lines.at(-1) ?? '');
+  const lines = source.trim().split(/\r\n|\r|\n/);
+  const opening = /^:{3,}\s*\{([^}]*)\}\s*$/.exec(lines[0] ?? '');
+  const closing = /^:{3,}\s*$/.test(lines.at(-1) ?? '');
   return Boolean(opening && closing && lines.length >= 2 && parsePandocAttributes(opening[1]).id === 'refs' && !lines.slice(1, -1).join('\n').trim());
 }
 
-function buildCrossReferences(source: string): ReadonlyMap<string, string> {
-  const references = new Map<string, string>();
-  let figure = 0;
-  for (const match of source.matchAll(/!\[((?:[^\[\]]|\[[^\]]*\])*)\]\((?:<[^>]+>|[^\s)>]+)(?:\s+["'][^"']*["'])?\)\s*(?:\{([^}]*)\})?/g)) {
-    figure += 1;
-    const id = parsePandocAttributes(match[2]).id;
-    if (id?.startsWith('fig-')) references.set(id, `Figure ${figure}`);
-  }
-  let equation = 0;
-  for (const match of source.matchAll(/\$\$[\s\S]+?\$\$\s*(?:\{#(eq-[\w:.-]+)\})?/g)) {
-    equation += 1;
-    if (match[1]) references.set(match[1], `Equation ${equation}`);
-  }
-  let table = 0;
-  for (const match of source.matchAll(/^\|.+\|(?:\r?\n\|.+\|)+(?:(?:\r?\n)(?::|Table:)\s*.*?\{([^}]*)\})?/gm)) {
-    table += 1;
-    const id = parsePandocAttributes(match[1]).id;
-    if (id?.startsWith('tbl-')) references.set(id, `Table ${table}`);
-  }
-  const sections = [0, 0, 0, 0, 0, 0];
-  const numberSections = frontMatterBoolean(source, 'number-sections') !== false;
-  for (const match of source.matchAll(/^(#{1,6})\s+(.+?)(?:\s+\{([^}]*)\})?\s*$/gm)) {
-    const attributes = parsePandocAttributes(match[3]);
-    if (!numberSections || attributes.classes.includes('unnumbered')) {
-      if (attributes.id?.startsWith('sec-')) references.set(attributes.id, 'Section');
-      continue;
-    }
-    const level = match[1]!.length;
-    sections[level - 1] = (sections[level - 1] ?? 0) + 1;
-    for (let index = level; index < sections.length; index += 1) sections[index] = 0;
-    if (attributes.id?.startsWith('sec-')) references.set(attributes.id, `Section ${sections.slice(0, level).filter((value) => value > 0).join('.')}`);
-  }
-  return references;
-}
-
 function renderHeadingIdentifiers(html: string): string {
-  return html.replace(/<(h[1-6])>([\s\S]*?)\s*\{#([\w:.-]+)\}<\/h[1-6]>/g, (_whole, tag: string, content: string, id: string) => `<${tag} id="${escapeAttribute(id)}">${content}</${tag}>`);
+  return html.replace(/<(h[1-6])>([\s\S]*?)\s*\{#([\p{L}\p{N}_:.\-]+)\}<\/h[1-6]>/gu, (_whole, tag: string, content: string, id: string) => `<${tag} id="${escapeAttribute(id)}">${content}</${tag}>`);
 }
 
 function citationLabel(citation: RenderCitation | undefined, key: string, textual: boolean): string {
   if (!citation) return escapeHtml(key);
-  const author = shortAuthor(citation.author) || key;
+  const author = shortAuthor(citation) || key;
   const year = citation.year || 'n.d.';
   return textual ? `${escapeHtml(author)} (${escapeHtml(year)})` : `${escapeHtml(author)}, ${escapeHtml(year)}`;
 }
@@ -442,12 +527,14 @@ function referenceLabel(citation: RenderCitation): string {
   return [citation.author, citation.year ? `(${citation.year}).` : undefined, citation.title].filter(Boolean).join(' ');
 }
 
-function shortAuthor(author?: string): string {
-  if (!author) return '';
-  const authors = author.split(/\s+and\s+/i).map((entry) => entry.trim()).filter(Boolean);
+/** Structured names (corporate `literal` names stay whole) take precedence over splitting the display string. */
+function shortAuthor(citation: RenderCitation): string {
   const surname = (entry: string) => entry.includes(',') ? entry.split(',')[0]!.trim() : entry.split(/\s+/).at(-1)!;
-  if (authors.length > 2) return `${surname(authors[0]!)} et al.`;
-  return authors.map(surname).join(' & ');
+  const names = citation.authors?.length
+    ? citation.authors.map((name) => 'literal' in name ? name.literal : name.family)
+    : (citation.author ?? '').split(/\s+and\s+/i).map((entry) => entry.trim()).filter(Boolean).map(surname);
+  if (names.length > 2) return `${names[0]} et al.`;
+  return names.join(' & ');
 }
 
 function stripInlineMarkup(value: string): string { return value.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').replace(/[*_~`]/g, '').replace(/\s+/g, ' ').trim(); }
@@ -460,7 +547,7 @@ function parsePandocAttributes(source?: string): PandocAttributes {
   const classes: string[] = [];
   const values = new Map<string, string>();
   if (source) {
-    const pattern = /(?:^|\s)(#[\w:.-]+|\.[\w:-]+|([\w:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s]+)))/g;
+    const pattern = /(?:^|\s)(#[\p{L}\p{N}_:.\-]+|\.[\p{L}\p{N}_:\-]+|([\p{L}\p{N}_:\-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s]+)))/gu;
     for (const match of source.matchAll(pattern)) {
       const token = match[1]!;
       if (token.startsWith('#')) id = token.slice(1);
@@ -477,16 +564,23 @@ function figureAlignment(value?: string): 'left' | 'center' | 'right' | undefine
 
 function safeCssLength(value?: string): boolean { return Boolean(value && /^(?:auto|\d+(?:\.\d+)?(?:%|px|em|rem|vw|vh)?)$/i.test(value)); }
 
-function uniqueIdentifier(preferred: string, used: Set<string>): string {
-  const base = escapeAttribute(preferred) || 'markroot-item';
+/** Claims a document-unique id (escaped only when written) and records the claim for render-cache replay. */
+function uniqueIdentifier(preferred: string, state: ScholarlyState): string {
+  const base = preferred.replace(/\s+/g, '-') || 'markroot-item';
   let candidate = base;
   let suffix = 2;
-  while (used.has(candidate)) candidate = `${base}-${suffix++}`;
-  used.add(candidate);
+  while (state.usedIds.has(candidate)) candidate = `${base}-${suffix++}`;
+  state.usedIds.add(candidate);
+  state.ids.push([base, candidate]);
   return candidate;
 }
 
 function slugify(value: string): string {
+  return value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').normalize('NFC').toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '');
+}
+
+/** Previous ASCII-only slugs remain addressable through collision-aware aliases. */
+function legacySlugify(value: string): string {
   return value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
 
@@ -518,5 +612,5 @@ function findExecutableWarnings(source: string): readonly string[] {
     : [];
 }
 
-function escapeAttribute(value: string): string { return value.replace(/[^a-z0-9_-]/gi, ''); }
+function escapeAttribute(value: string): string { return escapeHtml(value).replaceAll("'", '&#39;'); }
 function escapeHtml(value: string): string { return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;'); }
