@@ -4,6 +4,7 @@ import type { GuardedWorkspace } from '@markroot/workspace';
 import { createSelector, type CommentMessage, type CommentResolution, type CommentRevision, type CommentSelector, type CommentThread } from './index.js';
 
 const ROOT = workspacePath('.markroot/comments');
+/** Immutable after creation. Legacy files may still carry mutated state, which is read as the initial state. */
 interface ThreadRecord {
   version: 1;
   id: string;
@@ -15,50 +16,90 @@ interface ThreadRecord {
   resolution: CommentResolution | null;
   deleted: boolean;
 }
+type ThreadEvent =
+  | { version: 1; id: string; at: string; type: 'resolve'; resolution: CommentResolution }
+  | { version: 1; id: string; at: string; type: 'reopen' | 'delete' }
+  | { version: 1; id: string; at: string; type: 'reattach'; selector: CommentSelector; sourceRevision: CommentRevision | null };
+interface ThreadState {
+  readonly record: ThreadRecord;
+  readonly status: 'open' | 'resolved';
+  readonly selector: CommentSelector;
+  readonly sourceRevision: CommentRevision | null;
+  readonly resolution: CommentResolution | null;
+  readonly deleted: boolean;
+  readonly updatedAt: string;
+}
+/** A thread directory that could not be read (malformed YAML, unresolved Git conflict, invalid ID). */
+export interface BrokenCommentThread {
+  readonly id: string;
+  /** Known only when thread.yaml itself was readable. */
+  readonly document?: string;
+  readonly error: string;
+}
+export interface CommentLoadResult {
+  readonly threads: readonly CommentThread[];
+  readonly broken: readonly BrokenCommentThread[];
+}
 
-/** Git is the transport. Each reply is an independent immutable file. */
+/**
+ * Git is the transport. Every reply and every state change (resolve, reopen, reattach, delete) is an
+ * independent immutable file, so concurrent branches only ever add files and merge without conflicts.
+ */
 export class CommentStore {
+  private readonly cache = new Map<string, { readonly version: string; readonly value: unknown }>();
   constructor(private readonly workspace: GuardedWorkspace) {}
 
-  async load(document: WorkspacePath): Promise<readonly CommentThread[]> {
-    const entries = await this.list(ROOT);
+  /** Threads of a document; unreadable threads are skipped (see loadWithIssues). */
+  async load(document: WorkspacePath): Promise<readonly CommentThread[]> { return (await this.loadWithIssues(document)).threads; }
+
+  async loadWithIssues(document: WorkspacePath): Promise<CommentLoadResult> {
     const threads: CommentThread[] = [];
-    for (const entry of entries) {
+    const broken: BrokenCommentThread[] = [];
+    for (const entry of await this.list(ROOT)) {
       if (entry.kind !== 'directory') continue;
       const id = entry.path.split('/').at(-1)!;
-      const record = await this.record(id);
-      // A directory without thread.yaml can be an interrupted write; retain its messages.
-      if (!record || record.value.document !== document || record.value.deleted) continue;
-      const messages: CommentMessage[] = [];
-      for (const messageEntry of await this.list(workspacePath(`${entry.path}/messages`))) {
-        if (messageEntry.kind !== 'file' || !messageEntry.path.endsWith('.yaml')) continue;
-        const value = decode(await this.workspace.readFile(messageEntry.path), messageEntry.path);
-        validateMessage(value);
-        if (messageEntry.path.split('/').at(-1) !== `${value.id}.yaml`) throw new Error(`Comment message ID does not match ${messageEntry.path}`);
-        messages.push(value);
+      let owner: string | undefined;
+      try {
+        const record = await this.record(id);
+        // A directory without thread.yaml can be an interrupted write; retain its messages.
+        if (!record || record.document !== document) continue;
+        owner = record.document;
+        const state = await this.state(record);
+        if (state.deleted) continue;
+        const messages: CommentMessage[] = [];
+        for (const messageEntry of await this.list(workspacePath(`${entry.path}/messages`))) {
+          if (messageEntry.kind !== 'file' || !messageEntry.path.endsWith('.yaml')) continue;
+          const value = await this.parsed(messageEntry.path);
+          validateMessage(value);
+          if (messageEntry.path.split('/').at(-1) !== `${value.id}.yaml`) throw new Error(`Comment message ID does not match ${messageEntry.path}`);
+          messages.push(value);
+        }
+        messages.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+        threads.push({ id, selector: state.selector, status: state.status, createdAt: record.createdAt, messages,
+          updatedAt: [...messages.map((message) => message.createdAt), state.updatedAt].sort().at(-1)!,
+          ...(state.sourceRevision ? { sourceRevision: state.sourceRevision } : {}),
+          ...(state.resolution ? { resolution: state.resolution } : {}),
+        });
+      } catch (error) {
+        broken.push({ id, ...(owner ? { document: owner } : {}), error: error instanceof Error ? error.message : String(error) });
       }
-      messages.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
-      const item = record.value;
-      threads.push({ id, selector: item.selector, status: item.status, createdAt: item.createdAt, messages,
-        updatedAt: [...messages.map((message) => message.createdAt), item.createdAt, item.resolution?.at ?? ''].sort().at(-1)!,
-        ...(item.sourceRevision ? { sourceRevision: item.sourceRevision } : {}),
-        ...(item.resolution ? { resolution: item.resolution } : {}),
-      });
     }
-    return threads.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+    return { threads: threads.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)), broken };
   }
 
-  /** Include tombstones when preparing a document commit. */
+  /** Include tombstones when preparing a document commit. Threads whose thread.yaml is unreadable are left out. */
   async paths(document: WorkspacePath): Promise<readonly WorkspacePath[]> {
     const paths: WorkspacePath[] = [];
     for (const entry of await this.list(ROOT)) {
       if (entry.kind !== 'directory') continue;
       const id = entry.path.split('/').at(-1)!;
-      const record = await this.record(id);
-      if (!record || record.value.document !== document) continue;
+      const record = await this.record(id).catch(() => undefined);
+      if (!record || record.document !== document) continue;
       paths.push(threadPath(id));
-      for (const message of await this.list(workspacePath(`${entry.path}/messages`))) {
-        if (message.kind === 'file' && message.path.endsWith('.yaml')) paths.push(message.path);
+      for (const folder of ['events', 'messages']) {
+        for (const file of await this.list(workspacePath(`${entry.path}/${folder}`))) {
+          if (file.kind === 'file' && file.path.endsWith('.yaml')) paths.push(file.path);
+        }
       }
     }
     return paths.sort();
@@ -76,29 +117,32 @@ export class CommentStore {
   }
 
   async reply(document: WorkspacePath, id: string, body: string, author: AuthorIdentity): Promise<void> {
-    await this.requireRecord(document, id);
+    await this.requireState(document, id);
     await this.writeMessage(id, newMessage(body, author, new Date().toISOString()));
   }
 
   async setStatus(document: WorkspacePath, id: string, status: 'open' | 'resolved', resolution?: CommentResolution): Promise<void> {
     if (status === 'resolved' && !resolution) throw new Error('A resolution must identify the reviewed passage and revision.');
-    await this.update(document, id, (record) => ({ ...record, status, resolution: status === 'resolved' ? resolution! : null }));
+    await this.requireState(document, id);
+    await this.writeEvent(id, status === 'resolved' ? { type: 'resolve', resolution: resolution! } : { type: 'reopen' });
   }
 
   async reattach(document: WorkspacePath, id: string, source: string, range: SourceRange, revision: CommentRevision): Promise<void> {
-    await this.update(document, id, (record) => ({ ...record, selector: createSelector(source, range, record.selector.blockLevel), sourceRevision: revision, status: 'open', resolution: null }));
+    const state = await this.requireState(document, id);
+    await this.writeEvent(id, { type: 'reattach', selector: createSelector(source, range, state.selector.blockLevel), sourceRevision: revision });
   }
 
   async delete(document: WorkspacePath, id: string): Promise<void> {
-    // Keep a tombstone so a concurrent reply cannot resurrect the thread after merging.
-    await this.update(document, id, (record) => ({ ...record, deleted: true }));
+    // A tombstone event always wins, so a concurrent reply or resolution cannot resurrect the thread after merging.
+    await this.requireState(document, id);
+    await this.writeEvent(id, { type: 'delete' });
   }
 
   /** Idempotent, sidecars-first migration. Never overwrite newer replies or resolutions. */
   async importLegacy(document: WorkspacePath, threads: readonly CommentThread[], revision: CommentRevision): Promise<void> {
     for (const thread of threads) {
       const existing = await this.record(thread.id);
-      if (existing && existing.value.document !== document) throw new Error(`Comment ${thread.id} already belongs to another document.`);
+      if (existing && existing.document !== document) throw new Error(`Comment ${thread.id} already belongs to another document.`);
       for (const message of thread.messages) await this.writeMessage(thread.id, message, true);
       if (existing) continue;
       const value: ThreadRecord = { version: 1, id: thread.id, document, createdAt: thread.createdAt, sourceRevision: thread.sourceRevision ?? revision, selector: thread.selector, status: thread.status, resolution: null, deleted: false };
@@ -113,24 +157,55 @@ export class CommentStore {
     if (preserveExisting && await this.exists(path)) return;
     await this.workspace.writeFileGuarded(path, encode({ id: message.id, author: message.author, createdAt: message.createdAt, body: message.body }));
   }
-  private async update(document: WorkspacePath, id: string, mutate: (value: ThreadRecord) => ThreadRecord): Promise<void> {
-    const record = await this.requireRecord(document, id);
-    await this.workspace.writeFileGuarded(threadPath(id), encode(mutate(record.value)), record.version);
+  private async writeEvent(threadId: string, change: DistributiveOmit<ThreadEvent, 'version' | 'id' | 'at'>): Promise<void> {
+    const event = { version: 1, id: crypto.randomUUID(), at: new Date().toISOString(), ...change } as ThreadEvent;
+    validateEvent(event);
+    await this.workspace.writeFileGuarded(workspacePath(`${threadDirectory(threadId)}/events/${event.id}.yaml`), encode(event));
   }
-  private async requireRecord(document: WorkspacePath, id: string) {
+  private async requireState(document: WorkspacePath, id: string): Promise<ThreadState> {
     const record = await this.record(id);
-    if (!record || record.value.document !== document || record.value.deleted) throw new Error(`Comment thread not found: ${id}`);
-    return record;
+    const state = record && record.document === document ? await this.state(record) : undefined;
+    if (!state || state.deleted) throw new Error(`Comment thread not found: ${id}`);
+    return state;
   }
-  private async record(id: string) {
+  /** Folds the append-only events deterministically: by time, then event ID; deletion always wins. */
+  private async state(record: ThreadRecord): Promise<ThreadState> {
+    const events: ThreadEvent[] = [];
+    for (const entry of await this.list(workspacePath(`${threadDirectory(record.id)}/events`))) {
+      if (entry.kind !== 'file' || !entry.path.endsWith('.yaml')) continue;
+      const value = await this.parsed(entry.path);
+      validateEvent(value);
+      if (entry.path.split('/').at(-1) !== `${value.id}.yaml`) throw new Error(`Comment event ID does not match ${entry.path}`);
+      events.push(value);
+    }
+    events.sort((a, b) => a.at.localeCompare(b.at) || a.id.localeCompare(b.id));
+    let { status, selector, sourceRevision, resolution, deleted } = record;
+    for (const event of events) {
+      if (event.type === 'resolve') { status = 'resolved'; resolution = event.resolution; }
+      else if (event.type === 'reopen') { status = 'open'; resolution = null; }
+      else if (event.type === 'reattach') { selector = event.selector; sourceRevision = event.sourceRevision; status = 'open'; resolution = null; }
+      else deleted = true;
+    }
+    const updatedAt = [record.createdAt, record.resolution?.at ?? '', ...events.map((event) => event.at)].sort().at(-1)!;
+    return { record, status, selector, sourceRevision, resolution, deleted, updatedAt };
+  }
+  private async record(id: string): Promise<ThreadRecord | undefined> {
     const path = threadPath(id);
     try {
-      const stat = await this.workspace.stat(path);
-      const value = decode(await this.workspace.readFile(path), path);
+      const value = await this.parsed(path);
       validateRecord(value);
       if (value.id !== id) throw new Error(`Comment thread ID does not match ${path}`);
-      return { value, version: stat.version };
+      return value;
     } catch (error) { if (isMissing(error)) return undefined; throw error; }
+  }
+  /** Sidecars are immutable once written, so parsed YAML is reused until the file version changes. */
+  private async parsed(path: WorkspacePath): Promise<unknown> {
+    const version = (await this.workspace.stat(path)).version;
+    const cached = this.cache.get(path);
+    if (version !== undefined && cached?.version === version) return structuredClone(cached.value);
+    const value = decode(await this.workspace.readFile(path), path);
+    if (version !== undefined) this.cache.set(path, { version, value }); else this.cache.delete(path);
+    return structuredClone(value);
   }
   private async exists(path: WorkspacePath): Promise<boolean> {
     try { await this.workspace.stat(path); return true; } catch (error) { if (isMissing(error)) return false; throw error; }
@@ -139,6 +214,8 @@ export class CommentStore {
     try { return await this.workspace.listFiles(path); } catch (error) { if (isMissing(error)) return []; throw error; }
   }
 }
+
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 
 function safeId(value: string): string {
   if (!/^[a-zA-Z0-9_-]+$/.test(value)) throw new Error(`Invalid comment ID: ${value}`);
@@ -173,10 +250,16 @@ function validateRecord(value: unknown): asserts value is ThreadRecord {
   if (!object(value) || value.version !== 1 || typeof value.id !== 'string' || typeof value.document !== 'string' || typeof value.createdAt !== 'string' || !selector(value.selector) || !['open', 'resolved'].includes(value.status as string) || typeof value.deleted !== 'boolean' || (value.sourceRevision !== null && !revision(value.sourceRevision))) throw new Error('Invalid comment thread YAML.');
   safeId(value.id);
   workspacePath(value.document);
-  if (value.resolution !== null) {
-    const item = value.resolution;
-    if (!object(item) || !revision(item.revision) || !selector(item.selector) || !author(item.author) || typeof item.at !== 'string') throw new Error('Invalid comment resolution YAML.');
-  }
+  if (value.resolution !== null) validateResolution(value.resolution);
+}
+function validateEvent(value: unknown): asserts value is ThreadEvent {
+  if (!object(value) || value.version !== 1 || typeof value.id !== 'string' || typeof value.at !== 'string' || !['resolve', 'reopen', 'reattach', 'delete'].includes(value.type as string)) throw new Error('Invalid comment event YAML.');
+  safeId(value.id);
+  if (value.type === 'resolve') validateResolution(value.resolution);
+  if (value.type === 'reattach' && (!selector(value.selector) || (value.sourceRevision !== null && !revision(value.sourceRevision)))) throw new Error('Invalid comment reattach event YAML.');
+}
+function validateResolution(item: unknown): void {
+  if (!object(item) || !revision(item.revision) || !selector(item.selector) || !author(item.author) || typeof item.at !== 'string') throw new Error('Invalid comment resolution YAML.');
 }
 function newMessage(body: string, author: AuthorIdentity, createdAt: string): CommentMessage {
   if (!body.trim()) throw new Error('A comment body is required.');

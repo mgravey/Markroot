@@ -79,9 +79,10 @@ export class DocumentSession {
     return this.apply({ from: 0, to: this.source.length, insert: source, origin, baseRevision: this.revision });
   }
 
-  markSaved(expectedRevision = this.revision): DocumentSnapshot {
-    if (expectedRevision !== this.revision) throw new MarkrootError('STALE_REVISION', 'Cannot mark a stale document revision as saved.');
-    this.savedRevision = this.revision;
+  /** Records `revision` as persisted. An older revision (edits arrived during the save) leaves the document dirty. */
+  markSaved(revision = this.revision): DocumentSnapshot {
+    if (!Number.isInteger(revision) || revision < 0 || revision > this.revision) throw new MarkrootError('STALE_REVISION', `Cannot mark unknown revision ${revision} as saved; current revision is ${this.revision}.`);
+    this.savedRevision = revision;
     const snapshot = this.snapshot();
     for (const subscriber of this.subscribers) subscriber(snapshot);
     return snapshot;
@@ -115,14 +116,44 @@ export function searchDocument(snapshot: DocumentSnapshot, query: string, option
   return matches;
 }
 
-export function mapDocumentBlocks(source: string): readonly DocumentBlock[] {
-  const lines = source.match(/.*(?:\r?\n|$)/g)?.filter(Boolean) ?? [];
+/** Splits source into lines that keep their terminator; only CRLF, CR and LF end a line, so offsets stay exact. */
+export function splitLines(source: string): readonly string[] {
+  return source.match(/[^\r\n]*(?:\r\n|\r|\n|$)/g)?.filter(Boolean) ?? [];
+}
+
+export interface CodeFence { readonly marker: '`' | '~'; readonly length: number }
+
+/** Parses an opening code fence (backtick info strings may not contain backticks, as in CommonMark). */
+export function openingCodeFence(line: string): CodeFence | undefined {
+  const match = /^[ \t]*(`{3,}|~{3,})(.*)$/.exec(line.replace(/[\r\n]+$/, ''));
+  if (!match || (match[1]![0] === '`' && match[2]!.includes('`'))) return undefined;
+  return { marker: match[1]![0] as CodeFence['marker'], length: match[1]!.length };
+}
+
+/** A closing fence is bare and uses the opening character at least as many times. */
+export function closesCodeFence(line: string, fence: CodeFence): boolean {
+  const match = /^[ \t]*(`{3,}|~{3,})[ \t]*\r?\n?$/.exec(line);
+  return Boolean(match && match[1]![0] === fence.marker && match[1]!.length >= fence.length);
+}
+
+/** Pandoc YAML metadata needs a closing `---`/`...` line and a non-blank line after the opener. Returns its line count. */
+function frontmatterLineCount(lines: readonly string[]): number {
+  if (trimLine(lines[0] ?? '') !== '---' || !trimLine(lines[1] ?? '')) return 0;
+  for (let index = 1; index < lines.length; index += 1) if (/^(?:---|\.\.\.)$/.test(trimLine(lines[index]!))) return index + 1;
+  return 0;
+}
+
+export function mapDocumentBlocks(source: string, options: { readonly frontmatter?: boolean } = {}): readonly DocumentBlock[] {
+  const lines = splitLines(source);
   const blocks: DocumentBlock[] = [];
+  const frontmatterLines = options.frontmatter === false ? 0 : frontmatterLineCount(lines);
   let offset = 0;
   let start = 0;
   let buffer: string[] = [];
-  let mode: 'frontmatter' | 'code' | 'div' | undefined;
-  let fence = '';
+  let mode: 'code' | 'div' | undefined;
+  let fence: CodeFence | undefined;
+  let innerFence: CodeFence | undefined;
+  let depth = 0;
 
   const flush = (forcedKind?: DocumentBlockKind) => {
     if (!buffer.length) return;
@@ -144,22 +175,27 @@ export function mapDocumentBlocks(source: string): readonly DocumentBlock[] {
 
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index]!;
-    const trimmed = line.trim();
+    const trimmed = trimLine(line);
     if (!buffer.length) start = offset;
 
-    if (!mode && index === 0 && trimmed === '---') { mode = 'frontmatter'; buffer.push(line); offset += line.length; continue; }
-    if (mode === 'frontmatter') {
+    if (index < frontmatterLines) {
       buffer.push(line); offset += line.length;
-      if (index > 0 && (trimmed === '---' || trimmed === '...')) { flush('frontmatter'); mode = undefined; }
+      if (index === frontmatterLines - 1) flush('frontmatter');
       continue;
     }
     if (!mode) {
-      const codeMatch = /^(`{3,}|~{3,})/.exec(trimmed);
-      if (codeMatch) { flush(); mode = 'code'; fence = codeMatch[1]!; start = offset; buffer.push(line); offset += line.length; continue; }
-      if (/^:{3,}/.test(trimmed)) { flush(); mode = 'div'; fence = trimmed.match(/^:+/)![0]; start = offset; buffer.push(line); offset += line.length; continue; }
+      const codeFence = openingCodeFence(line);
+      if (codeFence) { flush(); mode = 'code'; fence = codeFence; start = offset; buffer.push(line); offset += line.length; continue; }
+      if (/^:{3,}\s*\S/.test(trimmed)) { flush(); mode = 'div'; depth = 1; innerFence = undefined; start = offset; buffer.push(line); offset += line.length; continue; }
     } else {
       buffer.push(line); offset += line.length;
-      if ((mode === 'code' && trimmed.startsWith(fence)) || (mode === 'div' && trimmed === fence)) { flush(mode); mode = undefined; fence = ''; }
+      if (mode === 'code') {
+        if (closesCodeFence(line, fence!)) { flush('code'); mode = undefined; fence = undefined; }
+      } else if (innerFence) {
+        if (closesCodeFence(line, innerFence)) innerFence = undefined;
+      } else if ((innerFence = openingCodeFence(line))) { /* fenced code inside a div is opaque to ::: fences */ }
+      else if (/^:{3,}$/.test(trimmed)) { if (--depth === 0) { flush('div'); mode = undefined; } }
+      else if (/^:{3,}\s*\S/.test(trimmed)) depth += 1;
       continue;
     }
     if (!trimmed) { flush(); offset += line.length; continue; }
@@ -179,6 +215,9 @@ export function documentBlockAt(blocks: readonly DocumentBlock[], position: numb
     ?? blocks.find((block) => block.from >= position)
     ?? blocks.at(-1);
 }
+
+/** Trims spaces, tabs and line terminators only; U+2028/U+2029 stay ordinary content. */
+function trimLine(line: string): string { return line.replace(/^[ \t]+|[ \t\r\n]+$/g, ''); }
 
 function classify(trimmed: string): DocumentBlockKind {
   if (/^#{1,6}\s/.test(trimmed)) return 'heading';

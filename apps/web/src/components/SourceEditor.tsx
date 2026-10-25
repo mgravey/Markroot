@@ -3,7 +3,7 @@ import { basicSetup } from 'codemirror';
 import { markdown } from '@codemirror/lang-markdown';
 import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
 import { SearchQuery, setSearchQuery } from '@codemirror/search';
-import { Compartment, EditorState, RangeSet, RangeSetBuilder, StateEffect, StateField, type Extension, type Text } from '@codemirror/state';
+import { Compartment, EditorState, Transaction, RangeSet, RangeSetBuilder, StateEffect, StateField, type Extension, type Text } from '@codemirror/state';
 import { Decoration, EditorView, GutterMarker, WidgetType, gutter, keymap, type DecorationSet } from '@codemirror/view';
 import { tags } from '@lezer/highlight';
 import { documentBlockAt, type DocumentBlock } from '@markroot/document';
@@ -161,7 +161,8 @@ export function SourceEditor(props: Props) {
     if (previous === props.value) return;
     const change = minimalDocumentChange(previous, props.value);
     changing.current = true;
-    editor.dispatch({ changes: change });
+    // External syncs (file loads, visual edits, review decisions) must not become undoable local edits.
+    editor.dispatch({ changes: change, annotations: Transaction.addToHistory.of(false) });
     changing.current = false;
   }, [props.value]);
 

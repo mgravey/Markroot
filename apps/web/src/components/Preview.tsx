@@ -4,7 +4,7 @@ import type { ParsedComments } from '@markroot/comments';
 import type { SourceRange } from '@markroot/core';
 import { documentBlockAt, type DocumentBlock } from '@markroot/document';
 import { centeredScrollTop, isScrollKey, ScrollIntentGate, viewportCenter } from './scroll-sync.js';
-import { mapRenderedOffset, mapSourceOffset, opensExternalPage, protectLocalObjectUrls, trustedDoiUrl } from './preview-utils.js';
+import { mapRenderedOffset, mapSourceOffset, opensExternalPage, protectLocalObjectUrls, resolveWorkspaceLink, trustedDoiUrl } from './preview-utils.js';
 import { applyRenderedTrackChanges, type RenderedReviewChange } from '../rendered-track-changes.js';
 
 interface Props {
@@ -33,9 +33,11 @@ interface Props {
   onSelect(range: SourceRange): void;
   onCommentActivate(id: string): void;
   onScroll(id: string, progress: number): void;
+  documentPath?: string | undefined;
+  onOpenWorkspaceLink?(path: string, fragment?: string): void;
 }
 
-export function Preview({ html, objectUrls, warnings, blocks, search, regularExpression, activeBlock, scrollTarget, scrollProgress, scrollAlignment, anchorTarget, allowRemoteResources, fontFamily, fontSize, justified, trackChangesBaseHtml, activeTrackChange, reviewChanges, reviewDecisions, comments, activeCommentId, onNavigate, onSelect, onCommentActivate, onScroll }: Props) {
+export function Preview({ html, objectUrls, warnings, blocks, search, regularExpression, activeBlock, scrollTarget, scrollProgress, scrollAlignment, anchorTarget, allowRemoteResources, fontFamily, fontSize, justified, trackChangesBaseHtml, activeTrackChange, reviewChanges, reviewDecisions, comments, activeCommentId, onNavigate, onSelect, onCommentActivate, onScroll, documentPath, onOpenWorkspaceLink }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const preservedSelection = useRef<Range | undefined>(undefined);
   const preservedSourceSelection = useRef<SourceRange | undefined>(undefined);
@@ -237,6 +239,13 @@ export function Preview({ html, objectUrls, warnings, blocks, search, regularExp
     if (href.startsWith('#')) {
       event.preventDefault();
       navigatePreviewAnchor(host.current, decodeFragment(href.slice(1)), blocks, scrollIntent.current, onNavigate);
+      return;
+    }
+    if (link && !opensExternalPage(href) && !/^mailto:/i.test(href)) {
+      // Relative links would otherwise navigate the application window away from unsaved work.
+      event.preventDefault();
+      const target = documentPath ? resolveWorkspaceLink(href, documentPath) : undefined;
+      if (target) onOpenWorkspaceLink?.(target.path, target.fragment);
       return;
     }
     if (link) return;

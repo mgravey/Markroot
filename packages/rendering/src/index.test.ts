@@ -159,4 +159,130 @@ Evidence supports the result [@doe2026].
     expect(result.html).toContain('<section class="references"');
     expect(result.html).toContain('<h2>References</h2>');
   });
+
+  const render = (source: string, options: { citations?: readonly { key: string; title?: string; author?: string; year?: string; authors?: readonly ({ family: string } | { literal: string })[] }[]; allowRemoteResources?: boolean; engine?: BasicDocumentEngine } = {}) =>
+    (options.engine ?? new BasicDocumentEngine()).render({ snapshot: new DocumentSession(workspacePath('paper.qmd'), source).snapshot(), ...(options.citations ? { citations: options.citations } : {}), ...(options.allowRemoteResources !== undefined ? { allowRemoteResources: options.allowRemoteResources } : {}) });
+  const doe = { key: 'doe', author: 'Doe, Jane', year: '2026', title: 'Doe paper' };
+
+  it('keeps bare CR and U+2028/U+2029 segments when masking comments', () => {
+    const source = 'a\rb <!-- x -->\u2028c\u2029d';
+    expect(maskMarkdownHtmlComments(source)).toBe(`a\rb ${' '.repeat(10)}\u2028c\u2029d`);
+  });
+
+  it('inserts replacement text containing $ patterns literally', async () => {
+    const citations = [{ ...doe, title: "Costs $& and $' and $$ and $`" }];
+    const result = await render('See [@doe] and @doe.\n\n::: {#refs}\n:::\n', { citations });
+    expect(result.html).toContain("Costs $&amp; and $' and $$ and $`");
+    expect(result.html).toContain(`title="Costs $&amp; and $' and $$ and $\`"`);
+  });
+
+  it('never substitutes math, citations or cross-references inside code or link destinations', async () => {
+    const result = await render([
+      '```', '$x$ [@doe] @fig-a $$y$$', '```', '',
+      'Inline `$x$ @doe` code and [a link](https://x.org/$y$z$) here.', '',
+      '[r]: missing.png', '![see $x$][r]', '',
+      '::: {.callout-note}', '```', '$z$', '```', ':::', '',
+    ].join('\n'), { citations: [doe] });
+    expect(result.html).not.toContain('math-inline');
+    expect(result.html).not.toContain('class="citation');
+    expect(result.html).toContain('$x$ [@doe] @fig-a $$y$$');
+    expect(result.html).toContain('<code>$x$ @doe</code>');
+    expect(result.html).toContain('href="https://x.org/$y$z$"');
+    expect(result.html).toContain('$z$');
+    expect(result.html).not.toMatch(/\ue000|MRROOT/);
+  });
+
+  it('restores placeholders as source text inside attribute values', async () => {
+    const result = await render('[r]: https://example.org/a.png\n![see $x$][r]\n', { allowRemoteResources: true });
+    expect(result.html).toContain('alt="see $x$"');
+    expect(result.html).not.toMatch(/alt="[^"]*</);
+  });
+
+  it('follows Pandoc dollar rules for inline math', async () => {
+    const prices = await render('It costs $5 and $10 today, or $ 3 $ maybe.\n');
+    expect(prices.html).not.toContain('math-inline');
+    const math = await render('Inline $x^2$ and $a+b$, done.\n');
+    expect(math.html.match(/math-inline/g)).toHaveLength(2);
+  });
+
+  it('does not read e-mail addresses in links or prose as citations', async () => {
+    const result = await render('Write [contact@example.org](mailto:contact@example.org), or a@doe.org, or [x@doe]. Cite [@doe].\n', { citations: [doe] });
+    expect(result.html).toContain('<a href="mailto:contact@example.org">contact@example.org</a>');
+    expect(result.html.match(/class="citation"/g)).toHaveLength(1);
+  });
+
+  it('numbers cross-references exactly as the renderer numbers headings, figures, equations and tables', async () => {
+    const result = await render([
+      '---', 'title: Demo', '# not a heading', '---', '',
+      'See @sec-intro, @fig-b, @eq-one, @tbl-t and @fig-missing.', '',
+      '```', '# code comment', '$$ x $$', '![Code](c.png){#fig-code}', '```', '',
+      '![](a.png)', '',
+      '# Intro {#sec-intro}', '',
+      '![Caption](b.png){#fig-b}', '',
+      '$$ y $$ {#eq-one}', '',
+      '| A | B |', '|---|---|', '| 1 | 2 |', ': Values {#tbl-t}', '',
+    ].join('\n'));
+    const labels = [...result.html.matchAll(/<a class="crossref" href="#([^"]+)"[^>]*>([^<]+)<\/a>/g)].map((match) => [match[1], match[2]]);
+    expect(labels).toEqual([['sec-intro', 'Section 1'], ['fig-b', 'Figure 1'], ['eq-one', 'Equation 1'], ['tbl-t', 'Table 1']]);
+    expect(result.html).toContain('@fig-missing');
+    expect(result.html).toContain('<span class="figure-label">Figure 1.</span> Caption');
+  });
+
+  it('renders an unterminated --- opener as document content', async () => {
+    const result = await render('---\ntitle: Draft\n\n# Heading\n');
+    expect(result.html).toContain('Heading</h1>');
+  });
+
+  it('renders nested divs and code inside callouts', async () => {
+    const result = await render('::: {.callout-note}\nOuter\n\n::: {.inner #box}\nInner $x$\n:::\n\n```\n:::\n```\n:::\n\nAfter\n');
+    expect(result.html).toContain('<aside class="callout callout-note">');
+    expect(result.html).toMatch(/<div id="box" class="inner"><p>Inner <span class="math-inline"/);
+    expect(result.html).toContain('<pre><code>:::\n</code></pre>');
+    expect(result.html).not.toMatch(/<p>:::/);
+  });
+
+  it('keeps Unicode headings, ids and cross-reference keys', async () => {
+    const result = await render('# Введение\n\n# 引言 {#sec-引言}\n\n![Café](c.png){#fig-café}\n\nSee @sec-引言 and @fig-café.\n');
+    expect(result.html).toContain('<h1 id="введение"');
+    expect(result.html).toContain('<h1 id="sec-引言"');
+    expect(result.html).toContain('<figure id="fig-café"');
+    expect(result.html).toContain('href="#sec-引言"');
+    expect(result.html).toContain('href="#fig-café"');
+  });
+
+  it('keeps brace-protected corporate authors whole in citation labels', async () => {
+    const result = await render('[@who]\n', { citations: [{ key: 'who', author: 'World Health Organization', authors: [{ literal: 'World Health Organization' }], year: '2020' }] });
+    expect(result.html).toContain('World Health Organization, 2020');
+  });
+
+  it('blocks remote images unless remote resources are allowed', async () => {
+    const source = '![Logo](https://example.org/logo.png){#fig-logo}\n';
+    const blocked = await render(source);
+    expect(blocked.html).not.toContain('src="https://example.org/logo.png"');
+    expect(blocked.html).toContain('class="remote-resource-placeholder"');
+    expect(blocked.html).toContain('Remote image blocked: Logo');
+    const allowed = await render(source, { allowRemoteResources: true });
+    expect(allowed.html).toContain('src="https://example.org/logo.png"');
+  });
+
+  it('reuses cached blocks without stale offsets, numbering or identifiers', async () => {
+    const engine = new BasicDocumentEngine();
+    const first = await render('# Intro\n\nText\n\n# Intro\n\n![Cap](a.png){#fig-a}\n', { engine });
+    expect(first.html).toContain('<h1 id="intro-2"');
+    const second = await render('# Start\n\nLonger text here\n\n# Intro\n\n![Cap](a.png){#fig-a}\n', { engine });
+    const fresh = await render('# Start\n\nLonger text here\n\n# Intro\n\n![Cap](a.png){#fig-a}\n');
+    expect(second.html).toBe(fresh.html);
+    expect(second.outline).toEqual(fresh.outline);
+    expect(second.html).toContain('<h1 id="intro"');
+    const source = '# Start\n\nLonger text here\n\n# Intro\n\n![Cap](a.png){#fig-a}\n';
+    expect(second.html).toContain(`data-source-offset="${source.indexOf('![Cap]')}"`);
+    const third = await render('# Start\n\n![New](n.png){#fig-n}\n\n# Intro\n\n![Cap](a.png){#fig-a}\n', { engine });
+    expect(third.html).toContain('<span class="figure-label">Figure 2.</span> Cap');
+  });
+
+  it('stops rendering when the operation is aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    await expect(new BasicDocumentEngine().render({ snapshot: new DocumentSession(workspacePath('a.md'), '# A\n').snapshot() }, { signal: controller.signal })).rejects.toThrow(/cancelled/i);
+  });
 });

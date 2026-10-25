@@ -29,4 +29,26 @@ describe('review draft', () => {
     expect(mapReviewCurrentOffset(rejected, currentAfter)).toBe(compareAfter);
     expect(mapReviewCompareOffset(rejected, change.compareRange.from)).toBe(change.compareRange.from);
   });
+
+  it('derives change ids from content and context so they survive unrelated edits', () => {
+    const base = 'Alpha one. Then the second sentence, Beta two. Gamma three.';
+    const first = createReviewDraft(base, 'Alpha one. Then the second sentence, Beta 2. Gamma three.', 'base');
+    const shifted = createReviewDraft(base, 'Alpha 1. Then the second sentence, Beta 2. Gamma three.', 'base');
+    expect(shifted.changes).toHaveLength(2);
+    const beta = (draft: typeof first) => draft.changes.find((change) => change.compareText === '2')!.id;
+    expect(beta(shifted)).toBe(beta(first));
+    const repeated = createReviewDraft('a x a x a', 'a y a y a', 'base');
+    expect(new Set(repeated.changes.map((change) => change.id)).size).toBe(repeated.changes.length);
+    expect(createReviewDraft('a x a x a', 'a y a y a', 'base').changes.map((change) => change.id)).toEqual(repeated.changes.map((change) => change.id));
+  });
+
+  it('returns an explicit too-large draft when the diff budget is exceeded', () => {
+    const base = Array.from({ length: 400 }, (_, index) => `w${index}`).join(' ');
+    const compare = Array.from({ length: 400 }, (_, index) => `v${index}`).join(' ');
+    const draft = createReviewDraft(base, compare, 'base', new Map(), { maxEditLength: 10 });
+    expect(draft).toMatchObject({ tooLarge: true, changes: [] });
+    expect(() => materializeReview(draft)).toThrow(/too large/);
+    expect(materializeReviewPresentation(draft).current).toBe(compare);
+    expect(createReviewDraft('a b', 'a c', 'base', new Map(), { timeout: 10_000 }).tooLarge).toBeUndefined();
+  });
 });

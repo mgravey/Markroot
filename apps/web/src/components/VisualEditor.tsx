@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent } from 'react';
+import { memo, useEffect, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent } from 'react';
 import { defaultMarkdownParser, defaultMarkdownSerializer } from 'prosemirror-markdown';
 import { EditorState } from 'prosemirror-state';
 import { EditorView } from 'prosemirror-view';
@@ -82,21 +82,37 @@ export function VisualEditor({ snapshot, activeBlock, scrollTarget, scrollProgre
   </div>;
 }
 
-function VisualBlock({ block, active, onApply, onNavigate }: { block: DocumentBlock; active: boolean; onApply(block: DocumentBlock, replacement: string): void; onNavigate(id: string, sourceOffset?: number): void }) {
+const VisualBlock = memo(function VisualBlock({ block, active, onApply, onNavigate }: { block: DocumentBlock; active: boolean; onApply(block: DocumentBlock, replacement: string): void; onNavigate(id: string, sourceOffset?: number): void }) {
   const host = useRef<HTMLDivElement>(null);
   const [editing, setEditing] = useState(false);
+  const latest = useRef({ block, onApply });
+  latest.current = { block, onApply };
   useEffect(() => {
-    if (!editing || !host.current || !block.editable || block.kind === 'code' || block.kind === 'div' || block.kind === 'table') return;
+    // Read the block once per editing session: snapshot or callback churn must not recreate the editor and drop edits.
+    const initial = latest.current.block;
+    if (!editing || !host.current || !initial.editable || initial.kind === 'code' || initial.kind === 'div' || initial.kind === 'table') return;
     let state: EditorState;
-    try { state = EditorState.create({ doc: defaultMarkdownParser.parse(block.text) }); }
+    try { state = EditorState.create({ doc: defaultMarkdownParser.parse(initial.text) }); }
     catch { return; }
+    const initialDoc = state.doc;
+    let cancelled = false;
     const editor = new EditorView(host.current, {
       state,
       dispatchTransaction(transaction) { const next = editor.state.apply(transaction); editor.updateState(next); },
       handleDOMEvents: {
+        keydown(_view, event) {
+          if (event.key !== 'Escape') return false;
+          cancelled = true;
+          setEditing(false);
+          return true;
+        },
         blur(view) {
-          const replacement = `${defaultMarkdownSerializer.serialize(view.state.doc).trimEnd()}\n`;
-          if (replacement !== block.text) onApply(block, replacement);
+          // An unedited round-trip through the CommonMark serializer would rewrite Pandoc/Quarto syntax.
+          if (!cancelled && !view.state.doc.eq(initialDoc)) {
+            const replacement = `${defaultMarkdownSerializer.serialize(view.state.doc).trimEnd()}\n`;
+            const { block: current, onApply: apply } = latest.current;
+            if (replacement !== current.text) apply(current, replacement);
+          }
           setEditing(false);
           return false;
         },
@@ -104,7 +120,7 @@ function VisualBlock({ block, active, onApply, onNavigate }: { block: DocumentBl
     });
     editor.focus();
     return () => editor.destroy();
-  }, [editing, block, onApply]);
+  }, [editing, block.id]);
 
   if (editing) return <section className="visual-block editing" data-block-id={block.id} ref={host} />;
   if (block.kind === 'frontmatter' || block.kind === 'raw') return <section className={`visual-block atomic ${active ? 'active' : ''}`} data-block-id={block.id} onClick={() => onNavigate(block.id, block.from)}><span>Source-backed {block.kind}</span><pre>{block.text}</pre></section>;
@@ -114,10 +130,13 @@ function VisualBlock({ block, active, onApply, onNavigate }: { block: DocumentBl
     data-block-id={block.id}
     onClick={(event) => onNavigate(block.id, visualSourceOffset(event, block))}
     onDoubleClick={() => setEditing(true)}
-    title="Double-click to edit this block"
+    onKeyDown={(event) => { if (event.key === 'Enter' && event.target === event.currentTarget) { event.preventDefault(); setEditing(true); } }}
+    tabIndex={0}
+    aria-label={`Editable ${block.kind} block. Press Enter to edit, Escape to cancel.`}
+    title="Double-click or press Enter to edit this block"
     dangerouslySetInnerHTML={{ __html: lightweight(block) }}
   />;
-}
+});
 
 function lightweight(block: DocumentBlock): string {
   const escaped = escapeHtml(maskMarkdownHtmlComments(block.text).trim());

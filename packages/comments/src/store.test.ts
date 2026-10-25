@@ -59,10 +59,16 @@ describe('Git-friendly YAML comment storage', () => {
     expect((await store.load(path))[0]?.resolution?.revision).toEqual(revision);
     await store.setStatus(path, id, 'open');
     expect((await store.load(path))[0]?.resolution).toBeUndefined();
+    const metadata = (await files(workspace))[`.markroot/comments/${id}/thread.yaml`];
     await store.delete(path, id);
     expect(await store.load(path)).toEqual([]);
-    expect(await store.paths(path)).toContain(`.markroot/comments/${id}/thread.yaml`);
-    expect((await files(workspace))[`.markroot/comments/${id}/thread.yaml`]).toContain('deleted: true');
+    const saved = await files(workspace);
+    // State changes are append-only events; thread.yaml never changes after creation.
+    expect(saved[`.markroot/comments/${id}/thread.yaml`]).toBe(metadata);
+    const events = Object.keys(saved).filter((file) => file.startsWith(`.markroot/comments/${id}/events/`));
+    expect(events).toHaveLength(3);
+    expect(events.some((file) => saved[file]!.includes('type: "delete"'))).toBe(true);
+    expect(await store.paths(path)).toEqual(expect.arrayContaining([`.markroot/comments/${id}/thread.yaml`, ...events]));
     await expect(store.reply(path, id, 'Late reply', author)).rejects.toThrow('not found');
   });
 
@@ -103,14 +109,82 @@ describe('Git-friendly YAML comment storage', () => {
   it('surfaces malformed YAML, merge conflicts and invalid IDs without overwriting them', async () => {
     const { workspace, store, id } = await fixture();
     const metadata = workspacePath(`.markroot/comments/${id}/thread.yaml`);
+    const healthy = await store.create(path, source, range, 'Healthy thread', author, (await store.load(path))[0]!.sourceRevision!);
     await workspace.writeFile(metadata, '<<<<<<< HEAD\nstatus: open\n=======\nstatus: resolved\n>>>>>>> branch\n');
-    await expect(store.load(path)).rejects.toThrow(/YAML|merge conflict/);
+    // One broken sidecar must not hide every other thread of every document.
+    expect((await store.load(path)).map((thread) => thread.id)).toEqual([healthy]);
+    const { broken } = await store.loadWithIssues(path);
+    expect(broken).toEqual([{ id, error: expect.stringMatching(/YAML|merge conflict/) }]);
+    expect(await store.paths(path)).not.toContain(metadata);
     await expect(store.setStatus(path, id, 'open')).rejects.toThrow();
     await expect(store.reply(path, '../escape', 'unsafe', author)).rejects.toThrow('Invalid comment ID');
     expect(await workspace.readFile(metadata)).toContain('<<<<<<< HEAD');
   });
+
+  it('reports broken messages per thread and reuses parsed sidecars until they change', async () => {
+    const { workspace, store, id } = await fixture();
+    await store.reply(path, id, 'Second', author);
+    await store.load(path);
+    const read = vi.spyOn(workspace, 'readFile');
+    await store.load(path);
+    expect(read).not.toHaveBeenCalled();
+    const message = (await listTree(workspace)).find((entry) => entry.path.includes('/messages/'))!.path;
+    await workspace.writeFile(message, 'body: [unterminated\n');
+    read.mockClear();
+    const result = await store.loadWithIssues(path);
+    expect(read.mock.calls.map(([file]) => file)).toEqual([message]);
+    expect(result).toMatchObject({ threads: [], broken: [{ id, document: path }] });
+  });
+
+  it('folds legacy thread.yaml state with later events', async () => {
+    const { workspace, store, id, revision } = await fixture();
+    const metadata = workspacePath(`.markroot/comments/${id}/thread.yaml`);
+    const resolution = { revision, selector: createSelector(source, range), author, at: '2026-01-01T00:00:00Z' };
+    const legacy = (await workspace.readFile(metadata)).replace('status: "open"', 'status: "resolved"');
+    await workspace.writeFile(metadata, legacy.replace('resolution: null', `resolution:\n  revision:\n    commit: "${revision.commit}"\n    contentHash: "${revision.contentHash}"\n  selector:\n    from: ${range.from}\n    to: ${range.to}\n    exact: "this"\n    prefix: ${JSON.stringify(resolution.selector.prefix)}\n    suffix: ${JSON.stringify(resolution.selector.suffix)}\n    blockLevel: false\n  author:\n    actorId: "ada"\n    displayName: "Ada"\n  at: "${resolution.at}"`));
+    expect((await store.load(path))[0]).toMatchObject({ status: 'resolved', resolution: { at: resolution.at } });
+    await store.setStatus(path, id, 'open');
+    expect((await store.load(path))[0]?.status).toBe('open');
+  });
 });
 
+it('merges concurrent resolve and delete from different branches without a Git conflict', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'markroot-comment-events-'));
+  const git = (...args: string[]) => execFileSync('git', ['-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', ...args], {
+    cwd: directory, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 'Ada', GIT_AUTHOR_EMAIL: 'ada@example.test', GIT_COMMITTER_NAME: 'Ada', GIT_COMMITTER_EMAIL: 'ada@example.test' }, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const persist = async (workspace: MemoryWorkspace) => {
+    for (const [file, content] of Object.entries(await files(workspace))) {
+      await mkdir(dirname(join(directory, file)), { recursive: true });
+      await writeFile(join(directory, file), content);
+    }
+  };
+  const checkoutWorkspace = async () => new MemoryWorkspace(Object.fromEntries(await Promise.all(git('ls-files', '-z').split('\0').filter(Boolean).map(async (file) => [file, await readFile(join(directory, file), 'utf8')]))));
+  try {
+    const { workspace, id, revision } = await fixture();
+    const kept = await new CommentStore(workspace).create(path, source, range, 'Kept thread', author, revision);
+    git('init', '-b', 'main');
+    await persist(workspace);
+    git('add', '.'); git('commit', '-m', 'Initial');
+    git('checkout', '-b', 'resolver');
+    const resolver = await checkoutWorkspace();
+    await new CommentStore(resolver).setStatus(path, id, 'resolved', { revision, selector: createSelector(source, range), author, at: '2026-09-07' });
+    await new CommentStore(resolver).reattach(path, kept, source.replace('this', 'this very'), range, revision);
+    await persist(resolver);
+    git('add', '.'); git('commit', '-m', 'Resolve');
+    git('checkout', 'main');
+    const deleter = await checkoutWorkspace();
+    await new CommentStore(deleter).delete(path, id);
+    await new CommentStore(deleter).setStatus(path, kept, 'resolved', { revision, selector: createSelector(source, range), author, at: '2026-09-08' });
+    await persist(deleter);
+    git('add', '.'); git('commit', '-m', 'Delete');
+    git('merge', 'resolver', '--no-edit');
+    expect(git('status', '--porcelain')).toBe('');
+    const merged = await new CommentStore(await checkoutWorkspace()).loadWithIssues(path);
+    expect(merged.broken).toEqual([]);
+    expect(merged.threads.map((thread) => thread.id)).toEqual([kept]);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
 
 it('merges real Git branches with independent replies, inherited threads and revision-aware resolutions', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'markroot-comment-merge-'));

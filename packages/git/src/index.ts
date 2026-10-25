@@ -8,12 +8,15 @@ import {
   deleteBranch,
   getConfig,
   hashBlob,
+  isIgnored,
   listBranches,
+  listFiles,
   log,
   merge,
   readBlob,
   readObject,
   remove,
+  renameBranch,
   resetIndex,
   resolveRef,
   STAGE,
@@ -21,6 +24,7 @@ import {
   TREE,
   walk,
   WORKDIR,
+  writeRef,
   type FsClient,
   type WalkerEntry,
 } from 'isomorphic-git';
@@ -29,6 +33,8 @@ import { MarkrootError, workspacePath, type AuthorIdentity, type WorkspacePath }
 import type { ProjectWorkspace, WorkspaceStat } from '@markroot/workspace';
 
 const DIR = '/repo';
+const INDEX_LOCK = workspacePath('.git/index.lock');
+const EXECUTABLE = 0o100755;
 
 export interface GitFileStatus {
   readonly path: WorkspacePath;
@@ -51,6 +57,8 @@ export interface GitCommitCandidate {
   readonly repositoryFingerprint: string;
   readonly openFileOid: string;
   readonly worktreePaths?: readonly WorkspacePath[];
+  /** Requested paths left out because .gitignore excludes them and Git does not track them. */
+  readonly ignored?: readonly WorkspacePath[];
   readonly diffOid: string;
 }
 export interface MergePreview { readonly ours: string; readonly theirs: string; readonly clean: boolean; readonly result?: unknown; readonly error?: string }
@@ -79,7 +87,10 @@ export interface GitRepository {
 
 export class IsomorphicGitRepository implements GitRepository {
   private readonly fs: FsClient;
-  constructor(private readonly workspace: ProjectWorkspace) { this.fs = createGitFs(workspace); }
+  /** Index modes other than 0o100644, so staging through FSA never drops the executable bit. */
+  private modes = new Map<string, number>();
+  private modesVersion: string | undefined;
+  constructor(private readonly workspace: ProjectWorkspace) { this.fs = createGitFs(workspace, { modeFor: (path) => this.modes.get(path) }); }
 
   async validate(): Promise<void> {
     let dotGit: WorkspaceStat;
@@ -92,13 +103,15 @@ export class IsomorphicGitRepository implements GitRepository {
 
   async fingerprint(): Promise<string> {
     await this.validate();
+    const symbolic = await currentBranch({ fs: this.fs, dir: DIR, fullname: true }).catch(() => undefined) ?? 'detached';
     const head = await resolveRef({ fs: this.fs, dir: DIR, ref: 'HEAD' }).catch(() => 'unborn');
     const index = await this.workspace.readBytes(workspacePath('.git/index')).catch(() => new Uint8Array());
-    return `${head}:${(await hashBlob({ object: index })).oid}`;
+    return `${symbolic}:${head}:${(await hashBlob({ object: index })).oid}`;
   }
 
   async status(): Promise<readonly GitFileStatus[]> {
     await this.validate();
+    await this.refreshModes();
     const matrix = await statusMatrix({ fs: this.fs, dir: DIR });
     return matrix.map(([filepath, head, workdir, stage]) => ({
       path: workspacePath(filepath), head, workdir, stage,
@@ -107,13 +120,15 @@ export class IsomorphicGitRepository implements GitRepository {
   }
 
   async diff(path: WorkspacePath): Promise<string> {
-    let base = '';
+    let base: Uint8Array = new Uint8Array();
     try {
       const oid = await resolveRef({ fs: this.fs, dir: DIR, ref: 'HEAD' });
-      base = new TextDecoder().decode((await readBlob({ fs: this.fs, dir: DIR, oid, filepath: path })).blob);
-    } catch { base = ''; }
-    const current = await this.workspace.readFile(path).catch(() => '');
-    return createTwoFilesPatch(`a/${path}`, `b/${path}`, base, current, 'HEAD', 'working tree');
+      base = (await readBlob({ fs: this.fs, dir: DIR, oid, filepath: path })).blob;
+    } catch (error) { if (!isGitNotFound(error)) throw error; }
+    let current: Uint8Array = new Uint8Array();
+    try { current = await this.workspace.readBytes(path); }
+    catch (error) { if (!(error instanceof MarkrootError && error.code === 'NOT_FOUND')) throw error; }
+    return createPatch(path, base, current, 'working tree');
   }
 
   async prepareCommitCandidate(openPath: WorkspacePath, relatedPaths?: readonly WorkspacePath[]): Promise<GitCommitCandidate | undefined> {
@@ -122,12 +137,20 @@ export class IsomorphicGitRepository implements GitRepository {
     const openBytes = await this.workspace.readBytes(openPath).catch(() => undefined);
     if (!openBytes) return undefined;
     const openFileOid = (await hashBlob({ object: openBytes })).oid;
-    const worktreePaths = [...new Set([openPath, ...(relatedPaths ?? [])])];
+    const requested = [...new Set([openPath, ...(relatedPaths ?? [])])];
+    // add() silently skips ignored untracked files; keep them out so the staged diff can match.
+    const tracked = new Set(await listFiles({ fs: this.fs, dir: DIR }));
+    const ignored: WorkspacePath[] = [];
+    for (const path of requested) if (!tracked.has(path) && await isIgnored({ fs: this.fs, dir: DIR, filepath: path })) ignored.push(path);
+    if (ignored.includes(openPath)) throw new MarkrootError('GIT_ERROR', `${openPath} is ignored by .gitignore and is not tracked, so it cannot be committed.`);
+    const worktreePaths = requested.filter((path) => !ignored.includes(path));
+    await this.refreshModes();
     const result = await this.candidateDiff(worktreePaths);
     if (!result.openChanged || !result.diff.trim()) return undefined;
     return {
       openPath,
       worktreePaths,
+      ...(ignored.length ? { ignored } : {}),
       paths: result.paths,
       diff: result.diff,
       repositoryFingerprint,
@@ -165,7 +188,11 @@ export class IsomorphicGitRepository implements GitRepository {
   }
 
   async stage(path: WorkspacePath): Promise<void> {
-    await this.withMutation(() => this.stageUnlocked(path));
+    await this.withMutation(async () => {
+      const tracked = (await listFiles({ fs: this.fs, dir: DIR })).includes(path);
+      if (!tracked && await isIgnored({ fs: this.fs, dir: DIR, filepath: path })) throw new MarkrootError('GIT_ERROR', `${path} is ignored by .gitignore.`);
+      await this.stageUnlocked(path);
+    });
   }
 
   async unstage(path: WorkspacePath): Promise<void> { await this.withMutation(() => resetIndex({ fs: this.fs, dir: DIR, filepath: path })); }
@@ -196,13 +223,17 @@ export class IsomorphicGitRepository implements GitRepository {
     if (!source || !target) throw new MarkrootError('GIT_ERROR', 'Both branch names are required.');
     if (source === target) return;
     await this.withMutation(async () => {
-      const oid = await resolveRef({ fs: this.fs, dir: DIR, ref: source });
-      const active = await currentBranch({ fs: this.fs, dir: DIR, fullname: false });
-      await branch({ fs: this.fs, dir: DIR, ref: target, object: oid, checkout: active === source });
-      await deleteBranch({ fs: this.fs, dir: DIR, ref: source });
+      await renameBranch({ fs: this.fs, dir: DIR, oldref: source, ref: target });
+      // Carry upstream/merge settings along, like `git branch -m`.
+      const configPath = workspacePath('.git/config');
+      const config = await this.workspace.readFile(configPath).catch(() => undefined);
+      const header = new RegExp(`^(\\s*)\\[branch\\s+"${escapeRegExp(escapeConfig(source))}"\\]`, 'gm');
+      const next = config?.replace(header, `$1[branch "${escapeConfig(target).replaceAll('$', '$$$$')}"]`);
+      if (config !== undefined && next !== config) await this.workspace.writeFile(configPath, next!);
     });
   }
   async deleteBranch(ref: string): Promise<void> { await this.withMutation(() => deleteBranch({ fs: this.fs, dir: DIR, ref })); }
+  /** isomorphic-git refuses with CheckoutConflictError when local edits would be overwritten. */
   async checkout(ref: string): Promise<void> { await this.withMutation(() => checkout({ fs: this.fs, dir: DIR, ref })); }
 
   async previewMerge(theirs: string): Promise<MergePreview> {
@@ -218,8 +249,17 @@ export class IsomorphicGitRepository implements GitRepository {
     if (!author.email) throw new Error('A Git author email is required.');
     const ours = await this.currentBranch();
     if (!ours) throw new MarkrootError('GIT_ERROR', 'Detached HEAD cannot receive a branch merge.');
-    const result = await this.withMutation(() => merge({ fs: this.fs, dir: DIR, ours, theirs, author: { name: author.displayName, email: author.email! }, ...(message ? { message } : {}) }));
-    return result.oid;
+    return this.withMutation(async () => {
+      if (await this.dirty()) throw new MarkrootError('CONFLICT', 'Commit or discard local changes before merging.');
+      const before = await resolveRef({ fs: this.fs, dir: DIR, ref: ours });
+      // isomorphic-git only moves the branch (and writes the merge commit); index and files stay behind.
+      const result = await merge({ fs: this.fs, dir: DIR, ours, theirs, author: { name: author.displayName, email: author.email! }, ...(message ? { message } : {}) });
+      if (result.oid && result.oid !== before) {
+        try { await checkout({ fs: this.fs, dir: DIR, ref: ours }); }
+        catch (error) { await writeRef({ fs: this.fs, dir: DIR, ref: `refs/heads/${ours}`, value: before, force: true }); throw error; }
+      }
+      return result.oid;
+    });
   }
 
   async configuredAuthor(): Promise<Partial<AuthorIdentity>> {
@@ -231,14 +271,35 @@ export class IsomorphicGitRepository implements GitRepository {
   private async withMutation<T>(operation: () => Promise<T>): Promise<T> {
     await this.validate();
     const run = async () => {
-      const before = await this.fingerprint();
-      await Promise.resolve();
-      if (before !== await this.fingerprint()) throw new MarkrootError('CONFLICT', 'The repository changed before the Git operation started. Refresh and try again.');
-      return operation();
+      // Exclude native Git for the duration, using the lock file it honours itself.
+      if (await this.workspace.stat(INDEX_LOCK).then(() => true, () => false)) throw new MarkrootError('CONFLICT', 'Another Git process is using this repository (.git/index.lock exists). If none is running, delete .git/index.lock and try again.');
+      await this.workspace.writeBytes(INDEX_LOCK, new Uint8Array());
+      try { await this.refreshModes(); return await operation(); }
+      finally { await this.workspace.remove(INDEX_LOCK).catch(() => undefined); }
     };
     const lockName = (this.workspace as ProjectWorkspace & { readonly lockName?: string }).lockName;
     if (!lockName || typeof navigator === 'undefined' || !navigator.locks) return run();
     return navigator.locks.request(lockName, { mode: 'exclusive' }, run);
+  }
+
+  private async dirty(): Promise<boolean> {
+    const matrix = await statusMatrix({ fs: this.fs, dir: DIR });
+    return matrix.some(([, head, workdir, stage]) => !(head === 0 && stage === 0) && (head !== workdir || head !== stage));
+  }
+
+  private async refreshModes(): Promise<void> {
+    const version = await this.workspace.stat(workspacePath('.git/index')).then((stat) => stat.version ?? `${stat.modifiedAt}:${stat.size}`, () => 'none');
+    if (version === this.modesVersion) return;
+    const entries = version === 'none' ? [] : await walk({
+      fs: this.fs, dir: DIR, trees: [STAGE()],
+      map: async (filepath, [entry]) => {
+        if (!entry || await entry.type() !== 'blob') return undefined;
+        const mode = await entry.mode();
+        return mode !== 0o100644 ? [filepath, mode] : undefined;
+      },
+    }) as Array<[string, number]>;
+    this.modes = new Map(entries.filter(Boolean));
+    this.modesVersion = version;
   }
 
   private async stageUnlocked(path: WorkspacePath): Promise<void> {
@@ -254,11 +315,15 @@ export class IsomorphicGitRepository implements GitRepository {
       trees: [TREE({ ref: 'HEAD' }), STAGE(), WORKDIR({ refresh: false })],
       map: async (filepath, entries) => {
         if (filepath === '.') return undefined;
+        if (filepath === '.git' || filepath.startsWith('.git/')) return null;
         const [head, stage, workdir] = entries;
+        const headType = await entryType(head);
+        const stageType = await entryType(stage);
+        // Prune untracked directories (node_modules, build output…) unless a selected path lives inside.
+        if (headType !== 'tree' && stageType !== 'tree' && await entryType(workdir) === 'tree') return worktreePaths.some((path) => path.startsWith(`${filepath}/`)) ? undefined : null;
         const selected = worktreePaths.includes(filepath as WorkspacePath);
         const target = selected ? workdir : stage;
-        const headType = await entryType(head);
-        const targetType = await entryType(target);
+        const targetType = selected ? await entryType(target) : stageType;
         if (headType !== 'blob' && targetType !== 'blob') return undefined;
         const path = workspacePath(filepath);
         const before = await this.entryBytes(head, 'tree');
@@ -291,10 +356,16 @@ async function entryType(entry: WalkerEntry | null | undefined): Promise<Awaited
   return entry ? entry.type() : undefined;
 }
 
-function createPatch(path: WorkspacePath, before: Uint8Array, after: Uint8Array): string {
+function createPatch(path: WorkspacePath, before: Uint8Array, after: Uint8Array, label = 'candidate'): string {
   if (isBinary(before) || isBinary(after)) return `diff --git a/${path} b/${path}\nBinary files a/${path} and b/${path} differ\n`;
-  return createTwoFilesPatch(`a/${path}`, `b/${path}`, new TextDecoder().decode(before), new TextDecoder().decode(after), 'HEAD', 'candidate');
+  return createTwoFilesPatch(`a/${path}`, `b/${path}`, new TextDecoder().decode(before), new TextDecoder().decode(after), 'HEAD', label);
 }
+function isGitNotFound(error: unknown): boolean {
+  const code = typeof error === 'object' && error && 'code' in error ? error.code : undefined;
+  return code === 'NotFoundError' || code === 'ENOENT';
+}
+function escapeRegExp(value: string): string { return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+function escapeConfig(value: string): string { return value.replaceAll('\\', '\\\\').replaceAll('"', '\\"'); }
 
 function isBinary(content: Uint8Array): boolean {
   return content.subarray(0, Math.min(content.length, 8_000)).includes(0);
@@ -306,9 +377,16 @@ interface NodeStatLike {
 }
 interface EncodingOptions { encoding?: string | null }
 
-export function createGitFs(workspace: ProjectWorkspace): FsClient {
+export interface GitFsOptions {
+  /** Git mode recorded for a path (index/HEAD); the FSA has no permission bits, so never report less. */
+  readonly modeFor?: (path: WorkspacePath) => number | undefined;
+}
+
+export function createGitFs(workspace: ProjectWorkspace, options: GitFsOptions = {}): FsClient {
   const adaptPath = (input: string): WorkspacePath | undefined => {
-    const clean = input.replaceAll('\\', '/').replace(/^\/repo\/?/, '').replace(/^\/+/, '');
+    const clean = input.replace(/^\/repo\/?/, '').replace(/^\/+/, '');
+    // A tracked name containing a backslash cannot exist in a browser-visible folder; never alias it to a/b.
+    if (clean.includes('\\')) throw Object.assign(new Error(`Unsupported file name: ${clean}`), { code: 'ENOENT' });
     return clean && clean !== '.' ? workspacePath(clean) : undefined;
   };
   const nodeError = (error: unknown): never => {
@@ -319,7 +397,7 @@ export function createGitFs(workspace: ProjectWorkspace): FsClient {
   const stat = async (input: string): Promise<NodeStatLike> => {
     const path = adaptPath(input);
     if (!path) return makeStat('directory', 0, 0);
-    try { const value = await workspace.stat(path); return makeStat(value.kind, value.size, value.modifiedAt ?? 0); }
+    try { const value = await workspace.stat(path); return makeStat(value.kind, value.size, value.modifiedAt ?? 0, value.kind === 'file' ? options.modeFor?.(path) : undefined); }
     catch (error) { return nodeError(error); }
   };
   const promises = {
@@ -349,8 +427,8 @@ export function createGitFs(workspace: ProjectWorkspace): FsClient {
   return { promises } as unknown as FsClient;
 }
 
-function makeStat(kind: 'file' | 'directory', size: number, mtimeMs: number): NodeStatLike {
-  return { size, mode: kind === 'file' ? 0o100644 : 0o040755, mtimeMs, ctimeMs: mtimeMs, dev: 0, ino: 0, uid: 0, gid: 0, isFile: () => kind === 'file', isDirectory: () => kind === 'directory', isSymbolicLink: () => false };
+function makeStat(kind: 'file' | 'directory', size: number, mtimeMs: number, fileMode?: number): NodeStatLike {
+  return { size, mode: kind === 'file' ? fileMode === EXECUTABLE ? EXECUTABLE : 0o100644 : 0o040755, mtimeMs, ctimeMs: mtimeMs, dev: 0, ino: 0, uid: 0, gid: 0, isFile: () => kind === 'file', isDirectory: () => kind === 'directory', isSymbolicLink: () => false };
 }
 async function ensureParent(workspace: ProjectWorkspace, path: WorkspacePath): Promise<void> {
   const index = path.lastIndexOf('/');

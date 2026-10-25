@@ -1,5 +1,5 @@
 import type { AuthorIdentity, SourceRange } from '@markroot/core';
-export { CommentStore } from './store.js';
+export { CommentStore, type BrokenCommentThread, type CommentLoadResult } from './store.js';
 
 const THREAD_BLOCK = /\n?<!-- markroot:threads:v1\n([\s\S]*?)\n-->\s*$/;
 const ANCHOR = /<!-- markroot:anchor:v1 id=([0-9a-f-]+) edge=(start|end) -->/g;

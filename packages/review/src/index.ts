@@ -20,6 +20,14 @@ export interface ReviewDraft {
   readonly compare: string;
   readonly changes: readonly ReviewChange[];
   readonly pieces: readonly ReviewPiece[];
+  /** The word diff exceeded the time/edit budget; there are no inline changes to decide. */
+  readonly tooLarge?: boolean;
+}
+export interface ReviewDraftOptions {
+  /** Milliseconds before the word diff gives up (diff's `timeout`). */
+  readonly timeout?: number;
+  /** Maximum edit distance before the word diff gives up (diff's `maxEditLength`). */
+  readonly maxEditLength?: number;
 }
 export interface ReviewPresentation {
   readonly current: string;
@@ -27,19 +35,39 @@ export interface ReviewPresentation {
   readonly ranges: ReadonlyMap<string, SourceRange>;
 }
 
-export function createReviewDraft(base: string, compare: string, baseFingerprint: string, attribution: ReadonlyMap<string, readonly AuthorIdentity[]> = new Map()): ReviewDraft {
-  const parts = diffWordsWithSpace(base, compare);
+export function createReviewDraft(base: string, compare: string, baseFingerprint: string, attribution: ReadonlyMap<string, readonly AuthorIdentity[]> = new Map(), options: ReviewDraftOptions = {}): ReviewDraft {
+  const limits = { ...(options.timeout !== undefined ? { timeout: options.timeout } : {}), ...(options.maxEditLength !== undefined ? { maxEditLength: options.maxEditLength } : {}) };
+  const parts = 'timeout' in limits || 'maxEditLength' in limits ? diffWordsWithSpace(base, compare, limits as { timeout: number }) : diffWordsWithSpace(base, compare);
+  if (!parts) return { baseFingerprint, base, compare, changes: [], pieces: [], tooLarge: true };
+  const groups: Array<{ readonly common: string } | { readonly parts: Change[] }> = [];
+  for (const part of parts) {
+    const last = groups.at(-1);
+    if (!part.added && !part.removed) groups.push({ common: part.value });
+    else if (last && 'parts' in last) last.parts.push(part);
+    else groups.push({ parts: [part] });
+  }
   const changes: ReviewChange[] = [];
   const pieces: ReviewPiece[] = [];
+  const seen = new Map<string, number>();
   let baseOffset = 0;
   let compareOffset = 0;
-  let pending: Change[] = [];
-  const flush = () => {
-    if (!pending.length) return;
-    const baseText = pending.filter((part) => part.removed).map((part) => part.value).join('');
-    const compareText = pending.filter((part) => part.added).map((part) => part.value).join('');
-    const id = `c-${changes.length + 1}-${fingerprint(`${baseOffset}:${compareOffset}:${baseText}:${compareText}`)}`;
-    const granular = Math.max(baseText.length, compareText.length) <= 128 ? diffChars(baseText, compareText) : pending;
+  groups.forEach((group, index) => {
+    if ('common' in group) {
+      pieces.push({ common: group.common });
+      baseOffset += group.common.length;
+      compareOffset += group.common.length;
+      return;
+    }
+    const baseText = group.parts.filter((part) => part.removed).map((part) => part.value).join('');
+    const compareText = group.parts.filter((part) => part.added).map((part) => part.value).join('');
+    // Content + surrounding context, not position: ids survive unrelated edits elsewhere; repeats get an ordinal.
+    const before = commonText(groups[index - 1]).slice(-16);
+    const after = commonText(groups[index + 1]).slice(0, 16);
+    const key = fingerprint(`${before}\u0000${baseText}\u0000${compareText}\u0000${after}`);
+    const occurrence = (seen.get(key) ?? 0) + 1;
+    seen.set(key, occurrence);
+    const id = `c-${key}${occurrence > 1 ? `-${occurrence}` : ''}`;
+    const granular = Math.max(baseText.length, compareText.length) <= 128 ? diffChars(baseText, compareText) : group.parts;
     changes.push({
       id,
       baseRange: { from: baseOffset, to: baseOffset + baseText.length },
@@ -53,17 +81,7 @@ export function createReviewDraft(base: string, compare: string, baseFingerprint
     pieces.push({ changeId: id });
     baseOffset += baseText.length;
     compareOffset += compareText.length;
-    pending = [];
-  };
-  for (const part of parts) {
-    if (!part.added && !part.removed) {
-      flush();
-      pieces.push({ common: part.value });
-      baseOffset += part.value.length;
-      compareOffset += part.value.length;
-    } else pending.push(part);
-  }
-  flush();
+  });
   return { baseFingerprint, base, compare, changes, pieces };
 }
 
@@ -79,6 +97,7 @@ export function decideChange(draft: ReviewDraft, changeId: string, decision: Exc
 }
 
 export function materializeReview(draft: ReviewDraft): string {
+  if (draft.tooLarge) throw new MarkrootError('CONFLICT', 'The comparison is too large to review change by change.');
   const changes = new Map(draft.changes.map((change) => [change.id, change]));
   const pending = draft.changes.filter((change) => change.decision === 'pending');
   if (pending.length) throw new MarkrootError('CONFLICT', `${pending.length} review changes still need a decision.`);
@@ -90,6 +109,7 @@ export function materializeReview(draft: ReviewDraft): string {
 }
 
 export function materializeReviewPresentation(draft: ReviewDraft): ReviewPresentation {
+  if (draft.tooLarge) return { current: draft.compare, base: draft.base, ranges: new Map() };
   const changes = new Map(draft.changes.map((change) => [change.id, change]));
   const current: string[] = [];
   const base: string[] = [];
@@ -124,6 +144,7 @@ export function mapReviewCurrentOffset(draft: ReviewDraft, offset: number): numb
 }
 
 function mapReviewOffset(draft: ReviewDraft, requestedOffset: number, origin: 'compare' | 'current'): number {
+  if (draft.tooLarge) return Math.max(0, Math.min(requestedOffset, draft.compare.length));
   const changes = new Map(draft.changes.map((change) => [change.id, change]));
   const currentLength = draft.pieces.reduce((length, piece) => {
     if (piece.common !== undefined) return length + piece.common.length;
@@ -162,6 +183,7 @@ function mapReviewOffset(draft: ReviewDraft, requestedOffset: number, origin: 'c
   return origin === 'compare' ? currentOffset : compareOffset;
 }
 
+function commonText(group: { readonly common: string } | { readonly parts: Change[] } | undefined): string { return group && 'common' in group ? group.common : ''; }
 function toSegment(part: Change): ReviewSegment {
   return { value: part.value, kind: part.added ? 'insert' : part.removed ? 'delete' : 'equal' };
 }

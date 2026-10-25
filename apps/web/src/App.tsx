@@ -15,7 +15,7 @@ import { IsomorphicGitRepository, type GitCommitCandidate, type GitCommitSummary
 import { decideChange, mapReviewCompareOffset, mapReviewCurrentOffset, materializeReview, materializeReviewPresentation, type ReviewDraft } from '@markroot/review';
 import { parseExportOptions, type ExportFormat, type ExportResource } from '@markroot/export';
 import { LocalCitationProvider, type CitationRecord } from '@markroot/citations';
-import { defaultSettings, deletePendingSession, loadPendingSession, loadRecentWorkspace, loadSettings, savePendingSession, saveRecentWorkspace, saveSettings, type MarkrootSettings } from '@markroot/settings';
+import { defaultSettings, deletePendingSession, workspaceIdFor, loadPendingSession, loadRecentWorkspace, loadSettings, savePendingSession, saveRecentWorkspace, saveSettings, type MarkrootSettings } from '@markroot/settings';
 import { SourceEditor } from './components/SourceEditor.js';
 import { VisualEditor } from './components/VisualEditor.js';
 import { Preview } from './components/Preview.js';
@@ -95,6 +95,11 @@ export function App() {
   const commentWriteBusy = useRef(false);
   const legacyComments = useRef<readonly CommentThread[]>([]);
   const commentLoadRequest = useRef(0);
+  // Identifies the open document; bumped only when a different file or folder replaces it.
+  const documentRequest = useRef(0);
+  const saveQueue = useRef<Promise<unknown>>(Promise.resolve());
+  const fileVersionRef = useRef<string | undefined>(undefined);
+  const workspaceIdRef = useRef<string | undefined>(undefined);
   const commentRefreshRequest = useRef(0);
   const commentStore = useMemo(() => workspace ? new CommentStore(workspace) : undefined, [workspace]);
   const [citations, setCitations] = useState<readonly CitationRecord[]>([]);
@@ -168,11 +173,11 @@ export function App() {
   reviewRef.current = review;
   reviewPreviewSnapshotRef.current = reviewPreviewSnapshot;
   settingsRef.current = settings;
+  fileVersionRef.current = fileVersion;
   renderedRef.current = rendered;
 
   useEffect(() => {
-    void loadSettings().then(setSettings).catch(() => undefined);
-    void loadRecentWorkspace().then(async (handle) => {
+    void loadSettings().then((loaded) => { settingsRef.current = loaded; setSettings(loaded); }).catch(() => undefined).then(() => loadRecentWorkspace()).then(async (handle) => {
       if (handle && await ensureDirectoryPermission(handle) === 'granted') await connectFolder(handle);
     }).catch(() => undefined);
     return () => sessionSubscription.current?.();
@@ -229,10 +234,17 @@ export function App() {
   useEffect(() => {
     if (!snapshot?.dirty || rootName === 'No folder open') return;
     const timer = window.setTimeout(() => {
-      void savePendingSession({ workspaceName: rootName, path: snapshot.path, source: snapshot.source, ...(fileVersion ? { baseVersion: fileVersion } : {}), updatedAt: new Date().toISOString() });
+      void savePendingSession({ workspaceName: rootName, ...(workspaceIdRef.current ? { workspaceId: workspaceIdRef.current } : {}), path: snapshot.path, source: snapshot.source, ...(fileVersion ? { baseVersion: fileVersion } : {}), updatedAt: new Date().toISOString() });
     }, 500);
     return () => window.clearTimeout(timer);
   }, [snapshot?.revision, snapshot?.dirty, snapshot?.path, snapshot?.source, rootName, fileVersion]);
+
+  useEffect(() => {
+    if (!snapshot?.dirty) return;
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [snapshot?.dirty]);
 
   useEffect(() => {
     if (!workspace || !snapshot || !fileVersion) return;
@@ -292,6 +304,7 @@ export function App() {
   }, [session]);
 
   const updateSettings = useCallback((next: MarkrootSettings) => {
+    settingsRef.current = next;
     setSettings(next);
     void saveSettings(next).catch(() => setNotice('Could not save browser preferences.'));
   }, []);
@@ -356,7 +369,10 @@ export function App() {
     sessionSubscription.current?.();
     setSession(undefined);
     setSnapshot(undefined);
-    const next = new FileSystemAccessWorkspace(handle);
+    documentRequest.current += 1;
+    const workspaceId = await workspaceIdFor(handle).catch(() => undefined);
+    workspaceIdRef.current = workspaceId;
+    const next = new FileSystemAccessWorkspace(handle, workspaceId ? { id: workspaceId } : {});
     const nextEntries = await documentEntries(next);
     setWorkspace(next);
     setRootName(handle.name);
@@ -376,26 +392,36 @@ export function App() {
       setCurrentBranch(await repository.currentBranch());
       setHistory(await repository.history(20));
       const configured = await repository.configuredAuthor();
-      if (configured.displayName || configured.email) updateSettings({ ...settings, profile: { ...settings.profile, ...configured } });
+      const latest = settingsRef.current;
+      if (configured.displayName || configured.email) updateSettings({ ...latest, profile: { ...latest.profile, ...configured } });
     } catch (error) { setGit(undefined); setGitError(error instanceof Error ? error.message : String(error)); setGitStatus([]); setBranches([]); setCurrentBranch(undefined); setHistory([]); }
     setNotice(`Opened ${handle.name}. Files stay on this device.`);
+  }
+
+  function openWorkspaceLink(path: string) {
+    const entry = entries.find((item) => item.kind === 'file' && item.path === path);
+    if (!entry) { setNotice(`${path} is not a file in this folder.`); return; }
+    if (/\.(?:md|qmd|markdown|txt|bib|bibtex|ya?ml)$/i.test(path)) void openFile(entry.path);
+    else setNotice(`${path} cannot be opened in Markroot.`);
   }
 
   async function openFile(path: WorkspacePath) {
     if (!workspace || !commentStore) return;
     if (commentWriteBusy.current) { setNotice('Wait for the comment to finish saving.'); return; }
-    const request = ++commentLoadRequest.current;
     if (snapshot?.dirty) {
       if (!window.confirm('Discard unsaved edits and open another file?')) return;
-      await deletePendingSession(rootName, snapshot.path).catch(() => undefined);
+      await deletePendingSession(pendingWorkspace(), snapshot.path).catch(() => undefined);
     }
+    const request = ++commentLoadRequest.current;
+    documentRequest.current += 1;
     try {
       const source = await workspace.readFile(path);
       const stat = await workspace.stat(path);
       const base = git ? await git.readFileAtRef(path, 'HEAD').catch(() => '') : undefined;
-      const pending = await loadPendingSession(rootName, path).catch(() => undefined);
-      const restore = pending?.source !== undefined && pending.source !== source && window.confirm(`Recover browser-local edits from ${new Date(pending.updatedAt).toLocaleString()}?`);
-      if (pending && !restore) await deletePendingSession(rootName, path).catch(() => undefined);
+      const pending = await loadPendingSession(pendingWorkspace(), path).catch(() => undefined);
+      const diskChanged = pending?.baseVersion !== undefined && pending.baseVersion !== stat.version;
+      const restore = pending?.source !== undefined && pending.source !== source && window.confirm(`Recover browser-local edits from ${new Date(pending.updatedAt).toLocaleString()}?${diskChanged ? `\n\nWarning: ${path} changed on disk after these edits were made. Recovering replaces the newer disk version once saved.` : ''}`);
+      if (pending && !restore) await deletePendingSession(pendingWorkspace(), path).catch(() => undefined);
       const selectedSource = restore && pending ? pending.source : source;
       const legacy = parseComments(selectedSource);
       // Browser recovery stores clean prose; keep migration data from the original disk file.
@@ -536,26 +562,39 @@ export function App() {
     session.apply({ from: live.from, to: live.to, insert: replacement, origin: 'visual', baseRevision: current.revision });
   }, [session]);
 
-  async function saveDocument(): Promise<DocumentSnapshot | undefined> {
+  function pendingWorkspace() { return workspaceIdRef.current ? { id: workspaceIdRef.current, name: rootName } : rootName; }
+
+  // Saves run one at a time so overlapping autosave, Cmd+S and comment saves never race on the file version.
+  function saveDocument(): Promise<DocumentSnapshot | undefined> {
+    const queued = saveQueue.current.then(() => writeDocument(), () => writeDocument());
+    saveQueue.current = queued;
+    return queued;
+  }
+
+  async function writeDocument(): Promise<DocumentSnapshot | undefined> {
     if (!workspace || !session) return undefined;
     const current = session.snapshot();
+    if (!current.dirty && !legacyComments.current.length) return current;
     const migration = legacyComments.current;
-    const context = commentLoadRequest.current;
+    const context = documentRequest.current;
     try {
       if (migration.length && commentStore) {
         const commit = git ? (await git.history(1).catch(() => []))[0]?.oid ?? null : null;
         await commentStore.importLegacy(current.path, migration, await commentRevision(current.source, commit));
-        await commentStore.load(current.path); // Validate persisted sidecars before removing legacy data.
+        // Validate persisted sidecars before removing legacy data.
+        const { broken } = await commentStore.loadWithIssues(current.path);
+        if (broken.some((item) => !item.document || item.document === current.path || migration.some((thread) => thread.id === item.id))) throw new Error('Some comment files could not be read back; legacy comments were kept in the document.');
       }
-      const stat = await workspace.writeFileGuarded(current.path, current.source, fileVersion);
-      if (context !== commentLoadRequest.current) return current;
+      const stat = await workspace.writeFileGuarded(current.path, current.source, fileVersionRef.current);
+      if (context !== documentRequest.current) return current;
+      fileVersionRef.current = stat.version;
       if (migration.length && commentStore) {
         legacyComments.current = [];
         setCommentThreads(await commentStore.load(current.path));
       }
       setFileVersion(stat.version);
       session.markSaved(current.revision);
-      await deletePendingSession(rootName, current.path).catch(() => undefined);
+      await deletePendingSession(pendingWorkspace(), current.path).catch(() => undefined);
       if (/\.(?:bib|bibtex)$/i.test(current.path)) await loadCitations();
       setNotice(`Saved ${current.path}.`);
       if (git) setGitStatus(await git.status());
@@ -1007,7 +1046,7 @@ export function App() {
 
   const viewerContent = presentedSnapshot ? (rightMode === 'visual' && !review
     ? <VisualEditor snapshot={presentedSnapshot} activeBlock={scrollTarget} scrollTarget={scrollOrigin === 'right' ? undefined : scrollTarget} scrollProgress={scrollProgress} scrollAlignment={scrollAlignment} fontFamily={settings.viewerFont} fontSize={settings.viewerFontSize} justified={settings.viewerJustified} onApply={applyVisualBlock} onNavigate={navigateFromRight} onScroll={handleViewerScroll}/>
-    : <Preview html={rendered?.html ?? ''} objectUrls={rendered?.objectUrls ?? EMPTY_WARNINGS} warnings={rendered?.warnings ?? EMPTY_WARNINGS} blocks={previewSnapshot?.blocks ?? presentedSnapshot.blocks} search={search} regularExpression={regularExpression} activeBlock={scrollTarget} scrollTarget={scrollOrigin === 'right' ? undefined : scrollTarget} scrollProgress={scrollProgress} scrollAlignment={scrollAlignment} anchorTarget={previewAnchor} allowRemoteResources={settings.allowRemoteResources} fontFamily={settings.viewerFont} fontSize={settings.viewerFontSize} justified={settings.viewerJustified} trackChangesBaseHtml={trackedChangesVisible ? renderedBaseHtml : undefined} activeTrackChange={activeTrackChange} reviewChanges={renderedReviewChanges} reviewDecisions={renderedReviewDecisions} comments={review ? undefined : comments} activeCommentId={review ? undefined : activeCommentId} onNavigate={navigateFromRight} onSelect={selectFromRight} onCommentActivate={(id) => { setInspector('comments'); navigateComment(id); }} onScroll={handleViewerScroll}/>) : null;
+    : <Preview html={rendered?.html ?? ''} objectUrls={rendered?.objectUrls ?? EMPTY_WARNINGS} warnings={rendered?.warnings ?? EMPTY_WARNINGS} blocks={previewSnapshot?.blocks ?? presentedSnapshot.blocks} search={search} regularExpression={regularExpression} activeBlock={scrollTarget} scrollTarget={scrollOrigin === 'right' ? undefined : scrollTarget} scrollProgress={scrollProgress} scrollAlignment={scrollAlignment} anchorTarget={previewAnchor} allowRemoteResources={settings.allowRemoteResources} fontFamily={settings.viewerFont} fontSize={settings.viewerFontSize} justified={settings.viewerJustified} trackChangesBaseHtml={trackedChangesVisible ? renderedBaseHtml : undefined} activeTrackChange={activeTrackChange} reviewChanges={renderedReviewChanges} reviewDecisions={renderedReviewDecisions} comments={review ? undefined : comments} activeCommentId={review ? undefined : activeCommentId} onNavigate={navigateFromRight} documentPath={presentedSnapshot?.path} onOpenWorkspaceLink={openWorkspaceLink} onSelect={selectFromRight} onCommentActivate={(id) => { setInspector('comments'); navigateComment(id); }} onScroll={handleViewerScroll}/>) : null;
 
   const viewerToolbar = (detached: boolean) => <div className="pane-title viewer-toolbar">
     <div className="segmented"><button disabled={Boolean(review)} className={rightMode === 'visual' && !review ? 'active' : ''} onClick={() => { setScrollOrigin('command'); setScrollAlignment('reveal'); setRightMode('visual'); }}>Visual</button><button className={rightMode === 'preview' || Boolean(review) ? 'active' : ''} onClick={() => { setScrollOrigin('command'); setScrollAlignment('reveal'); setRightMode('preview'); }}>Rendered</button></div>
@@ -1051,7 +1090,7 @@ export function App() {
     <main className={`workspace ${detachedViewerRoot ? 'viewer-detached' : ''}`} ref={workspacePane} style={{ '--source-width': `${settings.sourcePaneRatio * 100}%` } as CSSProperties}>
       {!presentedSnapshot ? <div className="welcome"><BrandMark className="welcome-symbol"/><h1>Your local writing workspace</h1><p>Choose a folder, then open a Markdown or QMD file. Source, preview, comments, and Git stay together on this device.</p>{!workspace && <button className="primary" onClick={() => void chooseFolder()}>Open folder</button>}</div>
       : <>
-        <section className="pane source-pane"><div className="pane-title"><Code2 size={15}/><span>{review ? 'Source · branch review' : 'Source'}</span><button className={trackedChangesVisible ? 'viewer-option active' : 'viewer-option'} disabled={Boolean(review) || (!trackChangesOpen && (gitBase?.path !== presentedSnapshot.path || gitBase?.source === presentedSnapshot.source))} onClick={() => setTrackChangesOpen((open) => !open)} title={review ? 'Branch changes are shown inline during review' : trackChangesOpen ? 'Hide tracked changes in both panes' : 'Show tracked changes in both panes'} aria-label={review ? 'Branch changes shown in both panes' : trackChangesOpen ? 'Hide tracked changes in both panes' : 'Show tracked changes in both panes'} aria-pressed={trackedChangesVisible}><GitCompare size={14}/></button><span className="spacer"/>{detachedViewerRoot && <><button className="detached-indicator" onClick={() => detachedViewerWindow.current?.focus()} title="Focus the detached viewer"><ExternalLink size={13}/>Viewer detached</button><button className="viewer-option" onClick={reattachViewer} title="Return viewer to this window" aria-label="Reattach viewer"><Columns2 size={15}/></button></>}<span>{settings.sourceFontSize}px · Ln {lineAt(presentedSnapshot.source, selection.from)}</span></div><SourceEditor path={presentedSnapshot.path} workspacePaths={entries.map((entry) => entry.path)} value={presentedSnapshot.source} comparisonBase={review ? undefined : comparisonBaseSource} trackChangesOverride={reviewTrackChanges} showTrackChanges={trackedChangesVisible} activeTrackChange={activeSourceTrackChange} readOnly={Boolean(review)} blocks={presentedSnapshot.blocks} search={search} regularExpression={regularExpression} dark={dark} fontFamily={settings.sourceFont} fontSize={settings.sourceFontSize} activeBlock={sourceScrollLocation.target} scrollTarget={scrollOrigin === 'source' ? undefined : sourceScrollLocation.target} scrollProgress={sourceScrollLocation.progress} scrollAlignment={scrollAlignment} cursorTarget={sourceCursorTarget} goToLine={goToLine} onChange={applySource} onSelection={selectSource} onTrackChangeActivate={selectReviewChange} onScroll={navigateFromSourceScroll} onSave={() => void explicitSave()} onFind={() => setFindOpen(true)}/></section>
+        <section className="pane source-pane"><div className="pane-title"><Code2 size={15}/><span>{review ? 'Source · branch review' : 'Source'}</span><button className={trackedChangesVisible ? 'viewer-option active' : 'viewer-option'} disabled={Boolean(review) || (!trackChangesOpen && (gitBase?.path !== presentedSnapshot.path || gitBase?.source === presentedSnapshot.source))} onClick={() => setTrackChangesOpen((open) => !open)} title={review ? 'Branch changes are shown inline during review' : trackChangesOpen ? 'Hide tracked changes in both panes' : 'Show tracked changes in both panes'} aria-label={review ? 'Branch changes shown in both panes' : trackChangesOpen ? 'Hide tracked changes in both panes' : 'Show tracked changes in both panes'} aria-pressed={trackedChangesVisible}><GitCompare size={14}/></button><span className="spacer"/>{detachedViewerRoot && <><button className="detached-indicator" onClick={() => detachedViewerWindow.current?.focus()} title="Focus the detached viewer"><ExternalLink size={13}/>Viewer detached</button><button className="viewer-option" onClick={reattachViewer} title="Return viewer to this window" aria-label="Reattach viewer"><Columns2 size={15}/></button></>}<span>{settings.sourceFontSize}px · Ln {lineAt(presentedSnapshot.source, selection.from)}</span></div><SourceEditor key={presentedSnapshot.path} path={presentedSnapshot.path} workspacePaths={entries.map((entry) => entry.path)} value={presentedSnapshot.source} comparisonBase={review ? undefined : comparisonBaseSource} trackChangesOverride={reviewTrackChanges} showTrackChanges={trackedChangesVisible} activeTrackChange={activeSourceTrackChange} readOnly={Boolean(review)} blocks={presentedSnapshot.blocks} search={search} regularExpression={regularExpression} dark={dark} fontFamily={settings.sourceFont} fontSize={settings.sourceFontSize} activeBlock={sourceScrollLocation.target} scrollTarget={scrollOrigin === 'source' ? undefined : sourceScrollLocation.target} scrollProgress={sourceScrollLocation.progress} scrollAlignment={scrollAlignment} cursorTarget={sourceCursorTarget} goToLine={goToLine} onChange={applySource} onSelection={selectSource} onTrackChangeActivate={selectReviewChange} onScroll={navigateFromSourceScroll} onSave={() => void explicitSave()} onFind={() => setFindOpen(true)}/></section>
         {!detachedViewerRoot && <><PaneResizer label="Resize source and viewer panes" value={settings.sourcePaneRatio} min={0.25} max={0.75} keyboardStep={0.02} pixelsPerUnit={() => workspacePane.current?.clientWidth ?? 1} onChange={(value, finished) => resizeLayout({ sourcePaneRatio: value }, finished)}/><section className="pane right-pane">{viewerToolbar(false)}<div className="right-scroll">{viewerContent}</div></section></>}
       </>}
     </main>
