@@ -33,6 +33,7 @@ it('previews history read-only with source/rendered diffs, compares two versions
     await act(async () => { root.render(createElement(App)); }); await click('button[title="a.md"]');
     await act(async () => { source().onChange('first'); }); await shortcut('z'); expect(source().value).toBe('root');
     await act(async () => { source().onChange('second'); }); await click('button[aria-label="History"]');
+    await act(async () => { await import('./panels/HistoryPanel.js'); });
     expect(host.querySelector('[role="tree"]')).not.toBeNull(); expect(host.textContent).toContain('Branch 2 of 2');
     await click('[data-history-id="h1"]');
     expect(source()).toMatchObject({ readOnly: true, value: 'first', comparisonBase: 'second', showTrackChanges: true });

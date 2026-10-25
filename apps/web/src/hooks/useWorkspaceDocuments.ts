@@ -3,7 +3,6 @@ import { type WorkspacePath } from '@markroot/core';
 import { DocumentSession, type DocumentSnapshot } from '@markroot/document';
 import { FileSystemAccessWorkspace, ensureDirectoryPermission, type GuardedWorkspace, type WorkspaceEntry } from '@markroot/workspace';
 import { commentRevision, parseComments } from '@markroot/comments';
-import { IsomorphicGitRepository } from '@markroot/git';
 import { LocalCitationProvider, type CitationRecord } from '@markroot/citations';
 import { deletePendingSession, forgetProject, listRecentProjects, rememberProject, workspaceIdFor, loadPendingSession, loadRecentWorkspace, loadSettings, type MarkrootSettings, type RecentProject } from '@markroot/settings';
 import type { useComments } from './useComments.js';
@@ -176,6 +175,8 @@ export function useWorkspaceDocuments({ comments, repository, settingsRef, setSe
     timing(`citations (${bibliographyPaths.length} .bib)`);
     if (superseded()) return;
     setCitations(records);
+    const { IsomorphicGitRepository } = await import('@markroot/git');
+    if (superseded()) return;
     const configured = await repository().connect(new IsomorphicGitRepository(next), superseded);
     timing('git status, branches and history');
     if (superseded()) return;

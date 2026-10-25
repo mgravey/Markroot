@@ -39,8 +39,8 @@ const SETTINGS_KEY = 'global';
 const WORKSPACE_KEY = 'recent-workspace';
 const WORKSPACE_IDS_KEY = 'workspace-ids';
 const PROJECTS_KEY = 'recent-projects';
-/** Bumped by every write; lets registry operations commit only if nothing changed meanwhile. */
-const VERSION_KEY = 'storage-version';
+const REGISTRY_SCOPE = 'markroot:workspace-ids';
+const PENDING_SCOPE = 'markroot:pending-sessions';
 const MAX_RECENT_PROJECTS = 12;
 const THEMES: readonly ThemePreference[] = ['system', 'light', 'dark'];
 const FONTS: readonly PaneFont[] = ['serif', 'sans', 'mono'];
@@ -153,7 +153,7 @@ export async function renameProject(id: string, label: string): Promise<void> {
 }
 
 function withProjects<T>(operation: (storage: SettingsBackend) => Promise<T>): Promise<T> {
-  return withSettingsLock('markroot:workspace-ids', () => atomicBackend(operation));
+  return withSettingsLock(REGISTRY_SCOPE, () => atomicBackend(REGISTRY_SCOPE, operation));
 }
 
 async function readProjects(storage: SettingsBackend): Promise<readonly RecentProject[]> {
@@ -182,7 +182,7 @@ async function workspaceIdIn(storage: SettingsBackend, handle: FileSystemDirecto
 export async function loadPendingSession(workspace: PendingWorkspace, path: string): Promise<PendingSession | undefined> {
   // Claim legacy recovery only when it actually supplies this load. Migrating immediately records
   // ownership persistently, so later deletion never needs to guess from a shared directory name.
-  return withSettingsLock('markroot:pending-sessions', () => atomicBackend(async (storage) => {
+  return withSettingsLock(PENDING_SCOPE, () => atomicBackend(PENDING_SCOPE, async (storage) => {
     const key = pendingKey(workspace, path);
     const session = await storage.get<PendingSession>(key);
     if (session || typeof workspace === 'string' || !workspace.name) return session;
@@ -205,7 +205,7 @@ export async function deletePendingSession(workspace: PendingWorkspace, path: st
 const indexedDbBackend: SettingsBackend = { get: getValue, set: setValue, delete: deleteValue };
 let backend: SettingsBackend = indexedDbBackend;
 /** Swap persistence (tests, embedding); call without arguments to restore IndexedDB. */
-export function setSettingsBackend(next: SettingsBackend = indexedDbBackend): void { backend = next; }
+export function setSettingsBackend(next: SettingsBackend = indexedDbBackend): void { resetDatabase(); backend = next; }
 
 const localQueues = new Map<string, Promise<unknown>>();
 /**
@@ -222,16 +222,25 @@ async function withSettingsLock<T>(name: string, run: () => Promise<T>): Promise
 }
 
 type StagedWrite = { readonly value?: unknown; readonly deleted: boolean };
+type ExpectedVersion = { readonly key: string; readonly version: number };
+
+/** All write paths invalidate their scope, including direct sets and deletes. */
+function writeScope(key: string): string {
+  if (key === PROJECTS_KEY || key === WORKSPACE_KEY || key === WORKSPACE_IDS_KEY) return REGISTRY_SCOPE;
+  return key.startsWith('pending:') || key.startsWith('pending-id:') ? PENDING_SCOPE : key;
+}
+function versionKey(scope: string): string { return `storage-version:${scope}`; }
 
 /**
  * Optimistic read/compare/write: reads use their own transactions, writes are staged and then
  * committed in one transaction that issues only chained IDB requests, and only if no other tab
- * wrote meanwhile (version check). Conflicts retry, so atomicity holds even without Web Locks.
+ * wrote to the same scope meanwhile. Conflicts retry, so atomicity holds even without Web Locks.
  */
-async function atomicBackend<T>(operation: (storage: SettingsBackend) => Promise<T>): Promise<T> {
+async function atomicBackend<T>(scope: string, operation: (storage: SettingsBackend) => Promise<T>): Promise<T> {
   if (backend !== indexedDbBackend) return operation(backend);
   for (let attempt = 0; ; attempt++) {
-    const version = await getValue<number>(VERSION_KEY) ?? 0;
+    const key = versionKey(scope);
+    const version = await getValue<number>(key) ?? 0;
     const writes = new Map<string, StagedWrite>();
     const staged: SettingsBackend = {
       get: async <V>(key: string) => { const write = writes.get(key); return write ? (write.deleted ? undefined : write.value as V) : getValue<V>(key); },
@@ -239,12 +248,12 @@ async function atomicBackend<T>(operation: (storage: SettingsBackend) => Promise
       delete: async (key: string) => { writes.set(key, { deleted: true }); },
     };
     const result = await operation(staged);
-    if (!writes.size || await commitWrites(writes, version)) return result;
+    if (!writes.size || await commitWrites(writes, { key, version })) return result;
     if (attempt >= 8) throw new Error('Browser settings kept changing in another tab. Try again.');
   }
 }
 
-async function commitWrites(writes: ReadonlyMap<string, StagedWrite>, expectedVersion?: number): Promise<boolean> {
+async function commitWrites(writes: ReadonlyMap<string, StagedWrite>, expected?: ExpectedVersion): Promise<boolean> {
   const db = await database();
   return new Promise<boolean>((resolve, reject) => {
     const transaction = db.transaction(STORE, 'readwrite');
@@ -253,24 +262,54 @@ async function commitWrites(writes: ReadonlyMap<string, StagedWrite>, expectedVe
     transaction.oncomplete = () => resolve(committed);
     transaction.onerror = () => reject(transaction.error);
     transaction.onabort = () => { if (transaction.error) reject(transaction.error); else resolve(false); };
-    const current = store.get(VERSION_KEY);
-    current.onsuccess = () => {
-      const version = (current.result as number | undefined) ?? 0;
-      if (expectedVersion !== undefined && version !== expectedVersion) { transaction.abort(); return; }
-      for (const [key, write] of writes) { if (write.deleted) store.delete(key); else store.put(write.value, key); }
-      store.put(version + 1, VERSION_KEY);
-      committed = true;
+    const keys = [...new Set([...writes.keys()].map((key) => versionKey(writeScope(key))))];
+    const versions = new Map<string, number>();
+    const check = (index: number) => {
+      const key = keys[index];
+      if (key === undefined) {
+        for (const [key, write] of writes) { if (write.deleted) store.delete(key); else store.put(write.value, key); }
+        for (const [key, version] of versions) store.put(version + 1, key);
+        committed = true;
+        return;
+      }
+      const current = store.get(key);
+      current.onsuccess = () => {
+        const version = (current.result as number | undefined) ?? 0;
+        if (expected?.key === key && version !== expected.version) { transaction.abort(); return; }
+        versions.set(key, version);
+        check(index + 1);
+      };
     };
-  }).finally(() => db.close());
+    check(0);
+  });
+}
+
+let cachedDatabase: Promise<IDBDatabase> | undefined;
+function resetDatabase(): void {
+  const previous = cachedDatabase;
+  cachedDatabase = undefined;
+  void previous?.then((db) => db.close(), () => undefined);
 }
 
 function database(): Promise<IDBDatabase> {
-  return new Promise<IDBDatabase>((resolve, reject) => {
+  if (cachedDatabase) return cachedDatabase;
+  const opening = new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(DATABASE, 1);
+    let blocked = false;
     request.onupgradeneeded = () => { if (!request.result.objectStoreNames.contains(STORE)) request.result.createObjectStore(STORE); };
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      const db = request.result;
+      if (blocked) { db.close(); return; }
+      const reset = () => { db.close(); if (cachedDatabase === opening) cachedDatabase = undefined; };
+      db.onversionchange = db.onclose = reset;
+      resolve(db);
+    };
     request.onerror = () => reject(request.error);
+    request.onblocked = () => { blocked = true; reject(new Error('Settings storage is blocked.')); };
   });
+  cachedDatabase = opening;
+  void opening.catch(() => { if (cachedDatabase === opening) cachedDatabase = undefined; });
+  return opening;
 }
 
 async function getValue<T>(key: string): Promise<T | undefined> {
@@ -279,7 +318,7 @@ async function getValue<T>(key: string): Promise<T | undefined> {
     const request = db.transaction(STORE, 'readonly').objectStore(STORE).get(key);
     request.onsuccess = () => resolve(request.result as T | undefined);
     request.onerror = () => reject(request.error);
-  }).finally(() => db.close());
+  });
 }
 
 async function setValue<T>(key: string, value: T): Promise<void> { await commitWrites(new Map([[key, { value, deleted: false }]])); }

@@ -1,9 +1,9 @@
 import { afterEach, expect, it, vi } from 'vitest';
 
 /** A small IDB scheduler: transactions serialize, and commit once their request queue empties. */
-function indexedDbFixture() {
+function indexedDbFixture(onRead?: (key: string) => void) {
   const values = new Map<string, unknown>();
-  const operations: { transaction: number; mode: IDBTransactionMode; kind: string }[] = [];
+  const operations: { transaction: number; mode: IDBTransactionMode; kind: string; key: string }[] = [];
   const queue: (() => void)[] = [];
   let busy = false;
   let nextId = 0;
@@ -29,7 +29,7 @@ function indexedDbFixture() {
             if (finished || (foreignTask && foreignTask !== createdInTask)) throw new Error('TransactionInactiveError');
             if (kind !== 'get' && mode !== 'readwrite') throw new Error('ReadOnlyError');
             pending++;
-            operations.push({ transaction: id, mode, kind });
+            operations.push({ transaction: id, mode, kind, key });
             const result = { result: undefined as unknown, onsuccess: undefined as (() => void) | undefined };
             const run = () => setTimeout(() => {
               foreignTask = undefined; // A request callback is its own IDB task.
@@ -37,6 +37,7 @@ function indexedDbFixture() {
               if (kind === 'put') values.set(key, value);
               if (kind === 'delete') values.delete(key);
               result.result = kind === 'get' ? values.get(key) : undefined;
+              if (kind === 'get') onRead?.(key);
               result.onsuccess?.();
               pending--;
               // IDB allows promise microtasks in a request handler, but not unrelated async work.
@@ -98,9 +99,9 @@ it('atomically assigns workspace ids across tabs without Web Locks, including as
   expect(same).toBe(a);
   expect(b).not.toBe(a);
   expect(db.values.get('workspace-ids')).toHaveLength(2);
-  // Every write commits in a transaction that first re-checked the storage version.
+  // Every registry write commits in a transaction that first re-checked its scope's version.
   for (const put of db.operations.filter((operation) => operation.kind === 'put')) {
-    expect(db.operations).toContainEqual({ ...put, kind: 'get' });
+    expect(db.operations).toContainEqual({ ...put, kind: 'get', key: 'storage-version:markroot:workspace-ids' });
   }
 });
 
@@ -134,5 +135,25 @@ it('migrates and remembers projects in atomic cross-tab transactions without Web
   expect((await tabA.listRecentProjects()).map((project) => project.id)).toEqual([b.id, a.id, expect.any(String)]);
   expect(db.values.get('workspace-ids')).toHaveLength(3);
   expect(db.values.has('recent-workspace')).toBe(false);
-  for (const put of db.operations.filter((operation) => operation.kind === 'put')) expect(db.operations).toContainEqual({ ...put, kind: 'get' });
+  for (const put of db.operations.filter((operation) => operation.kind === 'put')) expect(db.operations).toContainEqual({ ...put, kind: 'get', key: 'storage-version:markroot:workspace-ids' });
+});
+
+it.each(['save', 'delete'] as const)('retries recovery migration when another tab performs a direct %s', async (action) => {
+  let update: Promise<void> | undefined;
+  const session = { workspaceName: 'paper', path: 'a.md', source: 'legacy', updatedAt: 'then' };
+  const db = indexedDbFixture((key) => {
+    if (key === 'pending:paper:a.md' && !update) update = action === 'save' ? tabB.savePendingSession({ ...session, source: 'newer' }) : tabB.deletePendingSession('paper', 'a.md');
+  });
+  db.values.set('pending:paper:a.md', session);
+  vi.stubGlobal('indexedDB', db);
+  vi.stubGlobal('navigator', {});
+  const tabA = await import('./index.js');
+  vi.resetModules();
+  const tabB = await import('./index.js');
+  await tabB.saveSettings(tabB.defaultSettings());
+  const loaded = await tabA.loadPendingSession({ id: 'ours', name: 'paper' }, 'a.md');
+  expect(update).toBeDefined();
+  await update;
+  expect(loaded?.source).toBe(action === 'save' ? 'newer' : undefined);
+  expect(db.values.get('pending-id:ours:a.md')).toEqual(action === 'save' ? { ...session, source: 'newer', workspaceId: 'ours' } : undefined);
 });

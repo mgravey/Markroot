@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import {
   AlignJustify, BarChart3, BookOpen, CircleAlert, CircleDot, Code2, Columns2, Download, FileCode2,
@@ -10,7 +10,6 @@ import { documentBlockAt, searchDocument, type DocumentBlock, type DocumentSnaps
 import { mapReviewCompareOffset, mapReviewCurrentOffset, type ReviewDraft } from '@markroot/review';
 import { defaultSettings, savePendingSession, saveSettings, type MarkrootSettings } from '@markroot/settings';
 import { SourceEditor } from './components/SourceEditor.js';
-import { VisualEditor } from './components/VisualEditor.js';
 import { Preview } from './components/Preview.js';
 import { decodeFragment } from './components/preview-utils.js';
 import { ProjectSwitcher, RecentProjects } from './components/ProjectSwitcher.js';
@@ -18,23 +17,15 @@ import { WorkspaceTree } from './components/WorkspaceTree.js';
 import { DocumentOutline } from './components/DocumentOutline.js';
 import { PaneResizer } from './components/PaneResizer.js';
 import { BrandMark } from './components/BrandMark.js';
-import { CommitProposalDialog } from './components/CommitProposalDialog.js';
 import { blockProgress } from './components/scroll-sync.js';
 import { detachedViewerTitle, prepareDetachedViewerDocument } from './detached-viewer.js';
 import { ScrollStore, useScrollState, type ScrollState } from './hooks/scroll-store.js';
 import { useEvent } from './hooks/useEvent.js';
 import { useSystemDark } from './hooks/useSystemDark.js';
-import { GitPanel } from './panels/GitPanel.js';
-import { ReviewPanel } from './panels/ReviewPanel.js';
-import { CommentsPanel } from './panels/CommentsPanel.js';
-import { CitationsPanel } from './panels/CitationsPanel.js';
-import { ExportPanel } from './panels/ExportPanel.js';
 import { usePreviewRender } from './hooks/usePreviewRender.js';
 import { useExport } from './hooks/useExport.js';
 import { BuildInfo } from './components/BuildInfo.js';
-import { StatisticsPanel } from './panels/StatisticsPanel.js';
 import { useDocumentStatistics } from './hooks/useDocumentStatistics.js';
-import { SettingsPanel } from './panels/SettingsPanel.js';
 import { useAiCommit } from './hooks/useAiCommit.js';
 import { useGitRepository } from './hooks/useGitRepository.js';
 import { useComments } from './hooks/useComments.js';
@@ -44,7 +35,17 @@ import { usePaneNavigation } from './hooks/usePaneNavigation.js';
 import { useReview } from './hooks/useReview.js';
 import { useDocumentHistory, isHistoryShortcut } from './hooks/useDocumentHistory.js';
 import { useHistoryPreview } from './hooks/useHistoryPreview.js';
-import { HistoryPanel } from './panels/HistoryPanel.js';
+
+const VisualEditor = lazy(() => import('./components/VisualEditor.js').then((module) => ({ default: module.VisualEditor })));
+const CommitProposalDialog = lazy(() => import('./components/CommitProposalDialog.js').then((module) => ({ default: module.CommitProposalDialog })));
+const GitPanel = lazy(() => import('./panels/GitPanel.js').then((module) => ({ default: module.GitPanel })));
+const HistoryPanel = lazy(() => import('./panels/HistoryPanel.js').then((module) => ({ default: module.HistoryPanel })));
+const ExportPanel = lazy(() => import('./panels/ExportPanel.js').then((module) => ({ default: module.ExportPanel })));
+const ReviewPanel = lazy(() => import('./panels/ReviewPanel.js').then((module) => ({ default: module.ReviewPanel })));
+const CitationsPanel = lazy(() => import('./panels/CitationsPanel.js').then((module) => ({ default: module.CitationsPanel })));
+const CommentsPanel = lazy(() => import('./panels/CommentsPanel.js').then((module) => ({ default: module.CommentsPanel })));
+const SettingsPanel = lazy(() => import('./panels/SettingsPanel.js').then((module) => ({ default: module.SettingsPanel })));
+const StatisticsPanel = lazy(() => import('./panels/StatisticsPanel.js').then((module) => ({ default: module.StatisticsPanel })));
 
 type Inspector = 'statistics' | 'history' | 'git' | 'review' | 'comments' | 'citations' | 'export' | 'settings' | undefined;
 type RightMode = 'visual' | 'preview';
@@ -405,7 +406,7 @@ export function App() {
 
   const viewerWidthStyle = { '--viewer-max-width': viewerMaxWidth(settings.viewerWidth) } as CSSProperties;
   const renderViewerContent = () => presentedSnapshot ? <ScrollBound store={scroll} render={(position) => rightMode === 'visual' && !review && !historyPreview.active
-    ? <VisualEditor snapshot={presentedSnapshot} activeBlock={position.target} scrollTarget={position.origin === 'right' ? undefined : position.target} scrollProgress={position.progress} scrollAlignment={position.alignment} fontFamily={settings.viewerFont} fontSize={settings.viewerFontSize} justified={settings.viewerJustified} onApply={applyVisualBlock} onNavigate={navigateFromRight} onScroll={handleViewerScroll}/>
+    ? <Suspense fallback={null}><VisualEditor snapshot={presentedSnapshot} activeBlock={position.target} scrollTarget={position.origin === 'right' ? undefined : position.target} scrollProgress={position.progress} scrollAlignment={position.alignment} fontFamily={settings.viewerFont} fontSize={settings.viewerFontSize} justified={settings.viewerJustified} onApply={applyVisualBlock} onNavigate={navigateFromRight} onScroll={handleViewerScroll}/></Suspense>
     : <Preview html={rendered?.html ?? ''} objectUrls={rendered?.objectUrls ?? EMPTY_WARNINGS} warnings={rendered?.warnings ?? EMPTY_WARNINGS} blocks={previewSnapshot?.blocks ?? presentedSnapshot.blocks} search={search} regularExpression={regularExpression} activeBlock={position.target} scrollTarget={position.origin === 'right' ? undefined : position.target} scrollProgress={position.progress} scrollAlignment={position.alignment} anchorTarget={renderedSnapshot === previewSnapshot ? previewAnchor : undefined} allowRemoteResources={settings.allowRemoteResources} fontFamily={settings.viewerFont} fontSize={settings.viewerFontSize} justified={settings.viewerJustified} trackChangesBaseHtml={trackedChangesVisible ? renderedBaseHtml : undefined} activeTrackChange={activeTrackChange} reviewChanges={renderedReviewChanges} reviewDecisions={renderedReviewDecisions} comments={review || historyPreview.active ? undefined : comments} activeCommentId={review || historyPreview.active ? undefined : activeCommentId} onNavigate={navigateFromRight} documentPath={presentedSnapshot.path} onOpenWorkspaceLink={openWorkspaceLink} onSelect={selectFromRight} onCommentActivate={activateComment} onScroll={handleViewerScroll}/>}/> : null;
 
   const switchRightMode = (mode: RightMode) => { scroll.set({ origin: 'command', alignment: 'reveal' }); setRightMode(mode); };
@@ -461,6 +462,7 @@ export function App() {
     </main>
 
     {inspector && <aside className="inspector" aria-label={panelTitle(inspector)}><div className="inspector-head"><strong>{panelTitle(inspector)}</strong><button onClick={closeInspector} title="Close panel" aria-label={`Close ${panelTitle(inspector)} panel`}><PanelRight size={16}/></button></div>
+      <Suspense fallback={null}>
       {inspector === 'history' && <HistoryPanel tree={documentHistory.tree} ready={documentHistory.ready && !review} selectedId={historyPreview.selectedId} compareId={historyPreview.compareId} onSelect={(id) => { resetReview(); historyPreview.select(id); }} onCompare={historyPreview.compare} onCheckout={(id) => historyCommand('checkout', id)} onStar={documentHistory.star} onClose={historyPreview.close} onUndo={() => historyCommand('undo')} onRedo={() => historyCommand('redo')}/>}
       {inspector === 'git' && <GitPanel git={git} error={repo.gitError} status={gitStatus} branches={repo.branches} currentBranch={repo.currentBranch} history={repo.history} dirty={snapshot?.dirty ?? false} message={repo.commitMessage} setMessage={repo.setCommitMessage} onStage={repo.stage} onCommit={repo.createCommit} onRefresh={repo.refreshPanel} onCheckout={checkoutBranch} onCreateBranch={repo.createBranch} onRenameBranch={repo.renameBranch} onDeleteBranch={repo.deleteBranch} onMerge={mergeBranch} onCompare={reviewState.compare} onError={reportError}/>}
       {inspector === 'review' && <ReviewPanel draft={review} activeChangeId={reviewState.activeChangeId} attributionBusy={reviewState.attributionBusy} onSelect={selectReviewChange} onDecide={reviewState.decide} onDecideAll={reviewState.decideAll} onApply={() => { void reviewState.apply().catch(reportError); }}/>}
@@ -473,9 +475,10 @@ export function App() {
         else navigateFromRight(section.blockId, section.from);
       }}/>}
       {inspector === 'settings' && <SettingsPanel settings={settings} aiModelSetup={aiModelSetup} onChange={updateSettings} onAiCommitSuggestionsChange={updateAiCommitSuggestions}/>}
+      </Suspense>
     </aside>}
     <footer className="status-bar"><span>{presentedSnapshot ? (presentedSnapshot.dirty ? 'Unsaved changes' : 'Saved locally') : 'Local writing workspace'}</span><span className="spacer"/>{presentedSnapshot && <button onClick={() => setInspector('statistics')} title="Open document statistics" aria-label="Open document statistics">{statistics ? `${statistics.document.textOnly.words.toLocaleString()} words` : 'Counting…'}</button>}<BuildInfo/></footer>
-  </div>{commitDialog && <CommitProposalDialog phase={commitDialog.phase} progress={commitDialog.progress} proposal={commitDialog.proposal} fileCount={commitDialog.candidate?.paths.length ?? 0} ignored={commitDialog.candidate?.ignored} onProposalChange={changeProposal} onAccept={() => void acceptAiCommit().catch(reportError)} onRegenerate={() => void regenerateCommitProposal().catch(reportError)} onCancel={cancelAiCommit}/>} {detachedViewerRoot && createPortal(<main className="detached-viewer"><div className="detached-viewer-title"><BrandMark className="detached-viewer-mark"/><strong>Markroot</strong><span>{snapshot?.path ?? 'Viewer'}</span></div>{viewerToolbar(true)}<div className="right-scroll" style={viewerWidthStyle}>{renderViewerContent()}</div></main>, detachedViewerRoot)}</>;
+  </div>{commitDialog && <Suspense fallback={null}><CommitProposalDialog phase={commitDialog.phase} progress={commitDialog.progress} proposal={commitDialog.proposal} fileCount={commitDialog.candidate?.paths.length ?? 0} ignored={commitDialog.candidate?.ignored} onProposalChange={changeProposal} onAccept={() => void acceptAiCommit().catch(reportError)} onRegenerate={() => void regenerateCommitProposal().catch(reportError)} onCancel={cancelAiCommit}/></Suspense>} {detachedViewerRoot && createPortal(<main className="detached-viewer"><div className="detached-viewer-title"><BrandMark className="detached-viewer-mark"/><strong>Markroot</strong><span>{snapshot?.path ?? 'Viewer'}</span></div>{viewerToolbar(true)}<div className="right-scroll" style={viewerWidthStyle}>{renderViewerContent()}</div></main>, detachedViewerRoot)}</>;
 }
 
 /** Re-renders only its pane when the shared scroll position changes, instead of the whole app. */

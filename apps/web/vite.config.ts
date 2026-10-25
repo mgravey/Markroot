@@ -27,7 +27,16 @@ export default defineConfig(({ command }) => {
     }],
     base: './',
     assetsInclude: ['**/*.wasm'],
-    build: { target: 'es2022', assetsInlineLimit: 0 },
+    build: {
+      target: 'es2022', assetsInlineLimit: 0,
+      rollupOptions: { output: { manualChunks(id: string) {
+        if (/\/node_modules\/(?:react|react-dom|scheduler)\//.test(id)) return 'react';
+        if (/\/node_modules\/@codemirror\/(?:state|view)\//.test(id)) return 'codemirror-core';
+        if (/\/node_modules\/(?:@codemirror|@lezer)\//.test(id)) return 'codemirror';
+        if (id.includes('/node_modules/katex/')) return 'katex';
+        return undefined;
+      } } },
+    },
     worker: { format: 'es' },
   };
 });

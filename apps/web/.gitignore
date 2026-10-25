@@ -1,2 +1,4 @@
 # Local logs and captures used when reproducing app review regressions.
 .review-regression-debug/
+# Optional local bundle inspection reports.
+.bundle-analysis/

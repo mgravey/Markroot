@@ -36,6 +36,7 @@ it('opens counts from the status bar, counts source selections, toggles captions
     await act(async () => { await vi.advanceTimersByTimeAsync(300); });
     expect(host.querySelector('.status-bar')?.textContent).toContain('5 words');
     await click('button[aria-label="Open document statistics"]');
+    await act(async () => { await import('./panels/StatisticsPanel.js'); });
     expect(host.querySelector('aside[aria-label="Statistics"]')?.textContent).toContain('Words (incl. citations)');
     const captions = host.querySelector<HTMLInputElement>('.statistics-panel input[type="checkbox"]')!;
     await act(async () => { captions.click(); await vi.advanceTimersByTimeAsync(300); });
@@ -48,6 +49,7 @@ it('opens counts from the status bar, counts source selections, toggles captions
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
     expect(source().cursorTarget).toBe(sourceText.indexOf('# Results'));
     await click('button[aria-label="Settings"]');
+    await act(async () => { await import('./panels/SettingsPanel.js'); });
     expect(host.querySelector('.settings-build')?.textContent).toContain('Markroot · build dev');
   } finally {
     act(() => root.unmount()); host.remove(); delete (window as Window & { showDirectoryPicker?: unknown }).showDirectoryPicker;

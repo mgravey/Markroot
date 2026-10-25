@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { workspacePath } from '@markroot/core';
 import type { DocumentSnapshot } from '@markroot/document';
-import { parseExportOptions, type ExportFormat } from '@markroot/export';
+import type { ExportFormat } from '@markroot/export';
 import type { GuardedWorkspace } from '@markroot/workspace';
 import { collectDocumentResources } from '../document-resources.js';
-import { WorkerExporter } from '../workers/export-client.js';
-import { appExportProgress, exportSaveMessage, exportStepTotal, type ExportDestination, type ExportProgressState } from '../panels/ExportPanel.js';
+import type { WorkerExporter } from '../workers/export-client.js';
+import { appExportProgress, exportSaveMessage, exportStepTotal, type ExportDestination, type ExportProgressState } from '../export-progress.js';
 import { useEvent } from './useEvent.js';
 
 interface Options {
@@ -18,11 +18,11 @@ interface Options {
 }
 
 export function useExport({ snapshot, workspace, justified, setNotice, onWorkspaceChanged }: Options) {
-  const exporter = useMemo(() => new WorkerExporter(), []);
+  const exporterRef = useRef<WorkerExporter | undefined>(undefined);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<ExportProgressState>();
   const controllerRef = useRef<AbortController | undefined>(undefined);
-  useEffect(() => () => exporter.terminate(), [exporter]);
+  useEffect(() => () => { controllerRef.current?.abort(); exporterRef.current?.terminate(); }, []);
 
   const exportDocument = useEvent(async (format: ExportFormat, destination: ExportDestination) => {
     if (!snapshot || busy) return;
@@ -40,6 +40,9 @@ export function useExport({ snapshot, workspace, justified, setNotice, onWorkspa
       }
       setNotice(`Preparing ${format.toUpperCase()} locally…`);
       setProgress({ format, phase: 'resources', completed: 0, total: exportStepTotal(format), message: 'Collecting document resources' });
+      const [{ parseExportOptions }, { WorkerExporter }] = await Promise.all([import('@markroot/export'), import('../workers/export-client.js')]);
+      controller.signal.throwIfAborted();
+      const exporter = exporterRef.current ??= new WorkerExporter();
       const exportOptions = parseExportOptions(snapshot.source);
       const resources = workspace ? await collectDocumentResources(workspace, snapshot, format, exportOptions, {
         signal: controller.signal,
