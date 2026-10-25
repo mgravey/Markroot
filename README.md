@@ -12,6 +12,7 @@ The visual identity uses a rooted pilcrow, with a Lottie-ready After Effects sou
 - Compact-by-default folder tree that emphasizes Markdown/QMD files, mutes unrelated branches, and supports copyable workspace paths with document-relative insertion on paste
 - Modular workspace, document, rendering, citation, Git, review, comment, and export packages
 - CodeMirror source editing with line numbers, live Git change markers in the gutter, and one synchronized toolbar toggle for word-level tracked changes with green additions and red struck-through deletions in both the source and rendered views
+- A browser-local modification tree with undo/redo branches, starred versions, keyboard branch switching, and read-only Source/Rendered comparisons
 - A source-backed ProseMirror visual editor that edits recognized blocks without rewriting untouched source
 - A scholarly rendered view with numbered sections/tables/figures, `.unnumbered` headings, semantic equations, hidden Markdown HTML comments, placed `#refs` bibliographies, securely restored document-relative local images including first-page PDF figures, citations, cross-references, callouts, and figure layouts
 - Static Quarto/knitr chunk visibility, mapped hidden chunks, intentional inline-expression placeholders, and numbered chunk figures resolved from workspace images without running code

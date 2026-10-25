@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { basicSetup } from 'codemirror';
+import { sourceSetup } from './source-setup.js';
 import { markdown } from '@codemirror/lang-markdown';
 import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
 import { SearchQuery, setSearchQuery } from '@codemirror/search';
@@ -57,7 +57,7 @@ export function SourceEditor(props: Props) {
   useEffect(() => {
     if (!host.current) return;
     const extensions: Extension[] = [
-      basicSetup,
+      sourceSetup,
       markdown(),
       EditorView.lineWrapping,
       keymap.of([

@@ -17,7 +17,7 @@ export interface DocumentDiagnostic extends SourceRange {
 
 export interface DocumentEdit extends SourceRange {
   readonly insert: string;
-  readonly origin: 'source' | 'visual' | 'comment' | 'review' | 'system';
+  readonly origin: 'source' | 'visual' | 'comment' | 'review' | 'system' | 'history';
   readonly baseRevision: number;
 }
 
@@ -41,7 +41,10 @@ export class DocumentSession {
   private blocks: readonly DocumentBlock[];
   private readonly subscribers = new Set<DocumentSubscriber>();
 
+  readonly initialSource: string;
+
   constructor(readonly path: WorkspacePath, source: string) {
+    this.initialSource = source;
     this.source = source;
     this.blocks = mapDocumentBlocks(source);
   }

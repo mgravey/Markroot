@@ -377,6 +377,23 @@ mark { color: inherit; background: #ffd76a; border-radius: .118em; }
 
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
 
+/* Browser-local modification tree. */
+.history-panel { display: flex; flex-direction: column; gap: 8px; }
+.history-toolbar { display: flex; align-items: center; gap: 6px; }
+.history-toolbar button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; }
+.history-preview-controls { display: grid; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--accent-soft); }
+.history-preview-controls p { margin: 0; }
+.history-tree { display: flex; flex-direction: column; gap: 2px; }
+.history-node { display: flex; align-items: center; gap: 6px; width: 100%; text-align: left; border: 0; border-inline-start: 2px solid var(--line); border-radius: 0; padding-block: 7px; }
+.history-node.on-path { border-inline-start-color: var(--accent); }
+.history-node.current { background: var(--accent-soft); font-weight: 700; }
+.history-node.selected { outline: 1px solid var(--accent); outline-offset: -1px; }
+.history-node:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.history-node-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.history-node-label small { display: block; font-size: 10px; color: var(--muted); font-weight: 400; }
+.history-counts { display: flex; flex-direction: column; font-size: 10px; font-variant-numeric: tabular-nums; }
+.history-counts span:first-child { color: var(--accent-strong); }
+.history-counts span:last-child { color: var(--danger); }
 /* Project switcher: browser-local recent folders. Keep this block independent of viewer styles. */
 .project-switcher { position: relative; min-width: 0; }
 .project-switcher .workspace-button { width: 100%; }
