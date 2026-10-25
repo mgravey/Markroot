@@ -8,6 +8,13 @@
 - Added the History inspector with keyboard tree navigation, stars, branch position, reversible version switching, and read-only comparisons using existing tracked changes in Source and Rendered.
 - Added pure tree/storage and jsdom session-hook coverage, including CRLF/Unicode, delayed restores, reloads and corrupt storage.
 
+## Multiple local projects
+
+- Added an accessible recent-project selector and welcome-screen shortcuts, with Ctrl/Cmd+Shift+O, current-folder checks, and per-project removal.
+- Persisted up to twelve recent folder handles with stable workspace identities, atomic updates, and migration from the previous single-folder bookmark; removing a bookmark leaves files and recovery drafts intact.
+- Guarded switching with unsaved-edit confirmation or autosave, direct click-time permission requests, stale-selection cancellation, and notices for denied or missing folders.
+- Disambiguated shared names with known ancestor paths when available, otherwise a stable local identifier; Chromium does not expose absolute parent paths.
+
 ## Strict lint and compiler checks
 
 - Added flat-config ESLint with type-aware promise/thenable/assertion checks and React hook rules, integrated immediately after dependency boundaries in `pnpm check`.

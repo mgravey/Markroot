@@ -13,7 +13,7 @@ interface Options {
   setNotice(notice: string): void;
   onNavigate(position: number): void;
 }
-interface LiveHistory { session: DocumentSession; tree: UndoTree; ready: boolean; changed(): void; returnTo?: string; forwardTo?: string }
+interface LiveHistory { session: DocumentSession; tree: UndoTree; ready: boolean; changed(): void; flush(): void; returnTo?: string; forwardTo?: string }
 
 /** Session events, rather than editor events, capture every source/visual/review rewrite. */
 export function useDocumentHistory({ session, workspaceId, backend = browserHistory, setNotice, onNavigate }: Options) {
@@ -35,7 +35,7 @@ export function useDocumentHistory({ session, workspaceId, backend = browserHist
       if (!disposed) setState((previous) => ({ session, tree: controller.tree, ready: controller.ready, revision: (previous?.revision ?? 0) + 1 }));
       clearTimeout(timer); if (controller.ready) timer = setTimeout(flush, 1000);
     };
-    const controller: LiveHistory = { session, tree: new UndoTree(session.initialSource), ready: false, changed };
+    const controller: LiveHistory = { session, tree: new UndoTree(session.initialSource), ready: false, changed, flush };
     live.current = controller;
     const unsubscribe = session.subscribe((snapshot, edit) => {
       if (edit?.origin === 'history') return;
@@ -98,7 +98,8 @@ export function useDocumentHistory({ session, workspaceId, backend = browserHist
     controller.changed(); return true;
   });
   const star = useEvent((id: string) => { const controller = live.current; if (controller && controller.session === session) { controller.tree.star(id); controller.changed(); } });
-  return { tree: state && state.session === session ? state.tree : undefined, ready: Boolean(state && state.session === session && state.ready), command, star };
+  const flush = useEvent(() => live.current?.flush());
+  return { flush, tree: state && state.session === session ? state.tree : undefined, ready: Boolean(state && state.session === session && state.ready), command, star };
 }
 
 /** Bubble after ProseMirror/CodeMirror. Text inputs keep their own native undo. */

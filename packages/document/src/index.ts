@@ -154,6 +154,7 @@ export function mapDocumentBlocks(source: string, options: { readonly frontmatte
   let start = 0;
   let buffer: string[] = [];
   let mode: 'code' | 'div' | undefined;
+  let displayMath = false;
   let fence: CodeFence | undefined;
   let innerFence: CodeFence | undefined;
   let depth = 0;
@@ -185,6 +186,15 @@ export function mapDocumentBlocks(source: string, options: { readonly frontmatte
       buffer.push(line); offset += line.length;
       if (index === frontmatterLines - 1) flush('frontmatter');
       continue;
+    }
+    // A display equation is one mapped block even when its TeX contains blank lines.
+    if (!mode && displayMath) {
+      buffer.push(line); offset += line.length;
+      if (/(?<!\\)\$\$/.test(line)) { displayMath = false; flush('paragraph'); }
+      continue;
+    }
+    if (!mode && /^ {0,3}\$\$(?!\$)/.test(line) && !/(?<!\\)\$\$/.test(line.replace(/^ {0,3}\$\$/, ''))) {
+      flush(); start = offset; buffer.push(line); offset += line.length; displayMath = true; continue;
     }
     if (!mode) {
       const codeFence = openingCodeFence(line);

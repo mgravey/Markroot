@@ -107,3 +107,22 @@ it('wraps the complete registry read and write in a shared Web Lock', async () =
   await settings.workspaceIdFor(folder('a'));
   expect(request).toHaveBeenCalledWith('markroot:workspace-ids', { mode: 'exclusive' }, expect.any(Function));
 });
+
+it('migrates and remembers projects in atomic cross-tab transactions without Web Locks', async () => {
+  const db = indexedDbFixture();
+  db.values.set('recent-workspace', folder('legacy'));
+  vi.stubGlobal('indexedDB', db);
+  vi.stubGlobal('navigator', {});
+  const tabA = await import('./index.js');
+  vi.resetModules();
+  const tabB = await import('./index.js');
+  const [a, same, b] = await Promise.all([
+    tabA.rememberProject(folder('a')), tabB.rememberProject(folder('a')), tabB.rememberProject(folder('b')),
+  ]);
+  expect(same.id).toBe(a.id);
+  expect(b.id).not.toBe(a.id);
+  expect((await tabA.listRecentProjects()).map((project) => project.id)).toEqual([b.id, a.id, expect.any(String)]);
+  expect(db.values.get('workspace-ids')).toHaveLength(3);
+  expect(db.values.has('recent-workspace')).toBe(false);
+  expect(db.operations.every((operation) => operation.mode === 'readwrite')).toBe(true);
+});

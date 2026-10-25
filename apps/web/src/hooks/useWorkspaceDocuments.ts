@@ -5,7 +5,7 @@ import { FileSystemAccessWorkspace, ensureDirectoryPermission, type GuardedWorks
 import { commentRevision, parseComments } from '@markroot/comments';
 import { IsomorphicGitRepository } from '@markroot/git';
 import { LocalCitationProvider, type CitationRecord } from '@markroot/citations';
-import { deletePendingSession, workspaceIdFor, loadPendingSession, loadRecentWorkspace, loadSettings, saveRecentWorkspace, type MarkrootSettings } from '@markroot/settings';
+import { deletePendingSession, forgetProject, listRecentProjects, rememberProject, workspaceIdFor, loadPendingSession, loadRecentWorkspace, loadSettings, type MarkrootSettings, type RecentProject } from '@markroot/settings';
 import type { useComments } from './useComments.js';
 import type { useGitRepository } from './useGitRepository.js';
 import { useEvent } from './useEvent.js';
@@ -18,15 +18,18 @@ interface Options {
   updateSettings(settings: MarkrootSettings): void;
   setNotice(notice: string | undefined): void;
   reportError(error: unknown): void;
+  saveBeforeSwitch(): Promise<DocumentSnapshot | undefined>;
   onFolderReset(): void;
   onDocumentLoading(): void;
   onDocumentOpened(path: WorkspacePath, base: string | undefined, firstBlock: string | undefined, fragment?: string): void;
 }
 
 /** Owns folder generations, document loads and the live session subscription. */
-export function useWorkspaceDocuments({ comments, repository, settingsRef, setSettings, updateSettings, setNotice, reportError, onFolderReset, onDocumentLoading, onDocumentOpened }: Options) {
+export function useWorkspaceDocuments({ comments, repository, settingsRef, setSettings, updateSettings, setNotice, reportError, saveBeforeSwitch, onFolderReset, onDocumentLoading, onDocumentOpened }: Options) {
   const [workspace, setWorkspace] = useState<GuardedWorkspace>();
   const [rootName, setRootName] = useState('No folder open');
+  const [recentProjects, setRecentProjects] = useState<readonly RecentProject[]>([]);
+  const [unavailableProject, setUnavailableProject] = useState<RecentProject>();
   const [entries, setEntries] = useState<readonly WorkspaceEntry[]>([]);
   const [session, setSession] = useState<DocumentSession>();
   const [snapshot, setSnapshot] = useState<DocumentSnapshot>();
@@ -38,37 +41,103 @@ export function useWorkspaceDocuments({ comments, repository, settingsRef, setSe
   const workspaceIdRef = useRef<string | undefined>(undefined);
   const [citations, setCitations] = useState<readonly CitationRecord[]>([]);
   const sessionSubscription = useRef<(() => void) | undefined>(undefined);
-  const connectFolderEvent = useEvent((handle: FileSystemDirectoryHandle) => connectFolder(handle));
-  const reportRestoreError = useEvent(reportError);
+  const connectFolderEvent = useEvent((handle: FileSystemDirectoryHandle, generation: number) => connectFolder(handle, generation));
+  const reportProjectError = useEvent((error: unknown, project?: RecentProject) => {
+    if (project && error instanceof DOMException && (error.name === 'NotFoundError' || error.name === 'NotAllowedError')) {
+      setUnavailableProject(project);
+      setNotice(`${project.name} is unavailable. Open the folder again or remove it from the list.`);
+    } else reportError(error);
+  });
   useEffect(() => {
     // A folder the user picks while this restore is pending wins over the remembered one.
     let disposed = false;
     const generation = folderGeneration.current;
     void loadSettings().then((loaded) => { if (!disposed) { settingsRef.current = loaded; setSettings(loaded); } }).catch(() => undefined).then(() => loadRecentWorkspace()).then(async (handle) => {
-      if (disposed || !handle || folderGeneration.current !== generation) return;
-      if (await ensureDirectoryPermission(handle) === 'granted' && !disposed && folderGeneration.current === generation) await connectFolderEvent(handle);
-    }).catch(reportRestoreError);
+      const projects = await listRecentProjects();
+      if (disposed || folderGeneration.current !== generation) return;
+      setRecentProjects(projects);
+      if (!handle) return;
+      try {
+        if (await ensureDirectoryPermission(handle) === 'granted' && !disposed && folderGeneration.current === generation) await connectFolderEvent(handle, generation);
+      } catch (error) { if (!disposed && folderGeneration.current === generation) reportProjectError(error, projects[0]); }
+    }).catch(reportProjectError);
     return () => { disposed = true; folderGeneration.current += 1; documentRequest.current += 1; sessionSubscription.current?.(); };
-  }, [settingsRef, setSettings, connectFolderEvent, reportRestoreError]);
+  }, [settingsRef, setSettings, connectFolderEvent, reportProjectError]);
+  function canSwitchFolder(): boolean {
+    if (comments().writeBusy.current) { setNotice('Wait for the comment to finish saving.'); return false; }
+    return !activeSession.current?.snapshot().dirty || settingsRef.current.autosave || window.confirm('Discard unsaved edits and open another folder?');
+  }
+
   async function chooseFolder() {
-    if (comments().writeBusy.current) { setNotice('Wait for the comment to finish saving.'); return; }
-    if (snapshot?.dirty && !window.confirm('Discard unsaved edits and open another folder?')) return;
+    if (!canSwitchFolder()) return;
     if (!('showDirectoryPicker' in window)) { setNotice('Markroot needs a Chromium desktop browser with folder access.'); return; }
+    const discarded = activeSession.current?.snapshot();
     const generation = ++folderGeneration.current;
     try {
       const handle = await (window as Window & { showDirectoryPicker(options: { mode: 'readwrite'; id: string }): Promise<FileSystemDirectoryHandle> }).showDirectoryPicker({ mode: 'readwrite', id: 'markroot-workspace' });
       if (await ensureDirectoryPermission(handle, true) !== 'granted') throw new Error('Read/write permission was not granted.');
-      if (generation !== folderGeneration.current) return;
-      await saveRecentWorkspace(handle);
-      if (generation !== folderGeneration.current) return;
-      await connectFolder(handle);
-    } catch (error) { reportError(error); }
+      if (generation === folderGeneration.current) await connectFolder(handle, generation, discarded);
+    } catch (error) { if (generation === folderGeneration.current) reportError(error); }
   }
 
-  async function connectFolder(handle: FileSystemDirectoryHandle) {
-    if (comments().writeBusy.current) { setNotice('Wait for the comment to finish saving.'); return; }
+  async function selectProject(project: RecentProject) {
+    if (workspace && workspaceIdRef.current === project.id) return;
+    if (!canSwitchFolder()) return;
+    const discarded = activeSession.current?.snapshot();
     const generation = ++folderGeneration.current;
+    setUnavailableProject(undefined);
+    try {
+      // Invoke requestPermission synchronously in the click's activation, before saving or querying IDB.
+      const permission = requestProjectPermission(project.handle);
+      if (await permission !== 'granted') {
+        if (generation !== folderGeneration.current) return;
+        setUnavailableProject(project);
+        setNotice(`Read/write access to ${project.name} was not granted. Try again or remove it from the list.`);
+        return;
+      }
+      if (generation === folderGeneration.current) await connectFolder(project.handle, generation, discarded);
+    } catch (error) {
+      if (generation !== folderGeneration.current) return;
+      reportProjectError(error, project);
+    }
+  }
+
+  async function removeProject(id: string) {
+    await forgetProject(id);
+    setRecentProjects((projects) => projects.filter((project) => project.id !== id));
+    setUnavailableProject((project) => project?.id === id ? undefined : project);
+  }
+
+  async function connectFolder(handle: FileSystemDirectoryHandle, generation: number, discarded?: DocumentSnapshot) {
     const superseded = () => generation !== folderGeneration.current;
+    const workspaceId = await workspaceIdFor(handle).catch(() => undefined);
+    if (superseded()) return;
+    const next = new FileSystemAccessWorkspace(handle, workspaceId ? { id: workspaceId } : {});
+    // Validate access before replacing the working folder, including removed directory handles.
+    const nextEntries = await documentEntries(next);
+    if (superseded()) return;
+    const leaving = activeSession.current;
+    const documentContext = documentRequest.current;
+    if (leaving?.snapshot().dirty) {
+      if (settingsRef.current.autosave) {
+        const saved = await saveBeforeSwitch();
+        if (superseded()) return;
+        if (!saved || leaving !== activeSession.current || leaving.snapshot().dirty) { setNotice('Save your edits before switching folders.'); return; }
+      } else {
+        const current = leaving.snapshot();
+        if ((current.path !== discarded?.path || current.revision !== discarded.revision) && !window.confirm('Discard unsaved edits and open another folder?')) return;
+      }
+    }
+    if (comments().writeBusy.current) { setNotice('Wait for the comment to finish saving.'); return; }
+    if (superseded()) return;
+    const leavingRevision = leaving?.snapshot().revision;
+    if (leaving?.snapshot().dirty) await deletePendingSession(pendingWorkspace(), leaving.snapshot().path).catch(() => undefined);
+    if (superseded()) return;
+    // A user can keep typing while persistence is pending; never drop a newer dirty revision.
+    if (documentRequest.current !== documentContext || (leaving?.snapshot().dirty && (settingsRef.current.autosave || leaving.snapshot().revision !== leavingRevision))) {
+      setNotice('Your document changed while opening the folder. Switch again when your edits are ready.'); return;
+    }
+    if (comments().writeBusy.current) { setNotice('Wait for the comment to finish saving.'); return; }
     onFolderReset();
     comments().clear();
     sessionSubscription.current?.();
@@ -83,16 +152,16 @@ export function useWorkspaceDocuments({ comments, repository, settingsRef, setSe
     documentRequest.current += 1;
     fileVersionRef.current = undefined;
     setFileVersion(undefined);
+    setCitations([]);
     repository().reset();
-    const workspaceId = await workspaceIdFor(handle).catch(() => undefined);
-    if (superseded()) return;
-    const next = new FileSystemAccessWorkspace(handle, workspaceId ? { id: workspaceId } : {});
-    const nextEntries = await documentEntries(next);
-    if (superseded()) return;
     workspaceIdRef.current = workspaceId;
     setWorkspace(next);
     setRootName(handle.name);
+    setUnavailableProject(undefined);
     setEntries(nextEntries);
+    const project = await rememberProject(handle).catch(() => undefined);
+    if (superseded()) return;
+    if (project) { setRootName(project.name); setRecentProjects((projects) => [project, ...projects.filter((item) => item.id !== project.id)].slice(0, 12)); }
     const bibliographyPaths = nextEntries.filter((entry) => entry.kind === 'file' && /\.(?:bib|bibtex)$/i.test(entry.path)).map((entry) => entry.path);
     const records = await new LocalCitationProvider(next).index(bibliographyPaths).catch(() => []);
     if (superseded()) return;
@@ -192,7 +261,7 @@ export function useWorkspaceDocuments({ comments, repository, settingsRef, setSe
     catch (error) { reportError(error); }
   }
 
-  return { workspace, rootName, entries, session, snapshot, fileVersion, setFileVersion, activeSession, documentRequest, fileVersionRef, workspaceIdRef, citations, chooseFolder, openFile, openWorkspaceLink, pendingWorkspace, loadCitations, refreshWorkspace };
+  return { workspace, rootName, entries, session, snapshot, fileVersion, setFileVersion, activeSession, documentRequest, fileVersionRef, workspaceIdRef, citations, recentProjects, unavailableProject, selectProject, removeProject, chooseFolder, openFile, openWorkspaceLink, pendingWorkspace, loadCitations, refreshWorkspace };
 }
 
 async function documentEntries(workspace: GuardedWorkspace): Promise<readonly WorkspaceEntry[]> {
@@ -215,3 +284,8 @@ function skippedEntriesNotice(skipped: ReadonlySet<string>): string {
   return ` ${skipped.size} item(s) were skipped because Markroot cannot address their names: ${names}${skipped.size > 3 ? ', …' : ''}.`;
 }
 
+/** Avoid queryPermission's asynchronous boundary before requesting access from a stored bookmark. */
+export function requestProjectPermission(handle: FileSystemDirectoryHandle): Promise<PermissionState> {
+  const capable = handle as FileSystemDirectoryHandle & { requestPermission?(options: { mode: 'readwrite' }): Promise<PermissionState> };
+  return capable.requestPermission ? capable.requestPermission({ mode: 'readwrite' }) : ensureDirectoryPermission(handle, true);
+}

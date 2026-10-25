@@ -38,7 +38,7 @@ describe('BasicDocumentEngine', () => {
     expect(result.html).toContain('class="doi-link"');
     expect(result.html).toContain('aria-label="References"');
     expect(result.html).toContain('class="crossref"');
-    expect(result.warnings).toContain('Code cells are shown as source and are never executed in Markroot.');
+    expect(result.warnings).toContain('Code cells are never executed in Markroot; computed output may be unavailable.');
     result.objectUrls?.forEach((url) => URL.revokeObjectURL(url));
   });
 
