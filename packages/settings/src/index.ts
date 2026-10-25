@@ -301,7 +301,7 @@ function database(): Promise<IDBDatabase> {
       const db = request.result;
       if (blocked) { db.close(); return; }
       const reset = () => { db.close(); if (cachedDatabase === opening) cachedDatabase = undefined; };
-      db.onversionchange = db.onclose = db.onerror = reset;
+      db.onversionchange = db.onclose = reset;
       resolve(db);
     };
     request.onerror = () => reject(request.error);
