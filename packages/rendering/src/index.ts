@@ -4,7 +4,12 @@ import { decodeLatex } from '@markroot/citations';
 import { chunkCacheKey, prepareQuartoDocument, staticChunk, type QuartoDocument } from './quarto.js';
 import { stripCommentMarkup } from '@markroot/comments';
 import { throwIfAborted, type OperationContext } from '@markroot/core';
-import { closesCodeFence, mapDocumentBlocks, splitLines, type DocumentBlockKind, type DocumentSnapshot } from '@markroot/document';
+import { mapDocumentBlocks, splitLines, type DocumentBlockKind, type DocumentSnapshot } from '@markroot/document';
+
+import { maskMarkdownHtmlComments } from './markdown-comments.js';
+import { citationTextLabel } from './citation-label.js';
+export { maskMarkdownHtmlComments } from './markdown-comments.js';
+export { documentStatistics, DocumentStatisticsCalculator, countWords, type DocumentStatistics, type StatisticsOptions, type TextStatistics, type SectionStatistics } from './statistics.js';
 
 export { IMAGE_REFERENCE, documentResourceReferences, type DocumentResourceReference } from './quarto.js';
 
@@ -195,66 +200,6 @@ function resolveCrossReferences(html: string, labels: ReadonlyMap<string, string
     const label = labels.get(key);
     return label ? `<a class="crossref" href="#${escapeAttribute(key)}" data-source-offset="${offset}">${escapeHtml(label)}</a>` : escapeHtml(`@${key}`);
   });
-}
-
-/**
- * Replaces Markdown HTML comments with whitespace while preserving length and
- * line endings. Literal comment syntax inside inline or fenced code is kept.
- */
-export function maskMarkdownHtmlComments(source: string): string {
-  const lines = splitLines(source);
-  let fence: { marker: '`' | '~'; length: number } | undefined;
-  let inlineTicks = 0;
-  let inComment = false;
-  let output = '';
-
-  for (const line of lines) {
-    const fenceMatch = /^ {0,3}(`{3,}|~{3,})/.exec(line);
-    if (!inComment && inlineTicks === 0 && fence) {
-      output += line;
-      if (closesCodeFence(line, fence)) fence = undefined;
-      continue;
-    }
-    if (!inComment && inlineTicks === 0 && fenceMatch?.[1]) {
-      fence = { marker: fenceMatch[1][0] as '`' | '~', length: fenceMatch[1].length };
-      output += line;
-      continue;
-    }
-
-    for (let index = 0; index < line.length;) {
-      if (inComment) {
-        if (line.startsWith('-->', index)) {
-          output += '   ';
-          index += 3;
-          inComment = false;
-        } else {
-          const character = line[index]!;
-          output += character === '\n' || character === '\r' ? character : ' ';
-          index += 1;
-        }
-        continue;
-      }
-      if (line[index] === '`') {
-        let end = index + 1;
-        while (line[end] === '`') end += 1;
-        const run = end - index;
-        if (inlineTicks === 0) inlineTicks = run;
-        else if (run === inlineTicks) inlineTicks = 0;
-        output += line.slice(index, end);
-        index = end;
-        continue;
-      }
-      if (inlineTicks === 0 && line.startsWith('<!--', index)) {
-        output += '    ';
-        index += 4;
-        inComment = true;
-        continue;
-      }
-      output += line[index]!;
-      index += 1;
-    }
-  }
-  return output;
 }
 
 const CODE_OR_LINK = String.raw`(?<!\x60)(?<ticks>\x60+)(?!\x60)[\s\S]*?(?<!\x60)\k<ticks>(?!\x60)|<[A-Za-z][A-Za-z0-9+.\-]{1,31}:[^\s<>]*>|\]\((?:<[^>\n]*>|[^\s()<>]*(?:\([^\s()<>]*\)[^\s()<>]*)*)(?:\s+(?:"[^"\n]*"|'[^'\n]*'))?\s*\)|^ {0,3}\[[^\]\n]+\]:[ \t]*\S+|\b(?:https?|ftp):\/\/[^\s<>]+`;
@@ -569,10 +514,7 @@ function renderHeadingIdentifiers(html: string): string {
 }
 
 function citationLabel(citation: RenderCitation | undefined, key: string, textual: boolean): string {
-  if (!citation) return escapeHtml(key);
-  const author = shortAuthor(citation) || key;
-  const year = citation.year || 'n.d.';
-  return textual ? `${escapeHtml(author)} (${escapeHtml(year)})` : `${escapeHtml(author)}, ${escapeHtml(year)}`;
+  return escapeHtml(citationTextLabel(citation, key, textual));
 }
 
 function citationAnchor(citation: RenderCitation | undefined, key: string, label: string): string {
@@ -591,16 +533,6 @@ export function doiUrl(doi?: string): string | undefined {
 
 function referenceLabel(citation: RenderCitation): string {
   return [displayText(citation.author ?? ''), citation.year ? `(${citation.year}).` : undefined, displayText(citation.title ?? '')].filter(Boolean).join(' ');
-}
-
-/** Structured names (corporate `literal` names stay whole) take precedence over splitting the display string. */
-function shortAuthor(citation: RenderCitation): string {
-  const surname = (entry: string) => entry.includes(',') ? entry.split(',')[0]!.trim() : entry.split(/\s+/).at(-1)!;
-  const names = citation.authors?.length
-    ? citation.authors.map((name) => displayText('literal' in name ? name.literal : name.family))
-    : displayText(citation.author ?? '').split(/\s+and\s+/i).map((entry) => entry.trim()).filter(Boolean).map(surname);
-  if (names.length > 2) return `${names[0]} et al.`;
-  return names.join(' & ');
 }
 
 function stripInlineMarkup(value: string): string { return value.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').replace(/[*_~`]/g, '').replace(/\s+/g, ' ').trim(); }

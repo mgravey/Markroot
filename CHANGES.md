@@ -1,5 +1,13 @@
 # Changes
 
+## Build identity and document statistics
+
+- Stamp production artifacts with the UTC build date/timestamp and available Git revision; show `dev` in Vite development and publish the artifact identity in an HTML meta tag.
+- Add a compact status bar with clickable text-only word counts and build identity, plus build details in Settings and the welcome footer.
+- Add the Statistics inspector with explicit text-only and citation-label word/character variants, source selections, caption inclusion, structural counts, and H1 word bars using existing outline navigation.
+- Use Markdown tokenization, Unicode segmentation, shared preview citation labels, a 300 ms debounce and bounded per-block caches; exclude metadata, code blocks, comments, raw blocks, math tokens and bibliography prose from word counts.
+- Cover synthetic prose/Quarto cases, UTC build stamps, cache reuse, debounce/cancellation and the inspector workflow with Vitest.
+
 ## Local modification tree
 
 - Added `@markroot/history`: grouped edits/inverses, branching navigation, last-visited redo, checkpoints, exact external-text matching, schema validation, pruning and JSON persistence.

@@ -192,3 +192,25 @@ If the repository uses a default branch other than `master`, either keep `master
 - Run DOCX archive validation and offline PDF text, font, metadata, and pixel-fidelity tests on every supported platform.
 - Complete accessibility, storage-pressure, large-packfile, and multi-tab endurance testing.
 - Exercise detached-viewer lifecycle, cross-window input, and multi-monitor placement on every supported desktop platform.
+
+
+## Build identity
+
+Vite injects `__MARKROOT_BUILD__` (typed in `apps/web/src/build.d.ts`) once when producing the application: a UTC ISO date (`YYYY-MM-DD`), full ISO timestamp and optional short Git commit. CI uses the first seven characters of `GITHUB_SHA`; local builds try `git rev-parse --short HEAD` and tolerate missing Git metadata. The date identifies the built artifact and does not change with the visitor's clock or a later redeployment of the same artifact. Run a fresh production build for a new deployment date. Vite development displays `dev`.
+
+The bottom status bar shows `Build YYYY-MM-DD`; hover for the full timestamp and commit. Settings ends with `Markroot · build YYYY-MM-DD · revision`, and the welcome screen repeats it in its footer. The generated HTML also includes `<meta name="markroot-build">` for artifact inspection. There is no runtime Git/network request.
+
+## Document statistics
+
+Open **Statistics** (bar chart icon), or click the word count at the right of the status bar. Counts describe the document currently displayed in Source, including a read-only history preview. **Include captions** applies to document, selection and section word counts; it defaults to on for the browser session. A nonempty source selection (shared with comment selection tracking) adds a Selection subsection. H1 rows show text-only words including the heading and its nested subsections; click a row to use the existing document-outline navigation. Preamble text before the first H1 contributes to the document total.
+
+`documentStatistics(sourceOrSnapshot, options)` in `@markroot/rendering` is a pure source-to-counts API. The UI reuses a `DocumentStatisticsCalculator` with bounded content-addressed block caches and waits 300 ms after source/selection changes. Scanning and summing remain linear, while unchanged blocks reuse their Markdown parsing and word segmentation, including when their offsets or block ordinals shift. Citation label, link-reference definition and caption-option changes invalidate affected calculation caches. Caches belong to the open file and are released when it changes.
+
+- **Words (text only)** excludes citation and cross-reference tokens. **Words (incl. citations)** inserts the same author/year text used by the preview, such as `(Péron et al., 2020)`; unknown keys use their key as the label. Neither variant includes bibliography entries or cross-reference labels.
+- Both variants report characters with and without spaces. Characters count Unicode code points in normalized visible prose, retaining punctuation, decoding Markdown entities, joining prose blocks/cells with one space, and collapsing whitespace. These are prose character counts, not source length or grapheme counts.
+- Words use `Intl.Segmenter` word-like segments when available, with a Unicode letter/number regex fallback. Accents, combining marks and numbers are supported. Hyphens, double hyphens and en dashes join compound words (`day--night` counts once); em dashes separate words. Inline code is one word per span, with its visible characters retained.
+- Markdown headings, emphasis, list/quote markers, link destinations, bare URLs, table pipes/separators, div fences and attribute blocks do not contribute words. Link labels, table cells and ordinary prose inside divs do. Image captions/alt text and Markdown table captions (`: Caption` or `Table: Caption`) follow **Include captions**.
+- YAML front matter, fenced/indented code (including QMD code chunks and their options), HTML comments, raw HTML/LaTeX blocks, `::: {#refs}` contents, and a final References/Bibliography heading section are excluded. The abstract is included when it is body prose; metadata remains excluded. Figures count Markdown images, tables count Markdown tables, and no code or generated outputs are executed or inferred.
+- Inline/display math and equation environments contribute equations, with TeX excluded from words. Paragraphs are nonempty Markdown prose paragraphs/list items; headings and table cells do not add paragraphs. Sentence boundaries are approximate punctuation-based estimates. Citations count occurrences plus unique keys; cross-references count `@fig-`, `@tbl-`, `@eq-`, `@sec-` and `@lst-` tokens. Footnotes count unique `[^id]` identities and include definition prose.
+
+These source-based counts approximate the editor's scholarly preview, rather than Pandoc/citeproc output under arbitrary citation styles, execution results or export templates. Selections use source offsets and the same exclusions before parsing the selected fragment. Tests use synthetic documents only; `.markroot-statistics-debug/` is ignored for optional local diagnostics.
