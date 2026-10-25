@@ -71,3 +71,6 @@ Adobe After Effects Auto-Save/
 .markroot-hook-tests/
 # Local project-switcher browser and permission diagnostics
 .markroot-project-switcher-debug/
+
+# Local static-preview diagnostics (never commit private source documents)
+.markroot-static-preview-debug/

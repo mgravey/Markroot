@@ -14,6 +14,7 @@ The visual identity uses a rooted pilcrow, with a Lottie-ready After Effects sou
 - CodeMirror source editing with line numbers, live Git change markers in the gutter, and one synchronized toolbar toggle for word-level tracked changes with green additions and red struck-through deletions in both the source and rendered views
 - A source-backed ProseMirror visual editor that edits recognized blocks without rewriting untouched source
 - A scholarly rendered view with numbered sections/tables/figures, `.unnumbered` headings, semantic equations, hidden Markdown HTML comments, placed `#refs` bibliographies, securely restored document-relative local images including first-page PDF figures, citations, cross-references, callouts, and figure layouts
+- Static Quarto/knitr chunk visibility, mapped hidden chunks, intentional inline-expression placeholders, and numbered chunk figures resolved from workspace images without running code
 - A persistent overlay document outline with two heading levels by default, optional figures, tables, and direct navigation, plus in-view navigation for internal links and unobtrusive Ctrl/Cmd-click DOI access on citations
 - Bidirectional block/character navigation, paired active-paragraph highlighting, shared search highlighting, and interaction-owned center-line alignment
 - Persistent font-family and display-size controls that proportionally scale each writing surface without affecting export typography, plus optional justified viewer text

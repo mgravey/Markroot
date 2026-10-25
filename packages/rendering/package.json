@@ -11,7 +11,9 @@
     "@markroot/core": "workspace:*",
     "@markroot/document": "workspace:*",
     "katex": "0.16.22",
-    "markdown-it": "^14.1.0"
+    "markdown-it": "^14.1.0",
+    "@markroot/citations": "workspace:*",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@types/markdown-it": "^14.1.2"

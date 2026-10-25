@@ -8,6 +8,7 @@ import { collectPreviewResources, PreviewResourceCache, PreviewUrlCache } from '
 interface Options {
   readonly previewSnapshot: DocumentSnapshot | undefined;
   readonly workspace: GuardedWorkspace | undefined;
+  readonly workspacePaths?: readonly string[];
   readonly citations: readonly CitationRecord[];
   readonly allowRemoteResources: boolean;
   /** Source rendered as the tracked-changes base; undefined when tracked changes are hidden. */
@@ -16,7 +17,7 @@ interface Options {
 }
 
 /** Debounced preview rendering plus the tracked-changes base render. Owns the artifacts' object URLs. */
-export function usePreviewRender({ previewSnapshot, workspace, citations, allowRemoteResources, baseSource, reportError }: Options) {
+export function usePreviewRender({ previewSnapshot, workspace, workspacePaths, citations, allowRemoteResources, baseSource, reportError }: Options) {
   const engine = useMemo(() => new BasicDocumentEngine(), []);
   const resources = useMemo(() => new PreviewResourceCache(), []);
   const urls = useMemo(() => new PreviewUrlCache(), []);
@@ -33,28 +34,28 @@ export function usePreviewRender({ previewSnapshot, workspace, citations, allowR
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
       void (async () => {
-        const dependencies = await collectPreviewResources(workspace, previewSnapshot, resources, controller.signal);
+        const dependencies = await collectPreviewResources(workspace, previewSnapshot, resources, controller.signal, workspacePaths);
         if (controller.signal.aborted) return;
         const lease = urls.acquire(dependencies);
         try {
-          const artifact = await engine.render({ snapshot: previewSnapshot, dependencies: lease.dependencies, citations, allowRemoteResources }, { signal: controller.signal });
+          const artifact = await engine.render({ snapshot: previewSnapshot, workspacePaths: workspacePaths ?? [], dependencies: lease.dependencies, citations, allowRemoteResources }, { signal: controller.signal });
           if (controller.signal.aborted) { lease.release(); return; }
           setResult({ artifact, snapshot: previewSnapshot, release: lease.release });
         } catch (error) { lease.release(); throw error; }
       })().catch((error: unknown) => { if (!controller.signal.aborted) reportError(error); });
     }, 120);
     return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [previewSnapshot, engine, allowRemoteResources, workspace, citations, resources, urls, reportError]);
+  }, [previewSnapshot, engine, allowRemoteResources, workspace, workspacePaths, citations, resources, urls, reportError]);
 
   useEffect(() => {
     if (!previewPath || baseSource === undefined) { setRenderedBaseHtml(undefined); return; }
     const controller = new AbortController();
     const baseSnapshot = new DocumentSession(previewPath, baseSource).snapshot();
-    void engine.render({ snapshot: baseSnapshot, citations, allowRemoteResources }, { signal: controller.signal })
+    void engine.render({ snapshot: baseSnapshot, workspacePaths: workspacePaths ?? [], citations, allowRemoteResources }, { signal: controller.signal })
       .then((artifact) => { if (!controller.signal.aborted) setRenderedBaseHtml(artifact.html); })
       .catch((error) => { if (!controller.signal.aborted) reportError(error); });
     return () => controller.abort();
-  }, [previewPath, baseSource, engine, citations, allowRemoteResources, reportError]);
+  }, [previewPath, baseSource, engine, workspacePaths, citations, allowRemoteResources, reportError]);
 
   return { rendered: result?.artifact, renderedSnapshot: result?.snapshot, renderedBaseHtml };
 }
