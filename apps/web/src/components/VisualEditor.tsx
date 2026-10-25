@@ -1,4 +1,7 @@
 import { memo, useEffect, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent } from 'react';
+import { baseKeymap } from 'prosemirror-commands';
+import { history, redo, undo } from 'prosemirror-history';
+import { keymap } from 'prosemirror-keymap';
 import { defaultMarkdownParser, defaultMarkdownSerializer } from 'prosemirror-markdown';
 import { EditorState } from 'prosemirror-state';
 import { EditorView } from 'prosemirror-view';
@@ -92,7 +95,16 @@ const VisualBlock = memo(function VisualBlock({ block, active, onApply, onNaviga
     const initial = latest.current.block;
     if (!editing || !host.current || !initial.editable || initial.kind === 'code' || initial.kind === 'div' || initial.kind === 'table') return;
     let state: EditorState;
-    try { state = EditorState.create({ doc: defaultMarkdownParser.parse(initial.text) }); }
+    try { state = EditorState.create({ doc: defaultMarkdownParser.parse(initial.text), plugins: [
+      history(),
+      keymap({
+        // Consume empty history commands too, so native contenteditable undo cannot change the DOM.
+        'Mod-z': (state, dispatch) => { undo(state, dispatch); return true; },
+        'Shift-Mod-z': (state, dispatch) => { redo(state, dispatch); return true; },
+        'Mod-y': (state, dispatch) => { redo(state, dispatch); return true; },
+      }),
+      keymap(baseKeymap),
+    ] }); }
     catch { return; }
     const initialDoc = state.doc;
     let cancelled = false;
