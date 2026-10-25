@@ -110,7 +110,8 @@ export function useWorkspaceDocuments({ comments, repository, settingsRef, setSe
 
   async function connectFolder(handle: FileSystemDirectoryHandle, generation: number, discarded?: DocumentSnapshot) {
     const superseded = () => generation !== folderGeneration.current;
-    const workspaceId = await workspaceIdFor(handle).catch(() => undefined);
+    // Recovery keys fall back to the folder name, but a broken registry must not stay silent.
+    const workspaceId = await workspaceIdFor(handle).catch((error: unknown) => { reportError(error); return undefined; });
     if (superseded()) return;
     const next = new FileSystemAccessWorkspace(handle, workspaceId ? { id: workspaceId } : {});
     // Validate access before replacing the working folder, including removed directory handles.
@@ -159,7 +160,7 @@ export function useWorkspaceDocuments({ comments, repository, settingsRef, setSe
     setRootName(handle.name);
     setUnavailableProject(undefined);
     setEntries(nextEntries);
-    const project = await rememberProject(handle).catch(() => undefined);
+    const project = await rememberProject(handle).catch((error: unknown) => { reportError(error); return undefined; });
     if (superseded()) return;
     if (project) { setRootName(project.name); setRecentProjects((projects) => [project, ...projects.filter((item) => item.id !== project.id)].slice(0, 12)); }
     const bibliographyPaths = nextEntries.filter((entry) => entry.kind === 'file' && /\.(?:bib|bibtex)$/i.test(entry.path)).map((entry) => entry.path);
