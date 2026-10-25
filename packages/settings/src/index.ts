@@ -111,30 +111,93 @@ export async function saveRecentWorkspace(handle: FileSystemDirectoryHandle): Pr
 
 /** Stable id for a folder: reuses the id of a known handle to the same entry, else assigns a new UUID. */
 export async function workspaceIdFor(handle: FileSystemDirectoryHandle): Promise<string> {
-  const known = await backend.get<readonly KnownWorkspace[]>(WORKSPACE_IDS_KEY) ?? [];
-  for (const entry of known) if (await entry.handle.isSameEntry(handle).catch(() => false)) return entry.id;
-  const id = crypto.randomUUID();
-  await backend.set(WORKSPACE_IDS_KEY, [...known, { id, handle }]);
-  return id;
+  return withSettingsLock('markroot:workspace-ids', () => atomicBackend(async (storage) => {
+    const known = await storage.get<readonly KnownWorkspace[]>(WORKSPACE_IDS_KEY) ?? [];
+    for (const entry of known) if (await entry.handle.isSameEntry(handle).catch(() => false)) return entry.id;
+    const id = crypto.randomUUID();
+    await storage.set(WORKSPACE_IDS_KEY, [...known, { id, handle }]);
+    return id;
+  }));
 }
 
 export async function loadPendingSession(workspace: PendingWorkspace, path: string): Promise<PendingSession | undefined> {
-  const session = await backend.get<PendingSession>(pendingKey(workspace, path));
-  if (session || typeof workspace === 'string' || !workspace.name) return session;
-  return backend.get<PendingSession>(pendingKey(workspace.name, path));
+  // Claim legacy recovery only when it actually supplies this load. Migrating immediately records
+  // ownership persistently, so later deletion never needs to guess from a shared directory name.
+  return withSettingsLock('markroot:pending-sessions', () => atomicBackend(async (storage) => {
+    const key = pendingKey(workspace, path);
+    const session = await storage.get<PendingSession>(key);
+    if (session || typeof workspace === 'string' || !workspace.name) return session;
+    const legacyKey = pendingKey(workspace.name, path);
+    const legacy = await storage.get<PendingSession>(legacyKey);
+    if (!legacy || (legacy.workspaceId && legacy.workspaceId !== workspace.id)) return undefined;
+    const claimed = { ...legacy, workspaceId: workspace.id };
+    await storage.set(key, claimed);
+    await storage.delete(legacyKey);
+    return claimed;
+  }));
 }
 export async function savePendingSession(session: PendingSession): Promise<void> {
   await backend.set(pendingKey(session.workspaceId ? { id: session.workspaceId } : session.workspaceName, session.path), session);
 }
 export async function deletePendingSession(workspace: PendingWorkspace, path: string): Promise<void> {
   await backend.delete(pendingKey(workspace, path));
-  if (typeof workspace !== 'string' && workspace.name) await backend.delete(pendingKey(workspace.name, path));
 }
 
 const indexedDbBackend: SettingsBackend = { get: getValue, set: setValue, delete: deleteValue };
 let backend: SettingsBackend = indexedDbBackend;
 /** Swap persistence (tests, embedding); call without arguments to restore IndexedDB. */
 export function setSettingsBackend(next: SettingsBackend = indexedDbBackend): void { backend = next; }
+
+async function withSettingsLock<T>(name: string, run: () => Promise<T>): Promise<T> {
+  if (typeof navigator !== 'undefined' && navigator.locks) return navigator.locks.request(name, { mode: 'exclusive' }, run);
+  return run();
+}
+
+const backendQueues = new WeakMap<SettingsBackend, Promise<unknown>>();
+/** Custom backends retain the original get/set/delete seam; serialize their operations in-process. */
+async function atomicBackend<T>(operation: (storage: SettingsBackend) => Promise<T>): Promise<T> {
+  const storage = backend;
+  if (storage === indexedDbBackend) return indexedDbTransaction(operation);
+  const next = (backendQueues.get(storage) ?? Promise.resolve()).then(() => operation(storage));
+  backendQueues.set(storage, next.catch(() => undefined));
+  return next;
+}
+
+/** The complete registry read/compare/write shares one readwrite transaction, even without Web Locks. */
+async function indexedDbTransaction<T>(operation: (storage: SettingsBackend) => Promise<T>): Promise<T> {
+  const db = await database();
+  return new Promise<T>((resolve, reject) => {
+    const transaction = db.transaction(STORE, 'readwrite');
+    const store = transaction.objectStore(STORE);
+    let finished = false;
+    let result: T;
+    transaction.oncomplete = () => resolve(result);
+    transaction.onerror = () => { finished = true; reject(transaction.error); };
+    transaction.onabort = () => { finished = true; reject(transaction.error ?? new Error('Settings transaction aborted.')); };
+    const request = <V>(value: IDBRequest<V>) => new Promise<V>((done, fail) => {
+      value.onsuccess = () => done(value.result);
+      value.onerror = () => fail(value.error);
+    });
+    const storage: SettingsBackend = {
+      get: async <V>(key: string) => await request(store.get(key)) as V | undefined,
+      set: async <V>(key: string, value: V) => { await request(store.put(value, key)); },
+      delete: async (key: string) => { await request(store.delete(key)); },
+    };
+    // isSameEntry() is asynchronous outside IDB. Keep a request pending until it settles;
+    // otherwise IDB auto-commits before the comparison can enqueue the registry update.
+    const keepAlive = () => {
+      if (finished) return;
+      const pending = store.get(WORKSPACE_IDS_KEY);
+      pending.onsuccess = keepAlive;
+    };
+    keepAlive();
+    void operation(storage).then((value) => { result = value; finished = true; }, (error: unknown) => {
+      finished = true;
+      reject(error);
+      try { transaction.abort(); } catch { /* A failed request may already have aborted it. */ }
+    });
+  }).finally(() => db.close());
+}
 
 function database(): Promise<IDBDatabase> {
   return new Promise<IDBDatabase>((resolve, reject) => {

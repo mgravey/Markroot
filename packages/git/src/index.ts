@@ -90,7 +90,7 @@ export class IsomorphicGitRepository implements GitRepository {
   /** Index modes other than 0o100644, so staging through FSA never drops the executable bit. */
   private modes = new Map<string, number>();
   private modesVersion: string | undefined;
-  constructor(private readonly workspace: ProjectWorkspace) { this.fs = createGitFs(workspace, { modeFor: (path) => this.modes.get(path) }); }
+  constructor(private readonly workspace: ProjectWorkspace) { this.fs = createGitFs(workspace, { modeFor: (path) => this.modes.get(path), modeChanged: (path, mode) => { if (mode === undefined) this.modes.delete(path); else this.modes.set(path, mode); } }); }
 
   async validate(): Promise<void> {
     let dotGit: WorkspaceStat;
@@ -271,11 +271,28 @@ export class IsomorphicGitRepository implements GitRepository {
   private async withMutation<T>(operation: () => Promise<T>): Promise<T> {
     await this.validate();
     const run = async () => {
-      // Exclude native Git for the duration, using the lock file it honours itself.
-      if (await this.workspace.stat(INDEX_LOCK).then(() => true, () => false)) throw new MarkrootError('CONFLICT', 'Another Git process is using this repository (.git/index.lock exists). If none is running, delete .git/index.lock and try again.');
-      await this.workspace.writeBytes(INDEX_LOCK, new Uint8Array());
-      try { await this.refreshModes(); return await operation(); }
-      finally { await this.workspace.remove(INDEX_LOCK).catch(() => undefined); }
+      const conflict = () => new MarkrootError('CONFLICT', 'Another Git process is using this repository (.git/index.lock exists). If none is running, delete .git/index.lock and try again.');
+      if (await this.workspace.stat(INDEX_LOCK).then(() => true, (error: unknown) => {
+        if (error instanceof MarkrootError && error.code === 'NOT_FOUND') return false;
+        throw error;
+      })) throw conflict();
+      const readOwner = async () => {
+        try { return new TextDecoder().decode(await this.workspace.readBytes(INDEX_LOCK)); }
+        catch (error) { if (error instanceof MarkrootError && error.code === 'NOT_FOUND') return undefined; throw error; }
+      };
+      // FSA has no O_EXCL: a native process can still create/replace the lock between the last
+      // check and write (or ownership read and remove). Recheck as late as possible, verify our
+      // unique token after writing, and never remove a lock whose ownership we cannot prove.
+      if (await readOwner() !== undefined) throw conflict();
+      const token = `markroot:${crypto.randomUUID()}`;
+      await this.workspace.writeBytes(INDEX_LOCK, new TextEncoder().encode(token));
+      try {
+        if (await readOwner() !== token) throw conflict();
+        await this.refreshModes();
+        return await operation();
+      } finally {
+        if (await readOwner().catch(() => undefined) === token) await this.workspace.remove(INDEX_LOCK).catch(() => undefined);
+      }
     };
     const lockName = (this.workspace as ProjectWorkspace & { readonly lockName?: string }).lockName;
     if (!lockName || typeof navigator === 'undefined' || !navigator.locks) return run();
@@ -378,8 +395,10 @@ interface NodeStatLike {
 interface EncodingOptions { encoding?: string | null }
 
 export interface GitFsOptions {
-  /** Git mode recorded for a path (index/HEAD); the FSA has no permission bits, so never report less. */
+  /** Synthetic Git mode for a path; FSA itself has no permission bits. */
   readonly modeFor?: (path: WorkspacePath) => number | undefined;
+  /** Adapter writes/chmod must update the cache before checkout stats populate the new index. */
+  readonly modeChanged?: (path: WorkspacePath, mode: number | undefined) => void;
 }
 
 export function createGitFs(workspace: ProjectWorkspace, options: GitFsOptions = {}): FsClient {
@@ -409,20 +428,28 @@ export function createGitFs(workspace: ProjectWorkspace, options: GitFsOptions =
         return encoding ? new TextDecoder().decode(bytes) : bytes;
       } catch (error) { return nodeError(error); }
     },
-    writeFile: async (input: string, data: Uint8Array | string): Promise<void> => {
+    writeFile: async (input: string, data: Uint8Array | string, writeOptions?: { mode?: number } | string): Promise<void> => {
       const path = adaptPath(input); if (!path) throw new Error('Cannot write repository root.');
-      try { await ensureParent(workspace, path); await workspace.writeBytes(path, typeof data === 'string' ? new TextEncoder().encode(data) : new Uint8Array(data)); }
+      try {
+        await ensureParent(workspace, path);
+        await workspace.writeBytes(path, typeof data === 'string' ? new TextEncoder().encode(data) : new Uint8Array(data));
+        const mode = typeof writeOptions === 'object' ? writeOptions.mode : undefined;
+        if (mode !== undefined) options.modeChanged?.(path, mode & 0o111 ? EXECUTABLE : 0o100644);
+      }
       catch (error) { nodeError(error); }
     },
-    unlink: async (input: string): Promise<void> => { const path = adaptPath(input); if (!path) throw new Error('Cannot unlink root.'); try { await workspace.remove(path); } catch (error) { nodeError(error); } },
+    unlink: async (input: string): Promise<void> => { const path = adaptPath(input); if (!path) throw new Error('Cannot unlink root.'); try { await workspace.remove(path); options.modeChanged?.(path, undefined); } catch (error) { nodeError(error); } },
     readdir: async (input: string): Promise<string[]> => { try { return (await workspace.listFiles(adaptPath(input))).map((entry) => entry.path.split('/').at(-1)!); } catch (error) { return nodeError(error); } },
     mkdir: async (input: string): Promise<void> => { const path = adaptPath(input); if (!path) return; try { await workspace.createDirectory(path); } catch (error) { nodeError(error); } },
-    rmdir: async (input: string): Promise<void> => { const path = adaptPath(input); if (!path) return; try { await workspace.remove(path); } catch (error) { nodeError(error); } },
+    rmdir: async (input: string): Promise<void> => { const path = adaptPath(input); if (!path) return; try { await workspace.remove(path); options.modeChanged?.(path, undefined); } catch (error) { nodeError(error); } },
     stat,
     lstat: stat,
     readlink: async (): Promise<never> => { throw Object.assign(new Error('Symbolic links are unsupported.'), { code: 'EINVAL' }); },
     symlink: async (): Promise<never> => { throw Object.assign(new Error('Symbolic links are unsupported.'), { code: 'ENOTSUP' }); },
-    chmod: async (): Promise<void> => undefined,
+    chmod: async (input: string, mode: number): Promise<void> => {
+      const path = adaptPath(input);
+      if (path) { await stat(input); options.modeChanged?.(path, mode & 0o111 ? EXECUTABLE : 0o100644); }
+    },
   };
   return { promises };
 }

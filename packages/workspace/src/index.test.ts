@@ -125,6 +125,31 @@ describe('FileSystemAccessWorkspace safety', () => {
     expect((await listTree(workspace)).map((entry) => entry.path)).toEqual(['b.md']);
   });
 
+  it('copies raw descendants during fallback moves, including unsupported names', async () => {
+    const root = new FakeDirectory('project');
+    root.put('notes/deep/bad\\name.md', 'irreplaceable');
+    root.put('notes/bad\\folder/good.md', 'nested');
+    const workspace = new FileSystemAccessWorkspace(asRoot(root));
+    await workspace.move(workspacePath('notes'), workspacePath('archive'));
+    const archive = await root.getDirectoryHandle('archive');
+    expect(await (await (await archive.getDirectoryHandle('deep')).getFileHandle('bad\\name.md')).getFile().then((file) => file.text())).toBe('irreplaceable');
+    expect(await (await (await archive.getDirectoryHandle('bad\\folder')).getFileHandle('good.md')).getFile().then((file) => file.text())).toBe('nested');
+    expect(root.children.has('notes')).toBe(false);
+    await workspace.remove(workspacePath('archive'), { recursive: true });
+    expect(root.children.size).toBe(0);
+  });
+
+  it('retains the source and overwrite destination when a raw descendant cannot be copied', async () => {
+    const root = new FakeDirectory('project');
+    const hidden = root.put('notes/deep/bad\\name.md', 'irreplaceable');
+    root.put('archive/kept.md', 'kept');
+    vi.spyOn(hidden, 'getFile').mockRejectedValue(new Error('unreadable descendant'));
+    const workspace = new FileSystemAccessWorkspace(asRoot(root));
+    await expect(workspace.move(workspacePath('notes'), workspacePath('archive'), { overwrite: true })).rejects.toThrow('unreadable descendant');
+    expect(root.children.has('notes')).toBe(true);
+    expect(await workspace.readFile(workspacePath('archive/kept.md'))).toBe('kept');
+  });
+
   it('uses native FileSystemHandle.move for files and directories', async () => {
     const root = new FakeDirectory('project', undefined, true);
     const nested = root.put('notes/deep/a.md', 'A');

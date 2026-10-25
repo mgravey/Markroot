@@ -100,15 +100,18 @@ export class BasicDocumentEngine implements DocumentEngine {
       rendered.citations.forEach((key) => citations.add(key));
       rendered.outline.forEach((item) => outline.push({ ...item, blockId: block.id, from: item.from + block.from }));
       rendered.labels.forEach(([id, label]) => { if (!labels.has(id)) labels.set(id, label); });
-      sections.push(`<section class="mr-block mr-${block.kind}" data-block-id="${block.id}" data-source-from="${block.from}" data-source-to="${block.to}">${shiftSourceOffsets(rendered.html, block.from)}</section>`);
+      // Fallback IDs historically counted all preceding outline entries (including figures/tables).
+      const headingHtml = rendered.html.replace(/data-markroot-legacy-heading=""/g, `data-markroot-legacy-heading="mr-section-${outline.length - rendered.outline.length + 1}"`);
+      sections.push(`<section class="mr-block mr-${block.kind}" data-block-id="${block.id}" data-source-from="${block.from}" data-source-to="${block.to}">${shiftSourceOffsets(headingHtml, block.from)}</section>`);
     }
-    const bodyHtml = resolveCrossReferences(sections.join('\n'), labels);
+    const bodyHtml = sections.join('\n');
     const explicitReferences = bodyHtml.includes(REFERENCES_PLACEHOLDER);
     const references = renderReferences(citations, citationMap, explicitReferences);
     let placed = false;
-    const html = explicitReferences
+    const placedHtml = explicitReferences
       ? bodyHtml.replaceAll(REFERENCES_PLACEHOLDER, () => placed ? '' : (placed = true, references))
       : bodyHtml + references;
+    const html = resolveCrossReferences(resolveLegacyHeadingAliases(placedHtml, state.usedIds, labels), labels);
     const resources = createResourceUrls(request.dependencies ?? []);
     return {
       revision: request.snapshot.revision,
@@ -156,6 +159,24 @@ function identifiersStillResolve(ids: BlockRender['ids'], used: ReadonlySet<stri
 
 function shiftSourceOffsets(html: string, from: number): string {
   return from ? html.replace(/ data-source-offset="(\d+)"/g, (_whole, offset: string) => ` data-source-offset="${Number(offset) + from}"`) : html;
+}
+
+/** Real ID spans work with Preview's querySelector and preserve block/source navigation. */
+function resolveLegacyHeadingAliases(html: string, primaryIds: ReadonlySet<string>, labels: Map<string, string>): string {
+  // Bibliography and other generated ids must be reserved as well as numbered block ids.
+  const used = new Set([...primaryIds, ...[...html.matchAll(/ id="([^"]*)"/g)].map((match) => match[1]!)]);
+  return html.replace(/<span data-markroot-legacy-heading="([^"]*)" data-primary-id="([^"]*)" data-source-offset="(\d+)"><\/span>/g, (_whole, base: string, primary: string, offset: string) => {
+    const legacy = decodeURIComponent(base);
+    const id = decodeURIComponent(primary);
+    if (legacy === id) return '';
+    let alias = legacy;
+    let suffix = 2;
+    while (used.has(alias)) alias = `${legacy}-${suffix++}`;
+    used.add(alias);
+    const label = labels.get(id);
+    if (label) labels.set(alias, label);
+    return `<span id="${escapeAttribute(alias)}" data-source-offset="${offset}" aria-hidden="true"></span>`;
+  });
 }
 
 /** Cross-references are resolved after all blocks render, from the numbers the renderer actually assigned. */
@@ -387,11 +408,14 @@ function renderHeading(source: string, blockFrom: number, context: RenderContext
     for (let index = level; index < state.sections.length; index += 1) state.sections[index] = 0;
     number = state.sections.slice(0, level).filter((value) => value > 0).join('.');
   }
-  if (attributes.id && CROSSREF_PREFIX.test(attributes.id)) state.labels.push([id, number ? `Section ${number}` : 'Section']);
+  state.labels.push([id, number ? `Section ${number}` : 'Section']);
   state.outline.push({ id, from: blockFrom, kind: 'section', label, level, ...(number ? { number } : {}) });
   const classes = unnumbered ? ' class="unnumbered"' : '';
   const numberHtml = number ? `<span class="section-number">${number}</span> ` : '';
-  return `<h${level} id="${escapeAttribute(id)}"${classes} data-source-offset="${blockFrom}">${numberHtml}${renderCaptionInline(headingSource, blockFrom + source.indexOf(headingSource), context)}</h${level}>`;
+  // Allocate aliases after all primary IDs are known, so an alias cannot change another heading's ID.
+  const legacyBase = legacySlugify(label);
+  const legacy = attributes.id || legacyBase === (slugify(label) || 'mr-section') ? '' : `<span data-markroot-legacy-heading="${encodeURIComponent(legacyBase)}" data-primary-id="${encodeURIComponent(id)}" data-source-offset="${blockFrom}"></span>`;
+  return `<h${level} id="${escapeAttribute(id)}"${classes} data-source-offset="${blockFrom}">${legacy}${numberHtml}${renderCaptionInline(headingSource, blockFrom + source.indexOf(headingSource), context)}</h${level}>`;
 }
 
 function renderTableBlock(source: string, blockFrom: number, context: RenderContext): string {
@@ -553,6 +577,11 @@ function uniqueIdentifier(preferred: string, state: ScholarlyState): string {
 
 function slugify(value: string): string {
   return value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').normalize('NFC').toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '');
+}
+
+/** Previous ASCII-only slugs remain addressable through collision-aware aliases. */
+function legacySlugify(value: string): string {
+  return value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
 
 function tableHeaderLabel(line: string): string {

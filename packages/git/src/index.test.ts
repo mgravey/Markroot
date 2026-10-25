@@ -263,6 +263,109 @@ describe('IsomorphicGitRepository', () => {
     await expect(workspace.stat(lock)).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 
+  it('does not overwrite a lock created after the initial existence check', async () => {
+    const { workspace, repository } = await repo();
+    const lock = workspacePath('.git/index.lock');
+    const stat = workspace.stat.bind(workspace);
+    const write = workspace.writeFile.bind(workspace);
+    vi.spyOn(workspace, 'stat').mockImplementation(async (path) => {
+      try { return await stat(path); }
+      catch (error) { if (path === lock) await write(lock, 'native owner'); throw error; }
+    });
+    await expect(repository.stage(workspacePath('paper.md'))).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(await workspace.readFile(lock)).toBe('native owner');
+  });
+
+  it('checks ownership after lock creation and never removes a replacement lock', async () => {
+    const { workspace, repository } = await repo();
+    const lock = workspacePath('.git/index.lock');
+    const write = workspace.writeBytes.bind(workspace);
+    vi.spyOn(workspace, 'writeBytes').mockImplementation(async (path, bytes) => {
+      const created = await write(path, bytes);
+      if (path === lock) await write(lock, new TextEncoder().encode('replacement owner'));
+      return created;
+    });
+    await expect(repository.stage(workspacePath('paper.md'))).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(await workspace.readFile(lock)).toBe('replacement owner');
+  });
+
+  it('preserves a lock replaced during an operation', async () => {
+    const { workspace, repository } = await repo();
+    const lock = workspacePath('.git/index.lock');
+    const write = workspace.writeBytes.bind(workspace);
+    let replaced = false;
+    vi.spyOn(workspace, 'writeBytes').mockImplementation(async (path, bytes) => {
+      const result = await write(path, bytes);
+      if (path === '.git/index') { replaced = true; await write(lock, new TextEncoder().encode('native owner')); }
+      return result;
+    });
+    await workspace.writeFile(workspacePath('paper.md'), '# Revised');
+    await repository.stage(workspacePath('paper.md'));
+    expect(replaced).toBe(true);
+    expect(await workspace.readFile(lock)).toBe('native owner');
+  });
+
+  it('does not delete a lock when its ownership cannot be read at cleanup', async () => {
+    const { workspace, repository } = await repo();
+    const lock = workspacePath('.git/index.lock');
+    const read = workspace.readBytes.bind(workspace);
+    let lockReads = 0;
+    const spy = vi.spyOn(workspace, 'readBytes').mockImplementation(async (path) => {
+      if (path === lock && ++lockReads === 3) throw new MarkrootError('PERMISSION_DENIED', 'cannot verify owner');
+      return read(path);
+    });
+    await repository.stage(workspacePath('paper.md'));
+    spy.mockRestore();
+    expect(await workspace.readFile(lock)).toMatch(/^markroot:/);
+  });
+
+  it('cleans up an owned token after a failed mutation', async () => {
+    const { workspace, repository } = await repo({ 'paper.md': '# First', '.gitignore': '*.log' });
+    await workspace.writeFile(workspacePath('ignored.log'), 'x');
+    await expect(repository.stage(workspacePath('ignored.log'))).rejects.toThrow('ignored');
+    await expect(workspace.stat(workspacePath('.git/index.lock'))).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('applies adapter write/chmod modes and forgets modes when unlinking', async () => {
+    const workspace = new MemoryWorkspace({ 'run.sh': 'echo first' });
+    const modes = new Map<string, number>([['run.sh', 0o100755]]);
+    const fs = createGitFs(workspace, {
+      modeFor: (path) => modes.get(path),
+      modeChanged: (path, mode) => { if (mode === undefined) modes.delete(path); else modes.set(path, mode); },
+    }) as unknown as { promises: {
+      writeFile(path: string, text: string, options?: { mode: number }): Promise<void>;
+      chmod(path: string, mode: number): Promise<void>;
+      unlink(path: string): Promise<void>;
+      stat(path: string): Promise<{ mode: number }>;
+    } };
+    await fs.promises.writeFile('/repo/run.sh', 'echo plain', { mode: 0o644 });
+    expect((await fs.promises.stat('/repo/run.sh')).mode).toBe(0o100644);
+    await fs.promises.chmod('/repo/run.sh', 0o755);
+    await fs.promises.writeFile('/repo/run.sh', 'echo preserve');
+    expect((await fs.promises.stat('/repo/run.sh')).mode).toBe(0o100755);
+    await fs.promises.unlink('/repo/run.sh');
+    expect(modes.has('run.sh')).toBe(false);
+  });
+
+  it.each([[0o100755, 0o100644], [0o100644, 0o100755]])('honours checkout modes %s → %s in the index and next commit', async (from, to) => {
+    const { workspace, repository } = await repo({ 'run.sh': 'echo same\n' });
+    const fs = createGitFs(workspace);
+    const oid = (await readTree({ fs, dir: '/repo', oid: await resolveRef({ fs, dir: '/repo', ref: 'HEAD' }) })).tree[0]!.oid;
+    await updateIndex({ fs, dir: '/repo', filepath: 'run.sh', oid, mode: to });
+    await repository.commit('Target mode', ada);
+    await repository.createBranch('target');
+    await updateIndex({ fs, dir: '/repo', filepath: 'run.sh', oid, mode: from });
+    await repository.commit('Source mode', ada);
+    await repository.checkout('target');
+    await repository.commit('After checkout', ada);
+    const tree = await readTree({ fs, dir: '/repo', oid: await resolveRef({ fs, dir: '/repo', ref: 'HEAD' }) });
+    expect(tree.tree[0]?.mode).toBe(to.toString(8));
+    await workspace.writeFile(workspacePath('run.sh'), 'echo edited\n');
+    await repository.stage(workspacePath('run.sh'));
+    await repository.commit('After restaging', ada);
+    expect((await readTree({ fs, dir: '/repo', oid: await resolveRef({ fs, dir: '/repo', ref: 'HEAD' }) })).tree[0]?.mode).toBe(to.toString(8));
+  });
+
   it('rejects a candidate prepared on another branch at the same commit', async () => {
     const { workspace, repository } = await repo();
     await repository.createBranch('other');
