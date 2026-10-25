@@ -156,7 +156,7 @@ class ChromePreparedGenerator implements PreparedCommitMessageGenerator {
   }
 
   private firstSession(): ChromeLanguageModelSession {
-    const session = this.sessions.values().next().value as ChromeLanguageModelSession | undefined;
+    const session = this.sessions.values().next().value;
     if (!session) throw new CommitMessageUnavailableError('The Chrome AI session was closed.');
     return session;
   }

@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { WorkspacePath } from '@markroot/core';
 import type { DocumentSnapshot } from '@markroot/document';
 import type { CommentStore } from '@markroot/comments';
 import type { GitCommitCandidate, IsomorphicGitRepository } from '@markroot/git';
@@ -123,7 +122,7 @@ export function useAiCommit({ git, settings, updateSettings, commentStore, saveD
     if (controller.signal.aborted) { discardPreparation(); return; }
     let candidate: GitCommitCandidate | undefined;
     try {
-      candidate = await git.prepareCommitCandidate(saved.path, await commentStore?.paths(saved.path as WorkspacePath));
+      candidate = await git.prepareCommitCandidate(saved.path, await commentStore?.paths(saved.path));
     } catch (error) {
       discardPreparation();
       if (controller.signal.aborted) return;

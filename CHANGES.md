@@ -1,5 +1,13 @@
 # Changes
 
+## Strict lint and compiler checks
+
+- Added flat-config ESLint with type-aware promise/thenable/assertion checks and React hook rules, integrated immediately after dependency boundaries in `pnpm check`.
+- Enabled switch fallthrough, override, and unused binding checks in every package/app through the shared TypeScript base; removed dead code and redundant assertions.
+- Updated effect dependencies and delayed folder-restore/focus-error callbacks while preserving deliberate editor and review-rendering lifetimes with targeted explanations.
+- Added the version-matched Vitest V8 coverage provider without thresholds.
+- Parsed workspace imports and re-exports with TypeScript for boundary/cycle checks, rejected unused workspace dependency declarations, and added checker regression tests.
+
 ## YAML comment sidecars
 
 - Replaced embedded comment writing with Git-tracked `.markroot/comments/<thread-id>/thread.yaml` and independent YAML reply files, keeping Markdown clean and concurrent replies mergeable.

@@ -424,7 +424,7 @@ export function createGitFs(workspace: ProjectWorkspace, options: GitFsOptions =
     symlink: async (): Promise<never> => { throw Object.assign(new Error('Symbolic links are unsupported.'), { code: 'ENOTSUP' }); },
     chmod: async (): Promise<void> => undefined,
   };
-  return { promises } as unknown as FsClient;
+  return { promises };
 }
 
 function makeStat(kind: 'file' | 'directory', size: number, mtimeMs: number, fileMode?: number): NodeStatLike {

@@ -38,7 +38,7 @@ export function useComments({ workspace, session, snapshot, selection, reviewing
   const refreshRequest = useRef(0);
   // Last broken-comment report shown, so focus reloads do not repeat the same notice.
   const brokenShown = useRef('');
-  const located = useMemo(() => snapshot ? locateComments(snapshot.source, threads) : undefined, [snapshot?.source, threads]);
+  const located = useMemo(() => snapshot ? locateComments(snapshot.source, threads) : undefined, [snapshot, threads]);
 
   /** Starts loading another document's comments; earlier loads become stale. */
   const beginLoad = useEvent(() => ++loadRequest.current);
@@ -70,12 +70,13 @@ export function useComments({ workspace, session, snapshot, selection, reviewing
     if (notice && notice !== brokenShown.current) setNotice(notice);
     brokenShown.current = notice ?? '';
   });
+  const reportReloadError = useEvent(reportError);
 
   useEffect(() => {
-    const refresh = () => { void reload().catch(reportError); };
+    const refresh = () => { void reload().catch(reportReloadError); };
     window.addEventListener('focus', refresh);
     return () => { window.removeEventListener('focus', refresh); loadRequest.current += 1; };
-  }, [store, session]);
+  }, [store, session, reload, reportReloadError]);
 
   async function change(operation: CommentOperation) {
     if (!store || !workspace || !session || writeBusy.current || reviewing) return;

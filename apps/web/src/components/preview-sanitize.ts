@@ -30,7 +30,7 @@ function previewPurifier(targetWindow: WindowLike): PreviewPurifier {
     state.blocked.add(node);
   });
   entry.purifier.addHook('afterSanitizeAttributes', (node) => {
-    if (entry.state?.blocked.has(node as Element)) (node as Element).setAttribute(REMOTE_BLOCKED_ATTRIBUTE, 'true');
+    if (entry.state?.blocked.has(node)) node.setAttribute(REMOTE_BLOCKED_ATTRIBUTE, 'true');
   });
   purifiers.set(targetWindow, entry);
   return entry;
@@ -38,7 +38,7 @@ function previewPurifier(targetWindow: WindowLike): PreviewPurifier {
 
 /** Sanitizes viewer HTML; unless remote resources are allowed, strips every attribute that would load an off-origin URL. */
 export function sanitizePreviewHtml(html: string, options: { readonly allowRemoteResources: boolean; readonly baseUrl: string; readonly window?: WindowLike | undefined }): string {
-  const entry = previewPurifier(options.window ?? (window as WindowLike));
+  const entry = previewPurifier(options.window ?? window);
   entry.state = options.allowRemoteResources ? undefined : { base: options.baseUrl, blocked: new Set() };
   try { return entry.purifier.sanitize(html, { FORBID_TAGS, FORBID_ATTR }); }
   finally { entry.state = undefined; }

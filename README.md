@@ -36,7 +36,7 @@ This is not yet a production release. Native-Git interoperability, the full Pand
 
 ## Development
 
-Requirements: Node.js 22+ and pnpm 11+.
+Requirements: Node.js 22.13+ and pnpm 11+.
 
 ```sh
 pnpm install
@@ -45,6 +45,8 @@ pnpm check
 ```
 
 Vitest includes deterministic jsdom hook tests for serialized saves, document replacement, workspace restore/link routing, review cancellation, and preview URL lifetimes. These use React DOM directly and deferred promises.
+
+`pnpm check` runs dependency boundaries, ESLint, strict TypeScript checks, tests, and the production build. Use `pnpm lint` for type-aware promise/assertion checks and React hook rules, or `pnpm vitest run --coverage` for V8 text/HTML coverage reports in `coverage/` (no thresholds). Workspace boundaries check imports, re-exports, private paths, cycles, and unused `@markroot/*` declarations.
 
 Open the local HTTPS/localhost URL in a Chromium desktop browser. Firefox and Safari do not currently expose the required directory picker API.
 

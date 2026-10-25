@@ -149,6 +149,7 @@ export function SourceEditor(props: Props) {
       editor.destroy();
       view.current = undefined;
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- Create one editor per mount; effects below synchronize content, appearance and editability.
   }, []);
 
   useEffect(() => {
@@ -294,7 +295,7 @@ const setLineChanges = StateEffect.define<readonly EditorLineChange[]>();
 
 class LineChangeMarker extends GutterMarker {
   constructor(readonly kind: EditorLineChangeKind) { super(); }
-  toDOM() {
+  override toDOM() {
     const marker = document.createElement('span');
     marker.className = `cm-line-change-marker ${this.kind}`;
     marker.title = `${this.kind[0]!.toUpperCase()}${this.kind.slice(1)} line compared with HEAD`;
@@ -322,7 +323,7 @@ const setActiveTrackChange = StateEffect.define<ActiveTrackChange | undefined>()
 
 class DeletedTextWidget extends WidgetType {
   constructor(readonly value: string, readonly active: boolean, readonly changeId?: string) { super(); }
-  eq(other: DeletedTextWidget) { return this.value === other.value && this.active === other.active && this.changeId === other.changeId; }
+  override eq(other: DeletedTextWidget) { return this.value === other.value && this.active === other.active && this.changeId === other.changeId; }
   toDOM() {
     const deleted = document.createElement('span');
     deleted.className = `cm-track-delete${this.active ? ' cm-review-active' : ''}`;
@@ -331,7 +332,7 @@ class DeletedTextWidget extends WidgetType {
     if (this.changeId) deleted.dataset.reviewChangeId = this.changeId;
     return deleted;
   }
-  ignoreEvent() { return true; }
+  override ignoreEvent() { return true; }
 }
 
 const trackChangesField = StateField.define<DecorationSet>({

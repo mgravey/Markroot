@@ -38,16 +38,18 @@ export function useWorkspaceDocuments({ comments, repository, settingsRef, setSe
   const workspaceIdRef = useRef<string | undefined>(undefined);
   const [citations, setCitations] = useState<readonly CitationRecord[]>([]);
   const sessionSubscription = useRef<(() => void) | undefined>(undefined);
+  const connectFolderEvent = useEvent((handle: FileSystemDirectoryHandle) => connectFolder(handle));
+  const reportRestoreError = useEvent(reportError);
   useEffect(() => {
     // A folder the user picks while this restore is pending wins over the remembered one.
     let disposed = false;
     const generation = folderGeneration.current;
     void loadSettings().then((loaded) => { if (!disposed) { settingsRef.current = loaded; setSettings(loaded); } }).catch(() => undefined).then(() => loadRecentWorkspace()).then(async (handle) => {
       if (disposed || !handle || folderGeneration.current !== generation) return;
-      if (await ensureDirectoryPermission(handle) === 'granted' && !disposed && folderGeneration.current === generation) await connectFolder(handle);
-    }).catch(reportError);
+      if (await ensureDirectoryPermission(handle) === 'granted' && !disposed && folderGeneration.current === generation) await connectFolderEvent(handle);
+    }).catch(reportRestoreError);
     return () => { disposed = true; folderGeneration.current += 1; documentRequest.current += 1; sessionSubscription.current?.(); };
-  }, []);
+  }, [settingsRef, setSettings, connectFolderEvent, reportRestoreError]);
   async function chooseFolder() {
     if (comments().writeBusy.current) { setNotice('Wait for the comment to finish saving.'); return; }
     if (snapshot?.dirty && !window.confirm('Discard unsaved edits and open another folder?')) return;

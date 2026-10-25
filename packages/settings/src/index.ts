@@ -71,7 +71,7 @@ export function defaultSettings(): MarkrootSettings {
 /** Repairs stored settings field by field; anything invalid falls back to the default. */
 export function normalizeSettings(stored: unknown, defaults: MarkrootSettings = defaultSettings()): MarkrootSettings {
   const value = (stored && typeof stored === 'object' ? stored : {}) as Partial<Record<keyof MarkrootSettings, unknown>>;
-  const flag = (key: 'autosave' | 'aiCommitSuggestions' | 'allowRemoteResources' | 'viewerJustified' | 'outlineShowFigures') => typeof value[key] === 'boolean' ? value[key] as boolean : defaults[key];
+  const flag = (key: 'autosave' | 'aiCommitSuggestions' | 'allowRemoteResources' | 'viewerJustified' | 'outlineShowFigures') => typeof value[key] === 'boolean' ? value[key] : defaults[key];
   const profile = (value.profile && typeof value.profile === 'object' ? value.profile : {}) as Partial<Record<keyof AuthorIdentity, unknown>>;
   const text = (input: unknown) => typeof input === 'string' && input.trim() ? input : undefined;
   const email = text(profile.email) ?? defaults.profile.email;

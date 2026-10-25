@@ -28,7 +28,6 @@ export function CommitProposalDialog({ phase, progress, proposal, fileCount, ign
 
   useEffect(() => { if (phase === 'ready') subject.current?.focus(); }, [phase]);
 
-  const busy = phase !== 'ready';
   const loaded = progress?.loaded;
   const downloading = progress?.phase === 'downloading';
   return <dialog ref={dialog} className="commit-dialog" aria-labelledby="commit-dialog-title" onCancel={(event) => { event.preventDefault(); if (phase !== 'committing') onCancel(); }}>

@@ -134,7 +134,11 @@ Export customization follows document YAML when a local file is explicitly selec
 
 ## Testing
 
-`pnpm check` runs strict type checking, unit tests, and the production build. The fixture suite includes a QMD compatibility corpus. While the Vite development server is running, `/export-smoke.html` performs a browser-level HTML/DOCX/PDF worker check and reports non-empty output sizes. Real-folder and native-Git interoperability must additionally be tested manually in Chromium on a disposable repository before release. AI commit testing requires a current desktop Chrome profile with the Prompt API and Gemini Nano available; test model download, cancellation, regeneration, edited acceptance, unavailable fallback, and stale-candidate rejection.
+`pnpm check` runs dependency boundaries, ESLint, strict type checking, unit tests, and the production build, in that order. All package/app tsconfigs extend `tsconfig.base.json`, which rejects switch fallthrough, implicit overrides, and unused locals/parameters; prefix intentionally unused parameters with `_`. `pnpm lint` uses `eslint.config.js` with the TypeScript recommended baseline, type-aware promise/thenable/assertion checks, and React hook rules as errors. Intentional hook dependency omissions need a targeted disable comment with a reason. Style-only checks are kept out to preserve the existing dense TypeScript style.
+
+`pnpm boundaries` first runs its checker regression tests, then parses workspace `src/` files with TypeScript. Side-effect imports, type imports, dynamic imports, import types, and re-exports all count toward dependency usage and cycles. Private workspace paths, undeclared imports, and unused `@markroot/*` declarations in dependencies, devDependencies, peerDependencies, or optionalDependencies fail the check. `pnpm vitest run --coverage` uses the version-matched V8 provider to write text and HTML coverage reports under `coverage/`; no thresholds are imposed.
+
+The fixture suite includes a QMD compatibility corpus. While the Vite development server is running, `/export-smoke.html` performs a browser-level HTML/DOCX/PDF worker check and reports non-empty output sizes. Real-folder and native-Git interoperability must additionally be tested manually in Chromium on a disposable repository before release. AI commit testing requires a current desktop Chrome profile with the Prompt API and Gemini Nano available; test model download, cancellation, regeneration, edited acceptance, unavailable fallback, and stale-candidate rejection.
 
 ## GitHub Pages
 

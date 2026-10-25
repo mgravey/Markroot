@@ -133,7 +133,7 @@ export class MemoryWorkspace implements GuardedWorkspace {
     parts.pop();
     let current = '';
     for (const part of parts) {
-      current = current ? `${current}/${part}` : part!;
+      current = current ? `${current}/${part}` : part;
       if (!this.nodes.has(current)) this.nodes.set(current, { kind: 'directory', modifiedAt: this.clock++ });
     }
   }
@@ -221,7 +221,7 @@ export class FileSystemAccessWorkspace implements GuardedWorkspace {
       const handle = await this.fileHandle(path, true, context);
       const writable = await handle.createWritable();
       try {
-        await writable.write(content.slice() as FileSystemWriteChunkType);
+        await writable.write(content.slice());
         throwIfAborted(context);
         await writable.close();
       } catch (cause) { await writable.abort(cause).catch(() => undefined); throw cause; }
@@ -366,7 +366,7 @@ function mapFsError(cause: unknown, path: WorkspacePath): MarkrootError {
 
 function fileVersion(file: File): string { return `${file.lastModified}:${file.size}`; }
 async function contentHash(bytes: Uint8Array): Promise<string> {
-  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes.slice() as Uint8Array<ArrayBuffer>));
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes.slice()));
   return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 

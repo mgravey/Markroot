@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { expect, it } from 'vitest';
 import { workspacePath } from '@markroot/core';
 import { normalizeDoi, parseBibTeX } from './index.js';
 

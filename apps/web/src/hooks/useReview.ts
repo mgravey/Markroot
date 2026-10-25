@@ -37,8 +37,11 @@ export function useReview({ git, workspace, snapshot, scroll, setSelection, setS
   useEffect(() => () => { controller.current?.abort(); request.current += 1; }, []);
 
   const presentation = useMemo(() => review ? materializeReviewPresentation(review) : undefined, [review]);
-  const presentedSnapshot = useMemo(() => presentation && snapshot ? new DocumentSession(snapshot.path, presentation.current).snapshot() : snapshot, [presentation?.current, snapshot]);
-  const previewSnapshot = useMemo(() => review && snapshot ? new DocumentSession(snapshot.path, review.compare).snapshot() : undefined, [review?.compare, snapshot?.path]);
+  const presentedSource = presentation?.current;
+  const comparedSource = review?.compare;
+  const snapshotPath = snapshot?.path;
+  const presentedSnapshot = useMemo(() => presentedSource !== undefined && snapshot ? new DocumentSession(snapshot.path, presentedSource).snapshot() : snapshot, [presentedSource, snapshot]);
+  const previewSnapshot = useMemo(() => comparedSource !== undefined && snapshotPath ? new DocumentSession(snapshotPath, comparedSource).snapshot() : undefined, [comparedSource, snapshotPath]);
   const activeChange = review?.changes.find((change) => change.id === activeChangeId) ?? review?.changes[0];
   const activeRange = activeChange ? presentation?.ranges.get(activeChange.id) : undefined;
   const trackChanges = useMemo<readonly EditorTrackChange[] | undefined>(() => {
@@ -57,8 +60,9 @@ export function useReview({ git, workspace, snapshot, scroll, setSelection, setS
       return tracked;
     });
   }, [review, presentation]);
-  const activeTrackChange = useMemo(() => activeChange ? { id: activeChange.id, range: activeChange.compareRange, baseText: activeChange.baseText } : undefined, [activeChange?.id, activeChange?.baseText, activeChange?.compareRange.from, activeChange?.compareRange.to]);
-  const activeSourceTrackChange = useMemo(() => activeChange && activeRange ? { from: activeRange.from, to: activeRange.to, baseText: activeChange.baseText } : undefined, [activeChange?.id, activeChange?.baseText, activeRange?.from, activeRange?.to]);
+  const activeTrackChange = useMemo(() => activeChange ? { id: activeChange.id, range: activeChange.compareRange, baseText: activeChange.baseText } : undefined, [activeChange]);
+  const activeSourceTrackChange = useMemo(() => activeChange && activeRange ? { from: activeRange.from, to: activeRange.to, baseText: activeChange.baseText } : undefined, [activeChange, activeRange]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- Compared text and ranges are immutable for a base/compare pair; decisions and author attribution must not rebuild viewer HTML.
   const renderedChanges = useMemo(() => review?.changes.map(({ id, baseText, compareText, compareRange }) => ({ id, baseText, compareText, compareRange })), [review?.base, review?.compare]);
   const renderedDecisions = useMemo(() => review?.changes.map(({ id, decision }) => ({ id, decision })), [review]);
 

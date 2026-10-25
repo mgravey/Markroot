@@ -75,7 +75,7 @@ export function locateComments(source: string, threads: readonly CommentThread[]
     if (range) ranges.set(thread.id, range); else orphans.push(thread.id);
     if (thread.status === 'resolved') {
       const resolvedRange = thread.resolution && locateSelector(source, thread.resolution.selector);
-      if (!resolvedRange || !matchesContext(source, resolvedRange.from, thread.resolution!.selector)) needsReview.push(thread.id);
+      if (!resolvedRange || !matchesContext(source, resolvedRange.from, thread.resolution.selector)) needsReview.push(thread.id);
     }
   }
   return { cleanSource: source, threads, ranges, orphans, needsReview };

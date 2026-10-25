@@ -22,6 +22,7 @@ export function usePreviewRender({ previewSnapshot, workspace, citations, allowR
   const urls = useMemo(() => new PreviewUrlCache(), []);
   const [result, setResult] = useState<{ artifact: RenderArtifact; release(): void }>();
   const [renderedBaseHtml, setRenderedBaseHtml] = useState<string>();
+  const previewPath = previewSnapshot?.path;
   // Passive cleanup runs after React has replaced the old HTML in both viewer windows.
   useEffect(() => () => result?.release(), [result]);
   // Cached blobs belong to one folder.
@@ -46,14 +47,14 @@ export function usePreviewRender({ previewSnapshot, workspace, citations, allowR
   }, [previewSnapshot, engine, allowRemoteResources, workspace, citations, resources, urls, reportError]);
 
   useEffect(() => {
-    if (!previewSnapshot || baseSource === undefined) { setRenderedBaseHtml(undefined); return; }
+    if (!previewPath || baseSource === undefined) { setRenderedBaseHtml(undefined); return; }
     const controller = new AbortController();
-    const baseSnapshot = new DocumentSession(previewSnapshot.path, baseSource).snapshot();
+    const baseSnapshot = new DocumentSession(previewPath, baseSource).snapshot();
     void engine.render({ snapshot: baseSnapshot, citations, allowRemoteResources }, { signal: controller.signal })
       .then((artifact) => { if (!controller.signal.aborted) setRenderedBaseHtml(artifact.html); })
       .catch((error) => { if (!controller.signal.aborted) reportError(error); });
     return () => controller.abort();
-  }, [previewSnapshot?.path, baseSource, engine, citations, allowRemoteResources]);
+  }, [previewPath, baseSource, engine, citations, allowRemoteResources, reportError]);
 
   return { rendered: result?.artifact, renderedBaseHtml };
 }

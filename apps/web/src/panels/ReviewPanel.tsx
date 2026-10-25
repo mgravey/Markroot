@@ -9,7 +9,7 @@ interface Props {
   onSelect(id: string): void;
   onDecide(id: string, decision: 'accept' | 'reject'): void;
   onDecideAll(decision: 'accept' | 'reject'): void;
-  onApply(): void | Promise<void>;
+  onApply(): void;
 }
 
 export const ReviewPanel = memo(function ReviewPanel({ draft, activeChangeId, attributionBusy, onSelect, onDecide, onDecideAll, onApply }: Props) {

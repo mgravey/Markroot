@@ -15,7 +15,7 @@ it('keeps displayed images alive during debounce and revokes URLs after DOM repl
   document.body.append(host);
   const create = vi.fn(() => `blob:preview-${++nextUrl}`);
   const revoke = vi.fn((url: string) => { expect(host.querySelector(`img[src="${url}"]`)).toBeNull(); });
-  vi.stubGlobal('URL', class extends URL { static createObjectURL = create; static revokeObjectURL = revoke; });
+  vi.stubGlobal('URL', class extends URL { static override createObjectURL = create; static override revokeObjectURL = revoke; });
   const root = createRoot(host);
   const workspace = new MemoryWorkspace({ 'image.png': 'image' });
   const citations: never[] = [];

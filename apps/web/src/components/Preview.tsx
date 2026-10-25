@@ -81,6 +81,7 @@ export function Preview({ html, objectUrls, warnings, blocks, search, regularExp
       shadow.host.style.setProperty('--viewer-size', `${fontSize}px`);
     }
     shadow.replaceChildren(style, article);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- The active-block effect updates selection separately; rebuilding HTML on navigation destroys native selections.
   }, [html, objectUrls, warnings, search, regularExpression, allowRemoteResources, fontFamily, fontSize, justified, trackChangesBaseHtml, reviewChanges]);
   useEffect(() => {
     const article = host.current?.shadowRoot?.querySelector<HTMLElement>('article');

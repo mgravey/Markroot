@@ -11,7 +11,7 @@ describe('IsomorphicGitRepository', () => {
     const runtime = {} as typeof globalThis & { Buffer?: typeof Buffer };
     ensureGitBuffer(runtime);
     expect(runtime.Buffer).toBeDefined();
-    expect(runtime.Buffer!.from('Markroot').toString('utf8')).toBe('Markroot');
+    expect(runtime.Buffer.from('Markroot').toString('utf8')).toBe('Markroot');
   });
 
   it('uses the workspace as the real repository store', async () => {
@@ -159,7 +159,6 @@ describe('IsomorphicGitRepository', () => {
     await repository.commit('Initial', ada);
     return { workspace, repository };
   }
-  const state = async (repository: IsomorphicGitRepository, path: string) => (await repository.status()).find((item) => item.path === path)?.state;
 
   it('updates the index and files after fast-forward and merge-commit merges', async () => {
     const { workspace, repository } = await repo({ 'paper.md': '# First\n', 'notes.md': '# Notes\n' });

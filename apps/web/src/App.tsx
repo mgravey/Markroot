@@ -6,13 +6,9 @@ import {
   RefreshCw, Save, Search, Settings2, X,
 } from 'lucide-react';
 import { type SourceRange, type WorkspacePath } from '@markroot/core';
-import { documentBlockAt, DocumentSession, searchDocument, type DocumentBlock, type DocumentSnapshot } from '@markroot/document';
-import { FileSystemAccessWorkspace, ensureDirectoryPermission, type GuardedWorkspace, type WorkspaceEntry } from '@markroot/workspace';
-import { commentRevision, parseComments } from '@markroot/comments';
-import { IsomorphicGitRepository } from '@markroot/git';
+import { documentBlockAt, searchDocument, type DocumentBlock, type DocumentSnapshot } from '@markroot/document';
 import { mapReviewCompareOffset, mapReviewCurrentOffset, type ReviewDraft } from '@markroot/review';
-import { LocalCitationProvider, type CitationRecord } from '@markroot/citations';
-import { defaultSettings, deletePendingSession, workspaceIdFor, loadPendingSession, loadRecentWorkspace, loadSettings, savePendingSession, saveRecentWorkspace, saveSettings, type MarkrootSettings } from '@markroot/settings';
+import { defaultSettings, savePendingSession, saveSettings, type MarkrootSettings } from '@markroot/settings';
 import { SourceEditor } from './components/SourceEditor.js';
 import { VisualEditor } from './components/VisualEditor.js';
 import { Preview } from './components/Preview.js';
@@ -107,7 +103,7 @@ export function App() {
   const { store: commentStore, located: comments, activeId: activeCommentId, setActiveId: setActiveCommentId, writeBusy: commentWriteBusy } = commentState;
   const saveDocument = useDocumentSave({ workspace, session, activeSession, git, commentState, documentRequest, fileVersionRef, pendingWorkspace: pendingWorkspace(), setFileVersion, setNotice, reportError, onCitationsChanged: loadCitations, refreshStatus: repo.refreshStatus });
   const matches = useMemo(() => presentedSnapshot ? searchDocument(presentedSnapshot, search, { regularExpression }) : [], [presentedSnapshot, search, regularExpression]);
-  const currentLine = useMemo(() => presentedSnapshot ? lineAt(presentedSnapshot.source, selection.from) : 1, [presentedSnapshot?.source, selection.from]);
+  const currentLine = useMemo(() => presentedSnapshot ? lineAt(presentedSnapshot.source, selection.from) : 1, [presentedSnapshot, selection.from]);
   const workspacePaths = useMemo(() => entries.map((entry) => entry.path), [entries]);
   const systemDark = useSystemDark();
   const dark = settings.theme === 'dark' || (settings.theme === 'system' && systemDark);
@@ -137,7 +133,7 @@ export function App() {
     if (!settings.autosave || !snapshot?.dirty || commentState.busy) return;
     const timer = window.setTimeout(() => { void saveDocument().catch(reportError); }, 900);
     return () => window.clearTimeout(timer);
-  }, [settings.autosave, snapshot?.revision, snapshot?.dirty, workspace, fileVersion, commentState.busy]);
+  }, [settings.autosave, snapshot, workspace, fileVersion, commentState.busy, saveDocument, reportError]);
 
   useEffect(() => {
     if (!snapshot?.dirty || rootName === 'No folder open') return;
@@ -146,7 +142,7 @@ export function App() {
         .catch(() => setNotice('Could not keep a browser-local recovery copy of unsaved edits.'));
     }, 500);
     return () => window.clearTimeout(timer);
-  }, [snapshot?.revision, snapshot?.dirty, snapshot?.path, snapshot?.source, rootName, fileVersion]);
+  }, [snapshot, rootName, fileVersion, workspaceIdRef]);
 
   useEffect(() => {
     if (!snapshot?.dirty) return;
@@ -164,7 +160,7 @@ export function App() {
     })().catch(reportError); };
     window.addEventListener('focus', check);
     return () => { disposed = true; window.removeEventListener('focus', check); };
-  }, [workspace, snapshot?.path, fileVersion]);
+  }, [workspace, snapshot, fileVersion, reportError]);
 
   useEffect(() => {
     if (!findOpen) return;
@@ -434,8 +430,8 @@ export function App() {
 
     {inspector && <aside className="inspector" aria-label={panelTitle(inspector)}><div className="inspector-head"><strong>{panelTitle(inspector)}</strong><button onClick={closeInspector} title="Close panel" aria-label={`Close ${panelTitle(inspector)} panel`}><PanelRight size={16}/></button></div>
       {inspector === 'git' && <GitPanel git={git} error={repo.gitError} status={gitStatus} branches={repo.branches} currentBranch={repo.currentBranch} history={repo.history} dirty={snapshot?.dirty ?? false} message={repo.commitMessage} setMessage={repo.setCommitMessage} onStage={repo.stage} onCommit={repo.createCommit} onRefresh={repo.refreshPanel} onCheckout={checkoutBranch} onCreateBranch={repo.createBranch} onRenameBranch={repo.renameBranch} onDeleteBranch={repo.deleteBranch} onMerge={mergeBranch} onCompare={reviewState.compare} onError={reportError}/>}
-      {inspector === 'review' && <ReviewPanel draft={review} activeChangeId={reviewState.activeChangeId} attributionBusy={reviewState.attributionBusy} onSelect={selectReviewChange} onDecide={reviewState.decide} onDecideAll={reviewState.decideAll} onApply={reviewState.apply}/>}
-      {inspector === 'comments' && <CommentsPanel parsed={comments} activeId={activeCommentId} selection={selection} body={commentState.body} setBody={commentState.setBody} replies={commentState.replies} setReplies={commentState.setReplies} onAdd={commentState.add} onNavigate={navigateComment} busy={commentState.busy || Boolean(review)} onRepair={commentState.repair} onReply={commentState.reply} onStatus={commentState.setStatus} onDelete={commentState.remove}/>}
+      {inspector === 'review' && <ReviewPanel draft={review} activeChangeId={reviewState.activeChangeId} attributionBusy={reviewState.attributionBusy} onSelect={selectReviewChange} onDecide={reviewState.decide} onDecideAll={reviewState.decideAll} onApply={() => { void reviewState.apply().catch(reportError); }}/>}
+      {inspector === 'comments' && <CommentsPanel parsed={comments} activeId={activeCommentId} selection={selection} body={commentState.body} setBody={commentState.setBody} replies={commentState.replies} setReplies={commentState.setReplies} onAdd={() => { void commentState.add().catch(reportError); }} onNavigate={navigateComment} busy={commentState.busy || Boolean(review)} onRepair={commentState.repair} onReply={commentState.reply} onStatus={commentState.setStatus} onDelete={commentState.remove}/>}
       {inspector === 'citations' && <CitationsPanel records={citations} query={citationQuery} setQuery={setCitationQuery}/>}
       {inspector === 'export' && <ExportPanel disabled={!snapshot} busy={exports.busy} progress={exports.progress} onCancel={exports.cancel} onExport={exports.exportDocument}/>}
       {inspector === 'settings' && <SettingsPanel settings={settings} aiModelSetup={aiModelSetup} onChange={updateSettings} onAiCommitSuggestionsChange={updateAiCommitSuggestions}/>}

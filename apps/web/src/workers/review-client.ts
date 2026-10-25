@@ -39,7 +39,7 @@ function runReviewWorker(request: DistributiveOmit<ReviewWorkerRequest, 'id'>, {
     });
     worker.addEventListener('messageerror', () => { finish(); reject(new Error('The review worker sent a message that could not be read.')); });
     worker.addEventListener('error', (event) => { finish(); reject(new Error(event.message || 'The review worker stopped unexpectedly.')); });
-    try { worker.postMessage({ ...request, id } as ReviewWorkerRequest); }
+    try { worker.postMessage({ ...request, id }); }
     catch (error) { finish(); reject(error); }
   });
 }
