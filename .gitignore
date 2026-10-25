@@ -69,3 +69,6 @@ Adobe After Effects Auto-Save/
 .markroot-hook-debug/
 # Local deterministic hook-test traces
 .markroot-hook-tests/
+
+# Local modification-tree browser diagnostics (history itself lives in IndexedDB)
+.markroot-history-debug/

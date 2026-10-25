@@ -8,6 +8,7 @@ Markroot is a pnpm workspace. Every package exposes contracts from its public `s
 | --- | --- |
 | `@markroot/core` | Errors, revisions, operations, progress, paths, and shared types |
 | `@markroot/workspace` | File System Access API and in-memory workspace adapters |
+| `@markroot/history` | Branching undo tree, checkpoints, JSON validation and browser-local storage adapter |
 | `@markroot/document` | Canonical source session, block mapping, edits, and search |
 | `@markroot/rendering` | Stable mapped preview and pluggable Pandoc engine contract |
 | `@markroot/citations` | BibTeX indexing and future resolver boundary |
@@ -25,6 +26,22 @@ The selected folder is the only repository source of truth. Folder handles, pref
 `DocumentSession` owns one source string and revision. Source and visual editors submit revision-guarded range edits. Untouched source is retained byte-for-byte. The visual pane edits recognized prose blocks and treats raw or unsupported blocks as atomic source-backed nodes.
 
 QMD code fences are displayed but never executed. The compatibility layer recognizes Pandoc Markdown, YAML front matter, citations, math, figures, fenced callouts, and common cross-reference labels. Full Quarto CLI execution is intentionally out of scope.
+
+### Modification tree
+
+Open **History** (fork icon in the inspector toolbar) to browse versions for the open project/file. Undo and type to create another child branch; the previous future stays available. Redo follows the most recently visited child. The panel shows the branch position at the closest fork. Select a node to preview that version read-only in Source and Rendered, with tracked changes against the current text. **Compare with…** chooses a second node as the comparison base; **Close preview** returns to editing. **Switch to this version** navigates without adding a node, and the next Undo returns to the version you left. Star versions to preserve them during pruning.
+
+- **Ctrl/Cmd+Z**: undo; **Ctrl/Cmd+Shift+Z** or **Ctrl/Cmd+Y**: redo.
+- **Alt+[ / Alt+]**: previous/next branch at the nearest fork, following that branch's last visited descendant. These physical bracket keys do not conflict with the source editor's default keymaps; on layouts where Alt produces a symbol, the physical bracket key still works.
+- Within the History tree: **↑/↓** move between nodes, **←/→** move to parent/active child, **Home/End** move to first/last node, **Enter/Space** preview (or choose the second comparison node).
+
+Shortcuts work in Source, the visual pane outside an active editing block, Rendered, and the detached viewer. Text inputs and active ProseMirror blocks retain their own editing behavior. Document navigation places the source cursor at the end of the changed range and reveals it. CodeMirror has no second linear undo stack.
+
+`DocumentSession` publishes source, visual, review, comment and system edits. `useDocumentHistory` records these, including opening-time recovery/comment migration; navigation uses origin `history` and never records a new node. Adjacent source/visual edits within 800 ms form one step; navigation, origin changes, stars, delays and forks separate groups. Saves/autosaves/commits only persist text. The pure TypeScript tree stores compact UTF-16 changes and inverses, content hashes verified against exact text, and full checkpoints every 40 steps or about 64 KiB of edits. Opening a file reattaches its disk text to a matching known version or creates an external-change checkpoint.
+
+History is stored only in the current browser profile/origin's **IndexedDB → `markroot-history` → `trees`**, keyed by `workspaceIdFor`'s project ID plus the document path. It is never uploaded or written into the selected folder, `.markroot`, or Git. If stable project identity cannot be obtained, history remains in memory for that session. Writes are debounced by one second, flushed on file/session changes and attempted on page hide/hidden visibility; abrupt browser termination can lose the newest second of history. Clearing site data removes it; renaming/moving a file starts a separate key. Concurrent tabs have independent trees (last writer wins).
+
+Pruning targets **2,000 nodes / approximately 5 MiB** per document, removing oldest leaves outside the current/starred ancestry first, then collapsing long linear runs into checkpoints while retaining exact current/starred versions and forks. Older intermediate undo steps can disappear. Protected stars/forks or large documents may exceed the soft cap; payloads above approximately 10 MiB are not persisted. Corrupt, incompatible, oversized or inaccessible history starts a fresh in-memory tree and reports a quiet notice; opening/editing stays available. Browser quota/eviction and page-lifecycle persistence are best effort. History previews affect presentation only; saving/exporting still uses the live document until a version is switched.
 
 ### Compatibility profile
 

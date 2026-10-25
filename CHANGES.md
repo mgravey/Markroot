@@ -1,5 +1,13 @@
 # Changes
 
+## Local modification tree
+
+- Added `@markroot/history`: grouped edits/inverses, branching navigation, last-visited redo, checkpoints, exact external-text matching, schema validation, pruning and JSON persistence.
+- Connected DocumentSession edit events to per-project/file IndexedDB history; typing stays available during loading and history failures never block document opening. Saving does not add versions.
+- Replaced CodeMirror's linear history with shared document undo/redo and branch shortcuts; active visual blocks retain their own editing behavior.
+- Added the History inspector with keyboard tree navigation, stars, branch position, reversible version switching, and read-only comparisons using existing tracked changes in Source and Rendered.
+- Added pure tree/storage and jsdom session-hook coverage, including CRLF/Unicode, delayed restores, reloads and corrupt storage.
+
 ## Strict lint and compiler checks
 
 - Added flat-config ESLint with type-aware promise/thenable/assertion checks and React hook rules, integrated immediately after dependency boundaries in `pnpm check`.

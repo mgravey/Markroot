@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSPrope
 import { createPortal } from 'react-dom';
 import {
   AlignJustify, BookOpen, ChevronRight, CircleAlert, CircleDot, Code2, Columns2, Download, FileCode2,
-  ExternalLink, Files, GitBranch, GitCompare, ListTree, MessageSquare, PanelRight,
+  ExternalLink, Files, GitBranch, GitCompare, GitFork, ListTree, MessageSquare, PanelRight,
   RefreshCw, Save, Search, Settings2, X,
 } from 'lucide-react';
 import { type SourceRange, type WorkspacePath } from '@markroot/core';
@@ -38,8 +38,11 @@ import { useWorkspaceDocuments } from './hooks/useWorkspaceDocuments.js';
 import { useDocumentSave } from './hooks/useDocumentSave.js';
 import { usePaneNavigation } from './hooks/usePaneNavigation.js';
 import { useReview } from './hooks/useReview.js';
+import { useDocumentHistory, isHistoryShortcut } from './hooks/useDocumentHistory.js';
+import { useHistoryPreview } from './hooks/useHistoryPreview.js';
+import { HistoryPanel } from './panels/HistoryPanel.js';
 
-type Inspector = 'git' | 'review' | 'comments' | 'citations' | 'export' | 'settings' | undefined;
+type Inspector = 'history' | 'git' | 'review' | 'comments' | 'citations' | 'export' | 'settings' | undefined;
 type RightMode = 'visual' | 'preview';
 const EMPTY_WARNINGS: readonly string[] = [];
 
@@ -87,21 +90,33 @@ export function App() {
       setPreviewAnchor((current) => fragment ? { id: decodeFragment(fragment), request: (current?.request ?? 0) + 1 } : undefined);
     }),
   });
+  const documentHistory = useDocumentHistory({ session, workspaceId: workspaceIdRef.current, setNotice, onNavigate: useEvent((position: number) => {
+    setSourceCursorTarget(undefined); window.setTimeout(() => setSourceCursorTarget(position), 0);
+    setSelection({ from: position, to: position });
+    const block = session ? documentBlockAt(session.snapshot().blocks, position) : undefined;
+    scroll.set({ target: block?.id, progress: 0, origin: 'command', alignment: 'reveal' });
+  }) });
+  const historyPreview = useHistoryPreview(documentHistory.tree, snapshot);
+  const historyCommand = useEvent((action: 'undo' | 'redo' | 'previous' | 'next' | 'checkout', id?: string) => {
+    if (review || commentWriteBusy.current) return false;
+    historyPreview.close(); return documentHistory.command(action, id);
+  });
   const reloadCommentsEvent = useEvent(() => commentState.reload());
   const repo = useGitRepository({ openPath: snapshot?.path, dirty: snapshot?.dirty ?? false, profile: settings.profile, reloadComments: reloadCommentsEvent, setNotice, reportError });
   const { git, gitStatus, gitBase, setGitBase } = repo;
   const saveDocumentEvent = useEvent(() => saveDocument());
   const applyReviewedSource = useEvent((source: string, origin: 'review') => applySource(source, origin));
-  const showReview = useCallback(() => { setRightMode('preview'); setInspector('review'); }, []);
+  const showReview = useEvent(() => { historyPreview.close(); setRightMode('preview'); setInspector('review'); });
   const hideInspector = useCallback(() => setInspector(undefined), []);
   const reviewState = useReview({ git, workspace, snapshot, scroll, setSelection, setSourceCursorTarget, applySource: applyReviewedSource, setNotice, reportError, onOpened: showReview, onApplied: hideInspector });
-  const { review, presentation: reviewPresentation, presentedSnapshot, previewSnapshot: reviewPreviewSnapshot, trackChanges: reviewTrackChanges, activeTrackChange, activeSourceTrackChange, renderedChanges: renderedReviewChanges, renderedDecisions: renderedReviewDecisions, reset: resetReview, select: selectReviewChange } = reviewState;
-  const previewSnapshot = reviewPreviewSnapshot ?? presentedSnapshot;
-  const comparisonBaseSource = reviewPresentation?.base ?? (gitBase?.path === presentedSnapshot?.path ? gitBase?.source : undefined);
+  const { review, presentation: reviewPresentation, presentedSnapshot: reviewPresentedSnapshot, previewSnapshot: reviewPreviewSnapshot, trackChanges: reviewTrackChanges, activeTrackChange, activeSourceTrackChange, renderedChanges: renderedReviewChanges, renderedDecisions: renderedReviewDecisions, reset: resetReview, select: selectReviewChange } = reviewState;
+  const presentedSnapshot = historyPreview.snapshot ?? reviewPresentedSnapshot;
+  const previewSnapshot = historyPreview.snapshot ?? reviewPreviewSnapshot ?? presentedSnapshot;
+  const comparisonBaseSource = historyPreview.active ? historyPreview.base : reviewPresentation?.base ?? (gitBase?.path === presentedSnapshot?.path ? gitBase?.source : undefined);
   const renderedComparisonBaseSource = review?.base ?? comparisonBaseSource;
-  const trackedChangesVisible = Boolean(review) || trackChangesOpen;
+  const trackedChangesVisible = historyPreview.active || Boolean(review) || trackChangesOpen;
   const trackChangesUnavailable = Boolean(review) || (!trackChangesOpen && (gitBase?.path !== snapshot?.path || gitBase?.source === snapshot?.source));
-  const commentState = useComments({ workspace, session, snapshot, selection, reviewing: Boolean(review), git, profile: settings.profile, saveDocument: saveDocumentEvent, setNotice, reportError, onCommentsWritten: repo.refreshStatus });
+  const commentState = useComments({ workspace, session, snapshot, selection, reviewing: Boolean(review) || historyPreview.active, git, profile: settings.profile, saveDocument: saveDocumentEvent, setNotice, reportError, onCommentsWritten: repo.refreshStatus });
   const { store: commentStore, located: comments, activeId: activeCommentId, setActiveId: setActiveCommentId, writeBusy: commentWriteBusy } = commentState;
   const saveDocument = useDocumentSave({ workspace, session, activeSession, git, commentState, documentRequest, fileVersionRef, pendingWorkspace: pendingWorkspace(), setFileVersion, setNotice, reportError, onCitationsChanged: loadCitations, refreshStatus: repo.refreshStatus });
   const matches = useMemo(() => presentedSnapshot ? searchDocument(presentedSnapshot, search, { regularExpression }) : [], [presentedSnapshot, search, regularExpression]);
@@ -172,6 +187,8 @@ export function App() {
 
   // Cmd/Ctrl+S and Cmd/Ctrl+F outside CodeMirror (which handles and prevents them itself), including the detached viewer.
   const handleShortcut = useEvent((event: KeyboardEvent) => {
+    const historyAction = isHistoryShortcut(event);
+    if (historyAction && historyCommand(historyAction)) { event.preventDefault(); return; }
     if (event.defaultPrevented || !(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
     const key = event.key.toLowerCase();
     if (key === 's') { event.preventDefault(); if (snapshotRef.current) void explicitSave().catch(reportError); }
@@ -325,12 +342,14 @@ export function App() {
 
   const toggleInspector = (next: Exclude<Inspector, undefined>) => {
     if (review && next !== 'review') resetReview();
+    historyPreview.close();
     setInspector((current) => current === next ? undefined : next);
     if (next === 'citations') void loadCitations();
     if (next === 'git') void repo.refresh().catch(reportError);
   };
 
   function closeInspector() {
+    historyPreview.close();
     if (inspector === 'review') resetReview();
     setInspector(undefined);
   }
@@ -376,13 +395,13 @@ export function App() {
   const toggleTrackChanges = useCallback(() => setTrackChangesOpen((open) => !open), []);
   const trackChangesToggle = <TrackChangesToggle reviewing={Boolean(review)} open={trackChangesOpen} visible={trackedChangesVisible} disabled={trackChangesUnavailable} onToggle={toggleTrackChanges}/>;
 
-  const renderViewerContent = () => presentedSnapshot ? <ScrollBound store={scroll} render={(position) => rightMode === 'visual' && !review
+  const renderViewerContent = () => presentedSnapshot ? <ScrollBound store={scroll} render={(position) => rightMode === 'visual' && !review && !historyPreview.active
     ? <VisualEditor snapshot={presentedSnapshot} activeBlock={position.target} scrollTarget={position.origin === 'right' ? undefined : position.target} scrollProgress={position.progress} scrollAlignment={position.alignment} fontFamily={settings.viewerFont} fontSize={settings.viewerFontSize} justified={settings.viewerJustified} onApply={applyVisualBlock} onNavigate={navigateFromRight} onScroll={handleViewerScroll}/>
-    : <Preview html={rendered?.html ?? ''} objectUrls={rendered?.objectUrls ?? EMPTY_WARNINGS} warnings={rendered?.warnings ?? EMPTY_WARNINGS} blocks={previewSnapshot?.blocks ?? presentedSnapshot.blocks} search={search} regularExpression={regularExpression} activeBlock={position.target} scrollTarget={position.origin === 'right' ? undefined : position.target} scrollProgress={position.progress} scrollAlignment={position.alignment} anchorTarget={renderedSnapshot === previewSnapshot ? previewAnchor : undefined} allowRemoteResources={settings.allowRemoteResources} fontFamily={settings.viewerFont} fontSize={settings.viewerFontSize} justified={settings.viewerJustified} trackChangesBaseHtml={trackedChangesVisible ? renderedBaseHtml : undefined} activeTrackChange={activeTrackChange} reviewChanges={renderedReviewChanges} reviewDecisions={renderedReviewDecisions} comments={review ? undefined : comments} activeCommentId={review ? undefined : activeCommentId} onNavigate={navigateFromRight} documentPath={presentedSnapshot.path} onOpenWorkspaceLink={openWorkspaceLink} onSelect={selectFromRight} onCommentActivate={activateComment} onScroll={handleViewerScroll}/>}/> : null;
+    : <Preview html={rendered?.html ?? ''} objectUrls={rendered?.objectUrls ?? EMPTY_WARNINGS} warnings={rendered?.warnings ?? EMPTY_WARNINGS} blocks={previewSnapshot?.blocks ?? presentedSnapshot.blocks} search={search} regularExpression={regularExpression} activeBlock={position.target} scrollTarget={position.origin === 'right' ? undefined : position.target} scrollProgress={position.progress} scrollAlignment={position.alignment} anchorTarget={renderedSnapshot === previewSnapshot ? previewAnchor : undefined} allowRemoteResources={settings.allowRemoteResources} fontFamily={settings.viewerFont} fontSize={settings.viewerFontSize} justified={settings.viewerJustified} trackChangesBaseHtml={trackedChangesVisible ? renderedBaseHtml : undefined} activeTrackChange={activeTrackChange} reviewChanges={renderedReviewChanges} reviewDecisions={renderedReviewDecisions} comments={review || historyPreview.active ? undefined : comments} activeCommentId={review || historyPreview.active ? undefined : activeCommentId} onNavigate={navigateFromRight} documentPath={presentedSnapshot.path} onOpenWorkspaceLink={openWorkspaceLink} onSelect={selectFromRight} onCommentActivate={activateComment} onScroll={handleViewerScroll}/>}/> : null;
 
   const switchRightMode = (mode: RightMode) => { scroll.set({ origin: 'command', alignment: 'reveal' }); setRightMode(mode); };
   const viewerToolbar = (detached: boolean) => <div className="pane-title viewer-toolbar">
-    <div className="segmented" role="group" aria-label="Viewer mode"><button disabled={Boolean(review)} className={rightMode === 'visual' && !review ? 'active' : ''} aria-pressed={rightMode === 'visual' && !review} onClick={() => switchRightMode('visual')}>Visual</button><button className={rightMode === 'preview' || Boolean(review) ? 'active' : ''} aria-pressed={rightMode === 'preview' || Boolean(review)} onClick={() => switchRightMode('preview')}>Rendered</button></div>
+    <div className="segmented" role="group" aria-label="Viewer mode"><button disabled={Boolean(review) || historyPreview.active} className={rightMode === 'visual' && !review && !historyPreview.active ? 'active' : ''} aria-pressed={rightMode === 'visual' && !review && !historyPreview.active} onClick={() => switchRightMode('visual')}>Visual</button><button className={rightMode === 'preview' || Boolean(review) || historyPreview.active ? 'active' : ''} aria-pressed={rightMode === 'preview' || Boolean(review) || historyPreview.active} onClick={() => switchRightMode('preview')}>Rendered</button></div>
     <button className={settings.viewerJustified ? 'viewer-option active' : 'viewer-option'} onClick={() => updateSettings({ ...settings, viewerJustified: !settings.viewerJustified })} title="Justify viewer text" aria-label="Justify viewer text" aria-pressed={settings.viewerJustified}><AlignJustify size={14}/></button>
     {(rightMode === 'preview' || review) && trackChangesToggle}
     <span className="spacer"/>
@@ -403,6 +422,7 @@ export function App() {
         {snapshot && <button onClick={saveFromEditor} title="Save (Ctrl/Cmd+S)" aria-label="Save"><Save size={17}/></button>}
         <button onClick={() => setFindOpen((open) => !open)} title="Find (Ctrl/Cmd+F)" aria-label="Find" aria-expanded={findOpen}><Search size={17}/></button>
         {inspectorToggle('comments', comments?.threads.length ? `Comments (${comments.threads.length})` : 'Comments', <><MessageSquare size={17}/>{comments?.threads.length ? <small>{comments.threads.length}</small> : null}</>)}
+        {inspectorToggle('history', 'History', <GitFork size={17}/>)}
         {inspectorToggle('git', 'Git', <GitBranch size={17}/>)}
         {inspectorToggle('export', 'Export', <Download size={17}/>)}
         {inspectorToggle('settings', 'Settings', <Settings2 size={17}/>)}
@@ -425,15 +445,16 @@ export function App() {
     <main className={`workspace ${detachedViewerRoot ? 'viewer-detached' : ''}`} ref={workspacePane} style={{ '--source-width': `${settings.sourcePaneRatio * 100}%` } as CSSProperties}>
       {!presentedSnapshot ? <div className="welcome"><BrandMark className="welcome-symbol"/><h1>Your local writing workspace</h1><p>Choose a folder, then open a Markdown or QMD file. Source, preview, comments, and Git stay together on this device.</p>{!workspace && <button className="primary" onClick={() => void chooseFolder().catch(reportError)}>Open folder</button>}</div>
       : <>
-        <section className="pane source-pane"><div className="pane-title"><Code2 size={15}/><span>{review ? 'Source · branch review' : 'Source'}</span>{trackChangesToggle}<span className="spacer"/>{detachedViewerRoot && <><button className="detached-indicator" onClick={() => detachedViewerWindow.current?.focus()} title="Focus the detached viewer"><ExternalLink size={13}/>Viewer detached</button><button className="viewer-option" onClick={reattachViewer} title="Return viewer to this window" aria-label="Reattach viewer"><Columns2 size={15}/></button></>}<span>{settings.sourceFontSize}px · Ln {currentLine}</span></div><ScrollBound store={scroll} render={(position) => { const location = sourceScrollLocation(position, review, reviewPreviewSnapshot, presentedSnapshot); return <SourceEditor key={presentedSnapshot.path} path={presentedSnapshot.path} workspacePaths={workspacePaths} value={presentedSnapshot.source} comparisonBase={review ? undefined : comparisonBaseSource} trackChangesOverride={reviewTrackChanges} showTrackChanges={trackedChangesVisible} activeTrackChange={activeSourceTrackChange} readOnly={Boolean(review)} blocks={presentedSnapshot.blocks} search={search} regularExpression={regularExpression} dark={dark} fontFamily={settings.sourceFont} fontSize={settings.sourceFontSize} activeBlock={location.target} scrollTarget={position.origin === 'source' ? undefined : location.target} scrollProgress={location.progress} scrollAlignment={position.alignment} cursorTarget={sourceCursorTarget} goToLine={goToLine} onChange={applySource} onSelection={selectSource} onTrackChangeActivate={selectReviewChange} onScroll={navigateFromSourceScroll} onSave={saveFromEditor} onFind={openFind}/>; }}/></section>
+        <section className="pane source-pane"><div className="pane-title"><Code2 size={15}/><span>{review ? 'Source · branch review' : 'Source'}</span>{trackChangesToggle}<span className="spacer"/>{detachedViewerRoot && <><button className="detached-indicator" onClick={() => detachedViewerWindow.current?.focus()} title="Focus the detached viewer"><ExternalLink size={13}/>Viewer detached</button><button className="viewer-option" onClick={reattachViewer} title="Return viewer to this window" aria-label="Reattach viewer"><Columns2 size={15}/></button></>}<span>{settings.sourceFontSize}px · Ln {currentLine}</span></div><ScrollBound store={scroll} render={(position) => { const location = sourceScrollLocation(position, review, reviewPreviewSnapshot, presentedSnapshot); return <SourceEditor key={presentedSnapshot.path} path={presentedSnapshot.path} workspacePaths={workspacePaths} value={presentedSnapshot.source} comparisonBase={review ? undefined : comparisonBaseSource} trackChangesOverride={reviewTrackChanges} showTrackChanges={trackedChangesVisible} activeTrackChange={activeSourceTrackChange} readOnly={Boolean(review) || historyPreview.active} blocks={presentedSnapshot.blocks} search={search} regularExpression={regularExpression} dark={dark} fontFamily={settings.sourceFont} fontSize={settings.sourceFontSize} activeBlock={location.target} scrollTarget={position.origin === 'source' ? undefined : location.target} scrollProgress={location.progress} scrollAlignment={position.alignment} cursorTarget={sourceCursorTarget} goToLine={goToLine} onChange={applySource} onSelection={selectSource} onTrackChangeActivate={selectReviewChange} onScroll={navigateFromSourceScroll} onSave={saveFromEditor} onFind={openFind}/>; }}/></section>
         {!detachedViewerRoot && <><PaneResizer label="Resize source and viewer panes" value={settings.sourcePaneRatio} min={0.25} max={0.75} keyboardStep={0.02} pixelsPerUnit={workspacePaneWidth} onChange={resizeSourcePane}/><section className="pane right-pane">{viewerToolbar(false)}<div className="right-scroll">{renderViewerContent()}</div></section></>}
       </>}
     </main>
 
     {inspector && <aside className="inspector" aria-label={panelTitle(inspector)}><div className="inspector-head"><strong>{panelTitle(inspector)}</strong><button onClick={closeInspector} title="Close panel" aria-label={`Close ${panelTitle(inspector)} panel`}><PanelRight size={16}/></button></div>
+      {inspector === 'history' && <HistoryPanel tree={documentHistory.tree} ready={documentHistory.ready && !review} selectedId={historyPreview.selectedId} compareId={historyPreview.compareId} onSelect={(id) => { resetReview(); historyPreview.select(id); }} onCompare={historyPreview.compare} onCheckout={(id) => historyCommand('checkout', id)} onStar={documentHistory.star} onClose={historyPreview.close} onUndo={() => historyCommand('undo')} onRedo={() => historyCommand('redo')}/>}
       {inspector === 'git' && <GitPanel git={git} error={repo.gitError} status={gitStatus} branches={repo.branches} currentBranch={repo.currentBranch} history={repo.history} dirty={snapshot?.dirty ?? false} message={repo.commitMessage} setMessage={repo.setCommitMessage} onStage={repo.stage} onCommit={repo.createCommit} onRefresh={repo.refreshPanel} onCheckout={checkoutBranch} onCreateBranch={repo.createBranch} onRenameBranch={repo.renameBranch} onDeleteBranch={repo.deleteBranch} onMerge={mergeBranch} onCompare={reviewState.compare} onError={reportError}/>}
       {inspector === 'review' && <ReviewPanel draft={review} activeChangeId={reviewState.activeChangeId} attributionBusy={reviewState.attributionBusy} onSelect={selectReviewChange} onDecide={reviewState.decide} onDecideAll={reviewState.decideAll} onApply={() => { void reviewState.apply().catch(reportError); }}/>}
-      {inspector === 'comments' && <CommentsPanel parsed={comments} activeId={activeCommentId} selection={selection} body={commentState.body} setBody={commentState.setBody} replies={commentState.replies} setReplies={commentState.setReplies} onAdd={() => { void commentState.add().catch(reportError); }} onNavigate={navigateComment} busy={commentState.busy || Boolean(review)} onRepair={commentState.repair} onReply={commentState.reply} onStatus={commentState.setStatus} onDelete={commentState.remove}/>}
+      {inspector === 'comments' && <CommentsPanel parsed={comments} activeId={activeCommentId} selection={selection} body={commentState.body} setBody={commentState.setBody} replies={commentState.replies} setReplies={commentState.setReplies} onAdd={() => { void commentState.add().catch(reportError); }} onNavigate={navigateComment} busy={commentState.busy || Boolean(review) || historyPreview.active} onRepair={commentState.repair} onReply={commentState.reply} onStatus={commentState.setStatus} onDelete={commentState.remove}/>}
       {inspector === 'citations' && <CitationsPanel records={citations} query={citationQuery} setQuery={setCitationQuery}/>}
       {inspector === 'export' && <ExportPanel disabled={!snapshot} busy={exports.busy} progress={exports.progress} onCancel={exports.cancel} onExport={exports.exportDocument}/>}
       {inspector === 'settings' && <SettingsPanel settings={settings} aiModelSetup={aiModelSetup} onChange={updateSettings} onAiCommitSuggestionsChange={updateAiCommitSuggestions}/>}
@@ -464,7 +485,7 @@ function sourceScrollLocation(position: ScrollState, review: ReviewDraft | undef
 
 function isAbortError(error: unknown): boolean { return error instanceof DOMException && error.name === 'AbortError'; }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
-function panelTitle(panel: Exclude<Inspector, undefined>): string { return ({ git: 'Local Git', review: 'Track Changes', comments: 'Comments', citations: 'Citations', export: 'Export', settings: 'Settings' })[panel]; }
+function panelTitle(panel: Exclude<Inspector, undefined>): string { return ({ history: 'History', git: 'Local Git', review: 'Track Changes', comments: 'Comments', citations: 'Citations', export: 'Export', settings: 'Settings' })[panel]; }
 function lineAt(source: string, offset: number): number { return source.slice(0, offset).split('\n').length; }
 
 
