@@ -36,6 +36,7 @@ export function useWorkspaceDocuments({ comments, repository, settingsRef, setSe
   const [fileVersion, setFileVersion] = useState<string>();
   const documentRequest = useRef(0);
   const folderGeneration = useRef(0);
+  const openWorkspace = useRef<FileSystemAccessWorkspace | undefined>(undefined);
   const activeSession = useRef<DocumentSession | undefined>(undefined);
   const fileVersionRef = useRef<string | undefined>(undefined);
   const workspaceIdRef = useRef<string | undefined>(undefined);
@@ -110,13 +111,16 @@ export function useWorkspaceDocuments({ comments, repository, settingsRef, setSe
 
   async function connectFolder(handle: FileSystemDirectoryHandle, generation: number, discarded?: DocumentSnapshot) {
     const superseded = () => generation !== folderGeneration.current;
+    const timing = switchTiming(handle.name);
     // Recovery keys fall back to the folder name, but a broken registry must not stay silent.
     const workspaceId = await workspaceIdFor(handle).catch((error: unknown) => { reportError(error); return undefined; });
     if (superseded()) return;
     const next = new FileSystemAccessWorkspace(handle, workspaceId ? { id: workspaceId } : {});
     // Validate access before replacing the working folder, including removed directory handles.
+    timing('workspace id');
     const nextEntries = await documentEntries(next);
-    if (superseded()) return;
+    timing(`file tree (${nextEntries.length} entries)`);
+    if (superseded()) { next.close(); return; }
     const leaving = activeSession.current;
     const documentContext = documentRequest.current;
     if (leaving?.snapshot().dirty) {
@@ -140,6 +144,9 @@ export function useWorkspaceDocuments({ comments, repository, settingsRef, setSe
     }
     if (comments().writeBusy.current) { setNotice('Wait for the comment to finish saving.'); return; }
     onFolderReset();
+    // Stop the previous folder's in-flight scans (Git status, citations, comments) instead of letting them compete.
+    openWorkspace.current?.close();
+    openWorkspace.current = next;
     comments().clear();
     sessionSubscription.current?.();
     sessionSubscription.current = undefined;
@@ -164,10 +171,13 @@ export function useWorkspaceDocuments({ comments, repository, settingsRef, setSe
     if (superseded()) return;
     if (project) { setRootName(project.name); setRecentProjects((projects) => [project, ...projects.filter((item) => item.id !== project.id)].slice(0, 12)); }
     const bibliographyPaths = nextEntries.filter((entry) => entry.kind === 'file' && /\.(?:bib|bibtex)$/i.test(entry.path)).map((entry) => entry.path);
+    timing('recent projects');
     const records = await new LocalCitationProvider(next).index(bibliographyPaths).catch(() => []);
+    timing(`citations (${bibliographyPaths.length} .bib)`);
     if (superseded()) return;
     setCitations(records);
     const configured = await repository().connect(new IsomorphicGitRepository(next), superseded);
+    timing('git status, branches and history');
     if (superseded()) return;
     const latest = settingsRef.current;
     if (configured && (configured.displayName || configured.email)) updateSettings({ ...latest, profile: { ...latest.profile, ...configured } });
@@ -265,18 +275,48 @@ export function useWorkspaceDocuments({ comments, repository, settingsRef, setSe
   return { workspace, rootName, entries, session, snapshot, fileVersion, setFileVersion, activeSession, documentRequest, fileVersionRef, workspaceIdRef, citations, recentProjects, unavailableProject, selectProject, removeProject, chooseFolder, openFile, openWorkspaceLink, pendingWorkspace, loadCitations, refreshWorkspace };
 }
 
-async function documentEntries(workspace: GuardedWorkspace): Promise<readonly WorkspaceEntry[]> {
+const SKIPPED_DIRECTORIES = new Set(['.git', '.markroot', 'node_modules', '.quarto', '_freeze']);
+
+/** Lists the tree with a few directories in flight at once; each browser listing is a separate IPC round trip. */
+export async function documentEntries(workspace: GuardedWorkspace, concurrency = 8): Promise<readonly WorkspaceEntry[]> {
   const result: WorkspaceEntry[] = [];
-  const visit = async (parent?: WorkspacePath) => {
-    for (const entry of await workspace.listFiles(parent)) {
-      const name = entry.path.split('/').at(-1)!;
-      if (entry.kind === 'directory') {
-        if (!['.git', '.markroot', 'node_modules', '.quarto', '_freeze'].includes(name)) { result.push(entry); await visit(entry.path); }
-      } else result.push(entry);
-    }
-  };
-  await visit();
+  const pending: (WorkspacePath | undefined)[] = [undefined];
+  let active = 0;
+  await new Promise<void>((resolve, reject) => {
+    let failed = false;
+    const pump = () => {
+      if (failed) return;
+      if (!pending.length && !active) { resolve(); return; }
+      while (active < concurrency && pending.length) {
+        const parent = pending.shift();
+        active++;
+        workspace.listFiles(parent).then((entries) => {
+          for (const entry of entries) {
+            if (entry.kind === 'directory' && SKIPPED_DIRECTORIES.has(entry.path.split('/').at(-1)!)) continue;
+            result.push(entry);
+            if (entry.kind === 'directory') pending.push(entry.path);
+          }
+          active--;
+          pump();
+        }, (error: unknown) => { failed = true; reject(error); });
+      }
+    };
+    pump();
+  });
   return result.sort((a, b) => a.path.localeCompare(b.path));
+}
+
+/** Opt-in switch profiling: run `localStorage.setItem('markroot:timing', '1')` and reload. */
+function switchTiming(name: string): (step: string) => void {
+  const enabled = typeof localStorage !== 'undefined' && localStorage.getItem('markroot:timing') === '1';
+  const start = performance.now();
+  let last = start;
+  return (step) => {
+    if (!enabled) return;
+    const now = performance.now();
+    console.info(`[markroot] open ${name}: ${step} ${Math.round(now - last)} ms (total ${Math.round(now - start)} ms)`);
+    last = now;
+  };
 }
 
 function skippedEntriesNotice(skipped: ReadonlySet<string>): string {
