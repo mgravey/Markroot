@@ -65,3 +65,11 @@
 - Initialized the browser `Buffer` implementation required by isomorphic-git's ESM bundle, fixing the `Buffer is not defined` repository startup failure.
 - Added a live detachable visual/rendered viewer for second-window and multi-monitor workflows, including reattach/focus controls and cross-window-safe navigation, scrolling, figures, search, typography, and visual editing.
 - Added workspace dependency-boundary and cycle enforcement.
+
+## Review fixes: app composition and lifetimes
+
+- Extract workspace/document loading, serialized saves, and pane navigation from App.
+- Guard queued saves and asynchronous completions against document/folder replacement; preserve dirty revisions and recovery drafts during saves.
+- Lease cached image URLs across artifacts and release after DOM replacement; stop resource reads on cancellation.
+- Cancel reviews on unmount/document loads, check stale review application, and clean up worker post failures.
+- Clear repository state on folder replacement; close AI preparation sessions on early exits.

@@ -5,12 +5,11 @@ import {
   ExternalLink, Files, GitBranch, GitCompare, ListTree, MessageSquare, PanelRight,
   RefreshCw, Save, Search, Settings2, X,
 } from 'lucide-react';
-import { throwIfAborted, type SourceRange, type WorkspacePath } from '@markroot/core';
+import { type SourceRange, type WorkspacePath } from '@markroot/core';
 import { documentBlockAt, DocumentSession, searchDocument, type DocumentBlock, type DocumentSnapshot } from '@markroot/document';
-import type { DocumentOutlineItem } from '@markroot/rendering';
 import { FileSystemAccessWorkspace, ensureDirectoryPermission, type GuardedWorkspace, type WorkspaceEntry } from '@markroot/workspace';
 import { commentRevision, parseComments } from '@markroot/comments';
-import { IsomorphicGitRepository, type GitCommitSummary } from '@markroot/git';
+import { IsomorphicGitRepository } from '@markroot/git';
 import { mapReviewCompareOffset, mapReviewCurrentOffset, type ReviewDraft } from '@markroot/review';
 import { LocalCitationProvider, type CitationRecord } from '@markroot/citations';
 import { defaultSettings, deletePendingSession, workspaceIdFor, loadPendingSession, loadRecentWorkspace, loadSettings, savePendingSession, saveRecentWorkspace, saveSettings, type MarkrootSettings } from '@markroot/settings';
@@ -38,6 +37,9 @@ import { SettingsPanel } from './panels/SettingsPanel.js';
 import { useAiCommit } from './hooks/useAiCommit.js';
 import { useGitRepository } from './hooks/useGitRepository.js';
 import { useComments } from './hooks/useComments.js';
+import { useWorkspaceDocuments } from './hooks/useWorkspaceDocuments.js';
+import { useDocumentSave } from './hooks/useDocumentSave.js';
+import { usePaneNavigation } from './hooks/usePaneNavigation.js';
 import { useReview } from './hooks/useReview.js';
 
 type Inspector = 'git' | 'review' | 'comments' | 'citations' | 'export' | 'settings' | undefined;
@@ -46,12 +48,6 @@ const EMPTY_WARNINGS: readonly string[] = [];
 
 export function App() {
   const [settings, setSettings] = useState<MarkrootSettings>(defaultSettings);
-  const [workspace, setWorkspace] = useState<GuardedWorkspace>();
-  const [rootName, setRootName] = useState('No folder open');
-  const [entries, setEntries] = useState<readonly WorkspaceEntry[]>([]);
-  const [session, setSession] = useState<DocumentSession>();
-  const [snapshot, setSnapshot] = useState<DocumentSnapshot>();
-  const [fileVersion, setFileVersion] = useState<string>();
   const [rightMode, setRightMode] = useState<RightMode>('preview');
   const [inspector, setInspector] = useState<Inspector>();
   const [search, setSearch] = useState('');
@@ -65,21 +61,12 @@ export function App() {
   const [notice, setNotice] = useState<string>();
   const [trackChangesOpen, setTrackChangesOpen] = useState(false);
   // Identifies the open document; bumped only when a different file or folder replaces it.
-  const documentRequest = useRef(0);
   // Identifies the open folder; a slower folder connection never overwrites a newer one.
-  const folderGeneration = useRef(0);
-  const saveQueue = useRef<Promise<unknown>>(Promise.resolve());
-  const fileVersionRef = useRef<string | undefined>(undefined);
-  const workspaceIdRef = useRef<string | undefined>(undefined);
-  const [citations, setCitations] = useState<readonly CitationRecord[]>([]);
   const [citationQuery, setCitationQuery] = useState('');
   const [outlineOpen, setOutlineOpen] = useState(false);
   const [previewAnchor, setPreviewAnchor] = useState<Readonly<{ id: string; request: number }>>();
   const [detachedViewerRoot, setDetachedViewerRoot] = useState<HTMLElement>();
-  const sessionSubscription = useRef<(() => void) | undefined>(undefined);
   const snapshotRef = useRef<DocumentSnapshot | undefined>(undefined);
-  const reviewRef = useRef<ReviewDraft | undefined>(undefined);
-  const reviewPreviewSnapshotRef = useRef<DocumentSnapshot | undefined>(undefined);
   const settingsRef = useRef(settings);
   const workspacePane = useRef<HTMLElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
@@ -87,9 +74,24 @@ export function App() {
   const scroll = useMemo(() => new ScrollStore(), []);
   const lineInputId = useId();
   const reportError = useCallback((error: unknown) => { if (!isAbortError(error)) setNotice(errorMessage(error)); }, []);
+  const { workspace, rootName, entries, session, snapshot, fileVersion, setFileVersion, activeSession, documentRequest, fileVersionRef, workspaceIdRef, citations, chooseFolder, openFile, openWorkspaceLink, pendingWorkspace, loadCitations, refreshWorkspace } = useWorkspaceDocuments({
+    comments: () => commentState, repository: () => repo, settingsRef, setSettings, updateSettings: useEvent((next: MarkrootSettings) => updateSettings(next)), setNotice, reportError,
+    onDocumentLoading: useEvent(() => resetReview()),
+    onFolderReset: useEvent(() => {
+      closeCommitDialog(false); resetReview(); setInspector((open) => open === 'review' ? undefined : open);
+      setTrackChangesOpen(false); setOutlineOpen(false); setPreviewAnchor(undefined); setSourceCursorTarget(undefined); setSelection({ from: 0, to: 0 });
+      scroll.set({ target: undefined, progress: 0, origin: 'command', alignment: 'reveal' });
+      reattachViewer();
+    }),
+    onDocumentOpened: useEvent((path: WorkspacePath, base: string | undefined, firstBlock: string | undefined) => {
+      setSelection({ from: 0, to: 0 }); setGitBase(base === undefined ? undefined : { path, source: base });
+      setTrackChangesOpen(false); resetReview(); scroll.set({ target: firstBlock, progress: 0, origin: 'command', alignment: 'reveal' });
+      setSourceCursorTarget(undefined); setActiveCommentId(undefined); setOutlineOpen(false); setPreviewAnchor(undefined);
+    }),
+  });
   const reloadCommentsEvent = useEvent(() => commentState.reload());
   const repo = useGitRepository({ openPath: snapshot?.path, dirty: snapshot?.dirty ?? false, profile: settings.profile, reloadComments: reloadCommentsEvent, setNotice, reportError });
-  const { git, gitStatus, setGitStatus, gitBase, setGitBase } = repo;
+  const { git, gitStatus, gitBase, setGitBase } = repo;
   const saveDocumentEvent = useEvent(() => saveDocument());
   const applyReviewedSource = useEvent((source: string, origin: 'review') => applySource(source, origin));
   const showReview = useCallback(() => { setRightMode('preview'); setInspector('review'); }, []);
@@ -102,31 +104,21 @@ export function App() {
   const trackedChangesVisible = Boolean(review) || trackChangesOpen;
   const trackChangesUnavailable = Boolean(review) || (!trackChangesOpen && (gitBase?.path !== snapshot?.path || gitBase?.source === snapshot?.source));
   const commentState = useComments({ workspace, session, snapshot, selection, reviewing: Boolean(review), git, profile: settings.profile, saveDocument: saveDocumentEvent, setNotice, reportError, onCommentsWritten: repo.refreshStatus });
-  const { store: commentStore, located: comments, activeId: activeCommentId, setActiveId: setActiveCommentId, writeBusy: commentWriteBusy, legacy: legacyComments } = commentState;
+  const { store: commentStore, located: comments, activeId: activeCommentId, setActiveId: setActiveCommentId, writeBusy: commentWriteBusy } = commentState;
+  const saveDocument = useDocumentSave({ workspace, session, activeSession, git, commentState, documentRequest, fileVersionRef, pendingWorkspace: pendingWorkspace(), setFileVersion, setNotice, reportError, onCitationsChanged: loadCitations, refreshStatus: repo.refreshStatus });
   const matches = useMemo(() => presentedSnapshot ? searchDocument(presentedSnapshot, search, { regularExpression }) : [], [presentedSnapshot, search, regularExpression]);
   const currentLine = useMemo(() => presentedSnapshot ? lineAt(presentedSnapshot.source, selection.from) : 1, [presentedSnapshot?.source, selection.from]);
   const workspacePaths = useMemo(() => entries.map((entry) => entry.path), [entries]);
   const systemDark = useSystemDark();
   const dark = settings.theme === 'dark' || (settings.theme === 'system' && systemDark);
   snapshotRef.current = presentedSnapshot;
-  reviewRef.current = review;
-  reviewPreviewSnapshotRef.current = reviewPreviewSnapshot;
   settingsRef.current = settings;
-  fileVersionRef.current = fileVersion;
 
+  const { selectSource, navigateFromRight, selectFromRight, navigateFromSourceScroll, navigateOutline } = usePaneNavigation({ snapshot: presentedSnapshot, review, reviewPreviewSnapshot, scroll, setSelection, setSourceCursorTarget, setRightMode, setPreviewAnchor });
   const { rendered, renderedBaseHtml } = usePreviewRender({ previewSnapshot, workspace, citations, allowRemoteResources: settings.allowRemoteResources, baseSource: trackedChangesVisible ? renderedComparisonBaseSource : undefined, reportError });
   const refreshWorkspaceInBackground = useEvent(() => { void refreshWorkspace().catch(reportError); });
   const exports = useExport({ snapshot, workspace, justified: settings.viewerJustified, setNotice, onWorkspaceChanged: refreshWorkspaceInBackground });
 
-  useEffect(() => {
-    // A folder the user picks while this restore is pending wins over the remembered one.
-    const generation = folderGeneration.current;
-    void loadSettings().then((loaded) => { settingsRef.current = loaded; setSettings(loaded); }).catch(() => undefined).then(() => loadRecentWorkspace()).then(async (handle) => {
-      if (!handle || folderGeneration.current !== generation) return;
-      if (await ensureDirectoryPermission(handle) === 'granted' && folderGeneration.current === generation) await connectFolder(handle);
-    }).catch(reportError);
-    return () => sessionSubscription.current?.();
-  }, []);
 
   useEffect(() => () => {
     detachedViewerWindow.current?.close();
@@ -143,7 +135,7 @@ export function App() {
 
   useEffect(() => {
     if (!settings.autosave || !snapshot?.dirty || commentState.busy) return;
-    const timer = window.setTimeout(() => { void saveDocument(); }, 900);
+    const timer = window.setTimeout(() => { void saveDocument().catch(reportError); }, 900);
     return () => window.clearTimeout(timer);
   }, [settings.autosave, snapshot?.revision, snapshot?.dirty, workspace, fileVersion, commentState.busy]);
 
@@ -165,16 +157,19 @@ export function App() {
 
   useEffect(() => {
     if (!workspace || !snapshot || !fileVersion) return;
-    const check = async () => {
+    let disposed = false;
+    const check = () => { void (async () => {
       const current = await workspace.stat(snapshot.path).catch(() => undefined);
-      if (current?.version && current.version !== fileVersion) setNotice(`${snapshot.path} changed outside Markroot. Reload or compare before saving.`);
-    };
+      if (!disposed && current?.version && current.version !== fileVersion) setNotice(`${snapshot.path} changed outside Markroot. Reload or compare before saving.`);
+    })().catch(reportError); };
     window.addEventListener('focus', check);
-    return () => window.removeEventListener('focus', check);
+    return () => { disposed = true; window.removeEventListener('focus', check); };
   }, [workspace, snapshot?.path, fileVersion]);
 
   useEffect(() => {
-    if (findOpen) window.setTimeout(() => searchInput.current?.focus(), 0);
+    if (!findOpen) return;
+    const timer = window.setTimeout(() => searchInput.current?.focus(), 0);
+    return () => window.clearTimeout(timer);
   }, [findOpen]);
 
   // Cmd/Ctrl+S and Cmd/Ctrl+F outside CodeMirror (which handles and prevents them itself), including the detached viewer.
@@ -242,119 +237,6 @@ export function App() {
   const afterAiCommit = useEvent(() => { repo.setCommitMessage(''); void repo.refresh().catch(reportError); });
   const { commitDialog, aiModelSetup, aiErrorNotice, setAiErrorNotice, updateAiCommitSuggestions, explicitSave, regenerateCommitProposal, acceptAiCommit, cancelAiCommit, closeCommitDialog, changeProposal } = useAiCommit({ git, settings, updateSettings, commentStore, saveDocument: saveDocumentEvent, setNotice, openGitPanel, onCommitted: afterAiCommit });
 
-  async function chooseFolder() {
-    if (commentWriteBusy.current) { setNotice('Wait for the comment to finish saving.'); return; }
-    if (snapshot?.dirty && !window.confirm('Discard unsaved edits and open another folder?')) return;
-    if (!('showDirectoryPicker' in window)) { setNotice('Markroot needs a Chromium desktop browser with folder access.'); return; }
-    try {
-      const handle = await (window as Window & { showDirectoryPicker(options: { mode: 'readwrite'; id: string }): Promise<FileSystemDirectoryHandle> }).showDirectoryPicker({ mode: 'readwrite', id: 'markroot-workspace' });
-      if (await ensureDirectoryPermission(handle, true) !== 'granted') throw new Error('Read/write permission was not granted.');
-      await saveRecentWorkspace(handle);
-      await connectFolder(handle);
-    } catch (error) { reportError(error); }
-  }
-
-  async function connectFolder(handle: FileSystemDirectoryHandle) {
-    if (commentWriteBusy.current) { setNotice('Wait for the comment to finish saving.'); return; }
-    const generation = ++folderGeneration.current;
-    const superseded = () => generation !== folderGeneration.current;
-    closeCommitDialog(false);
-    commentState.clear();
-    sessionSubscription.current?.();
-    sessionSubscription.current = undefined;
-    setSession(undefined);
-    setSnapshot(undefined);
-    documentRequest.current += 1;
-    fileVersionRef.current = undefined;
-    setFileVersion(undefined);
-    resetReview();
-    setInspector((open) => open === 'review' ? undefined : open);
-    repo.reset();
-    setTrackChangesOpen(false);
-    setCitations([]);
-    setOutlineOpen(false);
-    setPreviewAnchor(undefined);
-    setSourceCursorTarget(undefined);
-    scroll.set({ target: undefined, progress: 0, origin: 'command', alignment: 'reveal' });
-    if (detachedViewerWindow.current) reattachViewer();
-    const workspaceId = await workspaceIdFor(handle).catch(() => undefined);
-    if (superseded()) return;
-    const next = new FileSystemAccessWorkspace(handle, workspaceId ? { id: workspaceId } : {});
-    const nextEntries = await documentEntries(next);
-    if (superseded()) return;
-    workspaceIdRef.current = workspaceId;
-    setWorkspace(next);
-    setRootName(handle.name);
-    setEntries(nextEntries);
-    const bibliographyPaths = nextEntries.filter((entry) => entry.kind === 'file' && /\.(?:bib|bibtex)$/i.test(entry.path)).map((entry) => entry.path);
-    const records = await new LocalCitationProvider(next).index(bibliographyPaths).catch(() => []);
-    if (superseded()) return;
-    setCitations(records);
-    const configured = await repo.connect(new IsomorphicGitRepository(next), superseded);
-    if (superseded()) return;
-    const latest = settingsRef.current;
-    if (configured && (configured.displayName || configured.email)) updateSettings({ ...latest, profile: { ...latest.profile, ...configured } });
-    setNotice(`Opened ${handle.name}. Files stay on this device.${skippedEntriesNotice(next.skippedEntries)}`);
-  }
-
-  const openWorkspaceLink = useEvent((path: string) => {
-    const entry = entries.find((item) => item.kind === 'file' && item.path === path);
-    if (!entry) { setNotice(`${path} is not a file in this folder.`); return; }
-    if (/\.(?:md|qmd|markdown|txt|bib|bibtex|ya?ml)$/i.test(path)) void openFile(entry.path);
-    else setNotice(`${path} cannot be opened in Markroot.`);
-  });
-
-  async function openFile(path: WorkspacePath) {
-    if (!workspace || !commentStore) return;
-    if (commentWriteBusy.current) { setNotice('Wait for the comment to finish saving.'); return; }
-    if (snapshot?.dirty) {
-      if (!window.confirm('Discard unsaved edits and open another file?')) return;
-      await deletePendingSession(pendingWorkspace(), snapshot.path).catch(() => undefined);
-    }
-    const request = commentState.beginLoad();
-    documentRequest.current += 1;
-    try {
-      const source = await workspace.readFile(path);
-      const stat = await workspace.stat(path);
-      const base = git ? await git.readFileAtRef(path, 'HEAD').catch(() => '') : undefined;
-      const pending = await loadPendingSession(pendingWorkspace(), path).catch(() => undefined);
-      const diskChanged = pending?.baseVersion !== undefined && pending.baseVersion !== stat.version;
-      const restore = pending?.source !== undefined && pending.source !== source && window.confirm(`Recover browser-local edits from ${new Date(pending.updatedAt).toLocaleString()}?${diskChanged ? `\n\nWarning: ${path} changed on disk after these edits were made. Recovering replaces the newer disk version once saved.` : ''}`);
-      if (pending && !restore) await deletePendingSession(pendingWorkspace(), path).catch(() => undefined);
-      const selectedSource = restore && pending ? pending.source : source;
-      const legacy = parseComments(selectedSource);
-      // Browser recovery stores clean prose; keep migration data from the original disk file.
-      const diskLegacy = parseComments(source);
-      const legacyCommit = legacy.threads.length || diskLegacy.threads.length ? (git ? (await git.history(1).catch(() => []))[0]?.oid ?? null : null) : null;
-      const diskThreads = diskLegacy.threads.filter((thread) => !legacy.threads.some((item) => item.id === thread.id));
-      const legacyRevision = legacy.threads.length ? await commentRevision(legacy.cleanSource, legacyCommit) : undefined;
-      const diskRevision = diskThreads.length ? await commentRevision(diskLegacy.cleanSource, legacyCommit) : undefined;
-      const migrationThreads = [
-        ...legacy.threads.map((thread) => ({ ...thread, sourceRevision: legacyRevision! })),
-        ...diskThreads.map((thread) => ({ ...thread, sourceRevision: diskRevision! })),
-      ];
-      const { threads: sidecars, broken } = await commentStore.loadWithIssues(path);
-      if (!commentState.isCurrentLoad(request)) return;
-      const brokenNotice = commentState.adopt(sidecars, migrationThreads, broken, path);
-      sessionSubscription.current?.();
-      const next = new DocumentSession(path, source);
-      sessionSubscription.current = next.subscribe(setSnapshot);
-      setSession(next);
-      if (legacy.cleanSource !== source) next.replace(legacy.cleanSource, 'system');
-      const firstBlock = next.snapshot().blocks.find((block) => block.kind !== 'frontmatter') ?? next.snapshot().blocks[0];
-      setFileVersion(stat.version);
-      setGitBase(base === undefined ? undefined : { path, source: base });
-      setTrackChangesOpen(false);
-      resetReview();
-      scroll.set({ target: firstBlock?.id, progress: 0, origin: 'command', alignment: 'reveal' });
-      setSourceCursorTarget(undefined);
-      setActiveCommentId(undefined);
-      setOutlineOpen(false);
-      setPreviewAnchor(undefined);
-      setNotice([migrationThreads.length ? 'Embedded comments will move to YAML sidecars when you save. The editor now shows clean Markdown.' : undefined, brokenNotice].filter(Boolean).join(' ') || undefined);
-    } catch (error) { reportError(error); }
-  }
-
   const copyWorkspacePath = useEvent(async (path: WorkspacePath) => {
     try {
       await copyText(path);
@@ -367,55 +249,6 @@ export function App() {
     if (session && current && source !== current.source) session.replace(source, origin);
   }, [session]);
 
-  const selectSource = useCallback((range: SourceRange) => {
-    setSelection(range);
-    setSourceCursorTarget(undefined);
-    const draft = reviewRef.current;
-    const navigationSnapshot = draft ? reviewPreviewSnapshotRef.current : snapshotRef.current;
-    const navigationOffset = draft ? mapReviewCurrentOffset(draft, range.from) : range.from;
-    const block = navigationSnapshot ? documentBlockAt(navigationSnapshot.blocks, navigationOffset) : undefined;
-    if (!block) return;
-    scroll.set({ origin: 'source', alignment: 'reveal', target: block.id, progress: blockProgress(navigationOffset, block) });
-  }, [scroll]);
-
-  const navigateFromRight = useCallback((blockId: string, sourceOffset?: number) => {
-    const draft = reviewRef.current;
-    const navigationSnapshot = draft ? reviewPreviewSnapshotRef.current : snapshotRef.current;
-    const block = navigationSnapshot?.blocks.find((candidate) => candidate.id === blockId);
-    const comparePosition = block ? Math.max(block.from, Math.min(sourceOffset ?? block.from, block.to)) : sourceOffset;
-    const position = draft && comparePosition !== undefined ? mapReviewCompareOffset(draft, comparePosition) : comparePosition;
-    scroll.set({ origin: 'right', alignment: 'reveal', target: blockId, progress: block && comparePosition !== undefined ? blockProgress(comparePosition, block) : 0 });
-    setSourceCursorTarget(undefined);
-    if (position !== undefined) window.setTimeout(() => setSourceCursorTarget(position), 0);
-  }, [scroll]);
-
-  const selectFromRight = useCallback((range: SourceRange) => {
-    const draft = reviewRef.current;
-    const currentRange = draft
-      ? { from: mapReviewCompareOffset(draft, range.from), to: mapReviewCompareOffset(draft, range.to) }
-      : range;
-    setSelection(currentRange);
-    setSourceCursorTarget(undefined);
-    const navigationSnapshot = draft ? reviewPreviewSnapshotRef.current : snapshotRef.current;
-    const block = navigationSnapshot ? documentBlockAt(navigationSnapshot.blocks, range.from) : undefined;
-    if (!block) return;
-    scroll.set({ origin: 'right', alignment: 'reveal', target: block.id, progress: blockProgress(range.from, block) });
-  }, [scroll]);
-
-  const navigateFromSourceScroll = useCallback((blockId: string, progress: number) => {
-    const currentSnapshot = snapshotRef.current;
-    const sourceBlock = currentSnapshot?.blocks.find((block) => block.id === blockId);
-    const currentOffset = sourceBlock
-      ? sourceBlock.from + Math.round((sourceBlock.to - sourceBlock.from) * progress)
-      : undefined;
-    const draft = reviewRef.current;
-    const compareOffset = draft && currentOffset !== undefined ? mapReviewCurrentOffset(draft, currentOffset) : currentOffset;
-    const navigationSnapshot = draft ? reviewPreviewSnapshotRef.current : currentSnapshot;
-    const block = navigationSnapshot && compareOffset !== undefined ? documentBlockAt(navigationSnapshot.blocks, compareOffset) : undefined;
-    setSourceCursorTarget(undefined);
-    scroll.set({ origin: 'source', alignment: 'center', progress: block && compareOffset !== undefined ? blockProgress(compareOffset, block) : progress, target: block?.id ?? blockId });
-  }, [scroll]);
-
   const resizeLayout = useCallback((patch: Pick<MarkrootSettings, 'filesPaneWidth'> | Pick<MarkrootSettings, 'sourcePaneRatio'>, finished: boolean) => {
     const next = { ...settingsRef.current, ...patch };
     settingsRef.current = next;
@@ -426,14 +259,6 @@ export function App() {
   const resizeSourcePane = useCallback((value: number, finished: boolean) => resizeLayout({ sourcePaneRatio: value }, finished), [resizeLayout]);
   const workspacePaneWidth = useCallback(() => workspacePane.current?.clientWidth ?? 1, []);
 
-  const navigateOutline = useCallback((item: DocumentOutlineItem) => {
-    setRightMode('preview');
-    scroll.set({ origin: 'right', alignment: 'reveal', target: item.blockId, progress: 0 });
-    setSourceCursorTarget(undefined);
-    window.setTimeout(() => setSourceCursorTarget(item.from), 0);
-    setPreviewAnchor((current) => ({ id: item.id, request: (current?.request ?? 0) + 1 }));
-  }, [scroll]);
-
   const applyVisualBlock = useCallback((block: DocumentBlock, replacement: string) => {
     if (!session) return;
     const current = session.snapshot();
@@ -441,58 +266,6 @@ export function App() {
     if (!live) { setNotice('That block changed before the visual edit could be applied.'); return; }
     session.apply({ from: live.from, to: live.to, insert: replacement, origin: 'visual', baseRevision: current.revision });
   }, [session]);
-
-  function pendingWorkspace() { return workspaceIdRef.current ? { id: workspaceIdRef.current, name: rootName } : rootName; }
-
-  // Saves run one at a time so overlapping autosave, Cmd+S and comment saves never race on the file version.
-  function saveDocument(): Promise<DocumentSnapshot | undefined> {
-    const queued = saveQueue.current.then(() => writeDocument(), () => writeDocument());
-    saveQueue.current = queued;
-    return queued;
-  }
-
-  async function writeDocument(): Promise<DocumentSnapshot | undefined> {
-    if (!workspace || !session) return undefined;
-    const current = session.snapshot();
-    if (!current.dirty && !legacyComments.current.length) return current;
-    const migration = legacyComments.current;
-    const context = documentRequest.current;
-    let brokenNotice: string | undefined;
-    try {
-      if (migration.length && commentStore) {
-        const commit = git ? (await git.history(1).catch(() => []))[0]?.oid ?? null : null;
-        await commentStore.importLegacy(current.path, migration, await commentRevision(current.source, commit));
-        // Validate persisted sidecars before removing legacy data.
-        const { broken } = await commentStore.loadWithIssues(current.path);
-        if (broken.some((item) => !item.document || item.document === current.path || migration.some((thread) => thread.id === item.id))) throw new Error('Some comment files could not be read back; legacy comments were kept in the document.');
-      }
-      const stat = await workspace.writeFileGuarded(current.path, current.source, fileVersionRef.current);
-      if (context !== documentRequest.current) return current;
-      fileVersionRef.current = stat.version;
-      if (migration.length && commentStore) {
-        const loaded = await commentStore.loadWithIssues(current.path);
-        brokenNotice = commentState.adopt(loaded.threads, [], loaded.broken, current.path);
-      }
-      setFileVersion(stat.version);
-      session.markSaved(current.revision);
-      await deletePendingSession(pendingWorkspace(), current.path).catch(() => undefined);
-      if (/\.(?:bib|bibtex)$/i.test(current.path)) await loadCitations();
-      setNotice(brokenNotice ? `Saved ${current.path}. ${brokenNotice}` : `Saved ${current.path}.`);
-    } catch (error) { reportError(error); return undefined; }
-    // A status refresh failure is not a save failure.
-    repo.refreshStatus();
-    return current;
-  }
-
-  async function refreshWorkspace() {
-    if (!workspace) return;
-    setEntries(await documentEntries(workspace));
-    await commentState.reload();
-    if (git) {
-      setGitStatus(await git.status());
-      await repo.readBase();
-    }
-  }
 
   const checkoutBranch = useEvent(async (ref: string) => {
     if (!git) return;
@@ -552,14 +325,6 @@ export function App() {
     if (match.blockId) scroll.set({ origin: 'command', alignment: 'reveal', progress: 0, target: match.blockId });
   }
 
-  async function loadCitations() {
-    if (!workspace) return;
-    const paths = entries.filter((entry) => entry.kind === 'file' && /\.(?:bib|bibtex)$/i.test(entry.path)).map((entry) => entry.path);
-    const provider = new LocalCitationProvider(workspace);
-    try { setCitations(await provider.index(paths)); }
-    catch (error) { reportError(error); }
-  }
-
   const toggleInspector = (next: Exclude<Inspector, undefined>) => {
     if (review && next !== 'review') resetReview();
     setInspector((current) => current === next ? undefined : next);
@@ -608,7 +373,7 @@ export function App() {
   const changeOutlineDepth = useEvent((outlineDepth: MarkrootSettings['outlineDepth']) => updateSettings({ ...settingsRef.current, outlineDepth }));
   const changeOutlineFigures = useEvent((outlineShowFigures: boolean) => updateSettings({ ...settingsRef.current, outlineShowFigures }));
   const closeOutline = useCallback(() => setOutlineOpen(false), []);
-  const openWorkspaceFile = useEvent((path: WorkspacePath) => { void openFile(path); });
+  const openWorkspaceFile = useEvent((path: WorkspacePath) => { void openFile(path).catch(reportError); });
   const copyPath = useEvent((path: WorkspacePath) => { void copyWorkspacePath(path); });
   const toggleTrackChanges = useCallback(() => setTrackChangesOpen((open) => !open), []);
   const trackChangesToggle = <TrackChangesToggle reviewing={Boolean(review)} open={trackChangesOpen} visible={trackedChangesVisible} disabled={trackChangesUnavailable} onToggle={toggleTrackChanges}/>;
@@ -634,7 +399,7 @@ export function App() {
   return <><div className={`app ${inspector ? 'with-inspector' : ''}`} style={{ '--files-width': `${settings.filesPaneWidth}px` } as CSSProperties}>
     <header className="topbar">
       <div className="brand" aria-label="Markroot"><BrandMark className="brand-mark"/><strong>Markroot</strong></div>
-      <button className="workspace-button" onClick={() => void chooseFolder()} title="Open another folder"><Files size={16}/><span>{rootName}</span><ChevronRight size={14}/></button>
+      <button className="workspace-button" onClick={() => void chooseFolder().catch(reportError)} title="Open another folder"><Files size={16}/><span>{rootName}</span><ChevronRight size={14}/></button>
       <div className="document-title"><FileCode2 size={16}/><span>{snapshot?.path ?? 'Open a Markdown or QMD file'}</span>{snapshot?.dirty && <CircleDot size={13} aria-label="Unsaved"/>}</div>
       <div className="top-actions">
         {snapshot && <button onClick={saveFromEditor} title="Save (Ctrl/Cmd+S)" aria-label="Save"><Save size={17}/></button>}
@@ -653,14 +418,14 @@ export function App() {
     <aside className="files-panel">
       <div className="panel-heading"><span>Workspace</span><div className="panel-heading-actions"><button className={outlineOpen ? 'selected' : ''} disabled={!rendered?.outline?.length} onClick={() => setOutlineOpen((open) => !open)} title="Document outline" aria-label="Document outline" aria-expanded={outlineOpen}><ListTree size={14}/></button><button onClick={() => void refreshWorkspace().catch(reportError)} title="Refresh" aria-label="Refresh workspace"><RefreshCw size={14}/></button></div></div>
       {outlineOpen && <ScrollBound store={scroll} render={(position) => <DocumentOutline items={rendered?.outline ?? []} activeBlock={position.target} maxLevel={settings.outlineDepth} showFigures={settings.outlineShowFigures} onSelect={navigateOutline} onMaxLevelChange={changeOutlineDepth} onShowFiguresChange={changeOutlineFigures} onClose={closeOutline}/>}/>}
-      {!workspace ? <div className="empty-files"><div className="folder-illustration"><Files size={28}/></div><h2>Open a working folder</h2><p>Markroot reads and writes the folder directly. Nothing is uploaded.</p><button className="primary" onClick={() => void chooseFolder()}>Choose folder</button></div>
+      {!workspace ? <div className="empty-files"><div className="folder-illustration"><Files size={28}/></div><h2>Open a working folder</h2><p>Markroot reads and writes the folder directly. Nothing is uploaded.</p><button className="primary" onClick={() => void chooseFolder().catch(reportError)}>Choose folder</button></div>
       : <WorkspaceTree key={rootName} entries={entries} activePath={snapshot?.path} gitStatus={gitStatus} onOpen={openWorkspaceFile} onCopy={copyPath}/>}
       <div className="side-footer"><button onClick={() => toggleInspector('citations')} aria-pressed={inspector === 'citations'}><BookOpen size={15}/>Citations</button><span>Local only</span></div>
       <PaneResizer className="files-resizer" label="Resize workspace tree" value={settings.filesPaneWidth} min={180} max={420} keyboardStep={12} onChange={resizeFilesPane}/>
     </aside>
 
     <main className={`workspace ${detachedViewerRoot ? 'viewer-detached' : ''}`} ref={workspacePane} style={{ '--source-width': `${settings.sourcePaneRatio * 100}%` } as CSSProperties}>
-      {!presentedSnapshot ? <div className="welcome"><BrandMark className="welcome-symbol"/><h1>Your local writing workspace</h1><p>Choose a folder, then open a Markdown or QMD file. Source, preview, comments, and Git stay together on this device.</p>{!workspace && <button className="primary" onClick={() => void chooseFolder()}>Open folder</button>}</div>
+      {!presentedSnapshot ? <div className="welcome"><BrandMark className="welcome-symbol"/><h1>Your local writing workspace</h1><p>Choose a folder, then open a Markdown or QMD file. Source, preview, comments, and Git stay together on this device.</p>{!workspace && <button className="primary" onClick={() => void chooseFolder().catch(reportError)}>Open folder</button>}</div>
       : <>
         <section className="pane source-pane"><div className="pane-title"><Code2 size={15}/><span>{review ? 'Source · branch review' : 'Source'}</span>{trackChangesToggle}<span className="spacer"/>{detachedViewerRoot && <><button className="detached-indicator" onClick={() => detachedViewerWindow.current?.focus()} title="Focus the detached viewer"><ExternalLink size={13}/>Viewer detached</button><button className="viewer-option" onClick={reattachViewer} title="Return viewer to this window" aria-label="Reattach viewer"><Columns2 size={15}/></button></>}<span>{settings.sourceFontSize}px · Ln {currentLine}</span></div><ScrollBound store={scroll} render={(position) => { const location = sourceScrollLocation(position, review, reviewPreviewSnapshot, presentedSnapshot); return <SourceEditor key={presentedSnapshot.path} path={presentedSnapshot.path} workspacePaths={workspacePaths} value={presentedSnapshot.source} comparisonBase={review ? undefined : comparisonBaseSource} trackChangesOverride={reviewTrackChanges} showTrackChanges={trackedChangesVisible} activeTrackChange={activeSourceTrackChange} readOnly={Boolean(review)} blocks={presentedSnapshot.blocks} search={search} regularExpression={regularExpression} dark={dark} fontFamily={settings.sourceFont} fontSize={settings.sourceFontSize} activeBlock={location.target} scrollTarget={position.origin === 'source' ? undefined : location.target} scrollProgress={location.progress} scrollAlignment={position.alignment} cursorTarget={sourceCursorTarget} goToLine={goToLine} onChange={applySource} onSelection={selectSource} onTrackChangeActivate={selectReviewChange} onScroll={navigateFromSourceScroll} onSave={saveFromEditor} onFind={openFind}/>; }}/></section>
         {!detachedViewerRoot && <><PaneResizer label="Resize source and viewer panes" value={settings.sourcePaneRatio} min={0.25} max={0.75} keyboardStep={0.02} pixelsPerUnit={workspacePaneWidth} onChange={resizeSourcePane}/><section className="pane right-pane">{viewerToolbar(false)}<div className="right-scroll">{renderViewerContent()}</div></section></>}
@@ -675,7 +440,7 @@ export function App() {
       {inspector === 'export' && <ExportPanel disabled={!snapshot} busy={exports.busy} progress={exports.progress} onCancel={exports.cancel} onExport={exports.exportDocument}/>}
       {inspector === 'settings' && <SettingsPanel settings={settings} aiModelSetup={aiModelSetup} onChange={updateSettings} onAiCommitSuggestionsChange={updateAiCommitSuggestions}/>}
     </aside>}
-  </div>{commitDialog && <CommitProposalDialog phase={commitDialog.phase} progress={commitDialog.progress} proposal={commitDialog.proposal} fileCount={commitDialog.candidate?.paths.length ?? 0} ignored={commitDialog.candidate?.ignored} onProposalChange={changeProposal} onAccept={() => void acceptAiCommit()} onRegenerate={() => void regenerateCommitProposal()} onCancel={cancelAiCommit}/>} {detachedViewerRoot && createPortal(<main className="detached-viewer"><div className="detached-viewer-title"><BrandMark className="detached-viewer-mark"/><strong>Markroot</strong><span>{snapshot?.path ?? 'Viewer'}</span></div>{viewerToolbar(true)}<div className="right-scroll">{renderViewerContent()}</div></main>, detachedViewerRoot)}</>;
+  </div>{commitDialog && <CommitProposalDialog phase={commitDialog.phase} progress={commitDialog.progress} proposal={commitDialog.proposal} fileCount={commitDialog.candidate?.paths.length ?? 0} ignored={commitDialog.candidate?.ignored} onProposalChange={changeProposal} onAccept={() => void acceptAiCommit().catch(reportError)} onRegenerate={() => void regenerateCommitProposal().catch(reportError)} onCancel={cancelAiCommit}/>} {detachedViewerRoot && createPortal(<main className="detached-viewer"><div className="detached-viewer-title"><BrandMark className="detached-viewer-mark"/><strong>Markroot</strong><span>{snapshot?.path ?? 'Viewer'}</span></div>{viewerToolbar(true)}<div className="right-scroll">{renderViewerContent()}</div></main>, detachedViewerRoot)}</>;
 }
 
 /** Re-renders only its pane when the shared scroll position changes, instead of the whole app. */
@@ -697,26 +462,6 @@ function sourceScrollLocation(position: ScrollState, review: ReviewDraft | undef
   const currentOffset = mapReviewCompareOffset(review, compareOffset);
   const currentBlock = documentBlockAt(presented.blocks, currentOffset);
   return currentBlock ? { target: currentBlock.id, progress: blockProgress(currentOffset, currentBlock) } : { target: undefined, progress: 0 };
-}
-
-async function documentEntries(workspace: GuardedWorkspace): Promise<readonly WorkspaceEntry[]> {
-  const result: WorkspaceEntry[] = [];
-  const visit = async (parent?: WorkspacePath) => {
-    for (const entry of await workspace.listFiles(parent)) {
-      const name = entry.path.split('/').at(-1)!;
-      if (entry.kind === 'directory') {
-        if (!['.git', '.markroot', 'node_modules', '.quarto', '_freeze'].includes(name)) { result.push(entry); await visit(entry.path); }
-      } else result.push(entry);
-    }
-  };
-  await visit();
-  return result.sort((a, b) => a.path.localeCompare(b.path));
-}
-
-function skippedEntriesNotice(skipped: ReadonlySet<string>): string {
-  if (!skipped.size) return '';
-  const names = [...skipped].slice(0, 3).join(', ');
-  return ` ${skipped.size} item(s) were skipped because Markroot cannot address their names: ${names}${skipped.size > 3 ? ', …' : ''}.`;
 }
 
 function isAbortError(error: unknown): boolean { return error instanceof DOMException && error.name === 'AbortError'; }

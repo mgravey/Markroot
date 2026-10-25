@@ -23,7 +23,7 @@ export function useGitRepository({ openPath, dirty, profile, reloadComments, set
   const [history, setHistory] = useState<readonly GitCommitSummary[]>([]);
   const [commitMessage, setCommitMessage] = useState('');
 
-  const reset = useEvent(() => { setGit(undefined); setGitBase(undefined); });
+  const reset = useEvent(() => { setGit(undefined); setGitBase(undefined); setGitStatus([]); setBranches([]); setCurrentBranch(undefined); setHistory([]); setGitError(undefined); setCommitMessage(''); });
 
   /** Loads a newly opened folder's repository; returns its configured author unless a newer folder superseded it. */
   const connect = useEvent(async (repository: IsomorphicGitRepository, superseded: () => boolean): Promise<Awaited<ReturnType<IsomorphicGitRepository['configuredAuthor']>> | undefined> => {

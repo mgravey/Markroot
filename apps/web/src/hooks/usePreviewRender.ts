@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { DocumentSession, type DocumentSnapshot } from '@markroot/document';
 import { BasicDocumentEngine, type RenderArtifact } from '@markroot/rendering';
 import type { GuardedWorkspace } from '@markroot/workspace';
 import type { CitationRecord } from '@markroot/citations';
-import { collectPreviewResources, PreviewResourceCache } from '../document-resources.js';
+import { collectPreviewResources, PreviewResourceCache, PreviewUrlCache } from '../document-resources.js';
 
 interface Options {
   readonly previewSnapshot: DocumentSnapshot | undefined;
@@ -19,28 +19,31 @@ interface Options {
 export function usePreviewRender({ previewSnapshot, workspace, citations, allowRemoteResources, baseSource, reportError }: Options) {
   const engine = useMemo(() => new BasicDocumentEngine(), []);
   const resources = useMemo(() => new PreviewResourceCache(), []);
-  const [rendered, setRendered] = useState<RenderArtifact>();
+  const urls = useMemo(() => new PreviewUrlCache(), []);
+  const [result, setResult] = useState<{ artifact: RenderArtifact; release(): void }>();
   const [renderedBaseHtml, setRenderedBaseHtml] = useState<string>();
-  const renderedRef = useRef<RenderArtifact | undefined>(undefined);
-  renderedRef.current = rendered;
-
-  useEffect(() => () => revokeArtifact(renderedRef.current), []);
+  // Passive cleanup runs after React has replaced the old HTML in both viewer windows.
+  useEffect(() => () => result?.release(), [result]);
   // Cached blobs belong to one folder.
   useEffect(() => () => resources.clear(), [workspace, resources]);
 
   useEffect(() => {
-    if (!previewSnapshot || !/\.(?:md|qmd)$/i.test(previewSnapshot.path)) { setRendered((current) => { revokeArtifact(current); return undefined; }); return; }
+    if (!previewSnapshot || !/\.(?:md|qmd)$/i.test(previewSnapshot.path)) { setResult(undefined); return; }
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
-      void collectPreviewResources(workspace, previewSnapshot, resources, controller.signal).then((dependencies) => engine.render({ snapshot: previewSnapshot, dependencies, citations, allowRemoteResources }, { signal: controller.signal }))
-        .then((artifact) => {
-          if (controller.signal.aborted) { revokeArtifact(artifact); return; }
-          setRendered((current) => { revokeArtifact(current); return artifact; });
-        })
-        .catch((error) => { if (!controller.signal.aborted) reportError(error); });
+      void (async () => {
+        const dependencies = await collectPreviewResources(workspace, previewSnapshot, resources, controller.signal);
+        if (controller.signal.aborted) return;
+        const lease = urls.acquire(dependencies);
+        try {
+          const artifact = await engine.render({ snapshot: previewSnapshot, dependencies: lease.dependencies, citations, allowRemoteResources }, { signal: controller.signal });
+          if (controller.signal.aborted) { lease.release(); return; }
+          setResult({ artifact, release: lease.release });
+        } catch (error) { lease.release(); throw error; }
+      })().catch((error: unknown) => { if (!controller.signal.aborted) reportError(error); });
     }, 120);
     return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [previewSnapshot, engine, allowRemoteResources, workspace, citations]);
+  }, [previewSnapshot, engine, allowRemoteResources, workspace, citations, resources, urls, reportError]);
 
   useEffect(() => {
     if (!previewSnapshot || baseSource === undefined) { setRenderedBaseHtml(undefined); return; }
@@ -52,7 +55,6 @@ export function usePreviewRender({ previewSnapshot, workspace, citations, allowR
     return () => controller.abort();
   }, [previewSnapshot?.path, baseSource, engine, citations, allowRemoteResources]);
 
-  return { rendered, renderedBaseHtml };
+  return { rendered: result?.artifact, renderedBaseHtml };
 }
 
-function revokeArtifact(artifact: RenderArtifact | undefined): void { artifact?.objectUrls?.forEach((url) => URL.revokeObjectURL(url)); }

@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { throwIfAborted, type SourceRange, type WorkspacePath } from '@markroot/core';
 import { documentBlockAt, DocumentSession, type DocumentSnapshot } from '@markroot/document';
 import type { GitCommitSummary, IsomorphicGitRepository } from '@markroot/git';
@@ -33,6 +33,8 @@ export function useReview({ git, workspace, snapshot, scroll, setSelection, setS
   const [activeChangeId, setActiveChangeId] = useState<string>();
   const controller = useRef<AbortController | undefined>(undefined);
   const request = useRef(0);
+
+  useEffect(() => () => { controller.current?.abort(); request.current += 1; }, []);
 
   const presentation = useMemo(() => review ? materializeReviewPresentation(review) : undefined, [review]);
   const presentedSnapshot = useMemo(() => presentation && snapshot ? new DocumentSession(snapshot.path, presentation.current).snapshot() : snapshot, [presentation?.current, snapshot]);
@@ -80,6 +82,7 @@ export function useReview({ git, workspace, snapshot, scroll, setSelection, setS
     const { signal } = active;
     const id = ++request.current;
     const current = () => !signal.aborted && request.current === id;
+    setAttributionBusy(false);
     setNotice('Computing branch changes…');
     try {
       const [base, compared, fingerprint] = await Promise.all([
@@ -87,6 +90,7 @@ export function useReview({ git, workspace, snapshot, scroll, setSelection, setS
         git.readFileAtRef(snapshot.path, ref),
         git.fingerprint(),
       ]);
+      throwIfAborted({ signal });
       const nextReview = await createReviewDraftInWorker(base, compared, fingerprint, { signal });
       if (!current()) return;
       if (nextReview.tooLarge) { setNotice(`The differences between ${ref} and the current branch in ${snapshot.path} are too large to review inline. Compare smaller changes, or merge with Git and resolve the result directly.`); return; }
@@ -117,9 +121,11 @@ export function useReview({ git, workspace, snapshot, scroll, setSelection, setS
 
   const apply = useEvent(async () => {
     if (!review || !snapshot || !workspace || !git) return;
+    const context = request.current;
     try {
       if (await git.fingerprint() !== review.baseFingerprint) throw new Error('Repository state changed after this review started. Reopen the comparison.');
       if (await workspace.readFile(snapshot.path) !== review.base) throw new Error('The working file changed after this review started. Reopen the comparison.');
+      if (context !== request.current) return;
       const result = materializeReview(review);
       reset();
       applySource(result, 'review');

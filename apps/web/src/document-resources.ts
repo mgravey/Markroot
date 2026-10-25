@@ -35,23 +35,53 @@ export class PreviewResourceCache {
   get size(): number { return this.entries.size; }
 }
 
+/** Leases keep shared URLs alive until every rendered artifact using them has left the DOM. */
+export class PreviewUrlCache {
+  private entries = new Map<Blob, { url: string; references: number }>();
+
+  acquire(resources: readonly ExportResource[]) {
+    const held: Blob[] = [];
+    const dependencies = resources.map((resource) => {
+      const blob = resource.content instanceof Blob ? resource.content : new Blob([resource.content]);
+      let entry = this.entries.get(blob);
+      if (!entry) { entry = { url: URL.createObjectURL(blob), references: 0 }; this.entries.set(blob, entry); }
+      entry.references += 1;
+      held.push(blob);
+      return { ...resource, objectUrl: entry.url };
+    });
+    let released = false;
+    return { dependencies, release: () => {
+      if (released) return;
+      released = true;
+      for (const blob of held) {
+        const entry = this.entries.get(blob)!;
+        if (--entry.references === 0) { URL.revokeObjectURL(entry.url); this.entries.delete(blob); }
+      }
+    } };
+  }
+}
+
 export async function collectPreviewResources(workspace: GuardedWorkspace | undefined, snapshot: DocumentSnapshot, cache: PreviewResourceCache, signal?: AbortSignal): Promise<readonly ExportResource[]> {
   if (!workspace) return [];
   const resources: ExportResource[] = [];
   const seen = new Set<string>();
   const context = signal ? { signal } : undefined;
+  throwIfAborted(context);
   cache.begin();
   for (const match of snapshot.source.matchAll(IMAGE_REFERENCE)) {
+    throwIfAborted(context);
     const reference = unwrapReference(match[1]!);
     if (NON_LOCAL_REFERENCE.test(reference) || seen.has(reference)) continue;
     seen.add(reference);
     try {
       const path = resolveWorkspaceReference(snapshot.path, reference);
       const stat = await workspace.stat(path, context);
+      throwIfAborted(context);
       if (stat.kind !== 'file') continue;
       const version = stat.version ?? `${stat.modifiedAt ?? 'unknown'}:${stat.size}`;
       const content = await cache.get(path, version, async () => {
         const bytes = await workspace.readBytes(path, context);
+        throwIfAborted(context);
         const localFile = new Blob([bytes.slice()], { type: mediaTypeForPath(path) });
         if (!isPdfFigurePath(path)) return localFile;
         try { return await renderPdfFigurePreview(localFile, `${path}:${version}`); }

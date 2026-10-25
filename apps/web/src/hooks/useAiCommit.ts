@@ -112,14 +112,15 @@ export function useAiCommit({ git, settings, updateSettings, commentStore, saveD
     // Until the session is handed to `prepared`, every exit path must destroy it.
     const discardPreparation = () => { void preparation.then((session) => session.destroy(), () => undefined); };
 
-    const saved = await saveDocument();
+    const saved = await saveDocument().catch((error: unknown) => { discardPreparation(); controller.abort(); closeCommitDialog(true); setAiErrorNotice(errorMessage(error)); return undefined; });
     if (!saved) {
       controller.abort();
       if (generationController.current === controller) generationController.current = undefined;
       discardPreparation();
-      setCommitDialog(undefined);
+      if (!controller.signal.aborted || generationController.current === undefined) setCommitDialog(undefined);
       return;
     }
+    if (controller.signal.aborted) { discardPreparation(); return; }
     let candidate: GitCommitCandidate | undefined;
     try {
       candidate = await git.prepareCommitCandidate(saved.path, await commentStore?.paths(saved.path as WorkspacePath));
@@ -137,6 +138,7 @@ export function useAiCommit({ git, settings, updateSettings, commentStore, saveD
       setCommitDialog(undefined);
       return;
     }
+    if (controller.signal.aborted) { discardPreparation(); return; }
     setCommitDialog((current) => current ? { ...current, candidate } : current);
     let adopted = false;
     try {

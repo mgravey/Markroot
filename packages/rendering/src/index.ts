@@ -4,7 +4,7 @@ import { stripCommentMarkup } from '@markroot/comments';
 import { throwIfAborted, type OperationContext } from '@markroot/core';
 import { closesCodeFence, mapDocumentBlocks, splitLines, type DocumentBlockKind, type DocumentSnapshot } from '@markroot/document';
 
-export interface RenderDependency { readonly path: string; readonly content: string | Blob }
+export interface RenderDependency { readonly path: string; readonly content: string | Blob; /** Borrowed URL; the caller owns its lifetime. */ readonly objectUrl?: string }
 export type RenderCitationName = { readonly family: string; readonly given?: string } | { readonly literal: string };
 export interface RenderCitation { readonly key: string; readonly title?: string; readonly author?: string; readonly authors?: readonly RenderCitationName[]; readonly year?: string; readonly doi?: string }
 /** `allowRemoteResources` must be `true` for remote http(s) images to keep their `src`; otherwise they become placeholders. */
@@ -432,7 +432,7 @@ function createResourceUrls(dependencies: readonly RenderDependency[]): { urls: 
   if (typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') return { urls, objectUrls };
   for (const dependency of dependencies) {
     const blob = dependency.content instanceof Blob ? dependency.content : new Blob([dependency.content]);
-    const url = URL.createObjectURL(blob);
+    const url = dependency.objectUrl ?? URL.createObjectURL(blob);
     objectUrls.push(url);
     const path = dependency.path.replace(/^\.\//, '');
     urls.set(path, url);

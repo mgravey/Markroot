@@ -63,3 +63,6 @@ Adobe After Effects Auto-Save/
 !.markroot/
 !.markroot/comments/
 !.markroot/comments/**
+
+# Local hook/refactor diagnostics
+.markroot-hook-debug/

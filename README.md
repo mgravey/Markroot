@@ -26,6 +26,8 @@ The visual identity uses a rooted pilcrow, with a Lottie-ready After Effects sou
 - Worker-isolated HTML/DOCX export through Pandoc WASM and PDF export through Pandoc-to-Typst plus Typst WASM, including documents and resources stored in nested folders, header-selected DOCX/HTML/Typst templates, and setting-based paragraph justification when no template styling is supplied
 - Download, native Save As, and save-beside-source export targets with visible step-by-step progress and cancellation
 - Browser-only settings, local author profiles, and IndexedDB crash-recovery drafts
+- Live system/light/dark themes, global save/find shortcuts, folder-scoped async operations, and leased preview image URLs
+- App behavior composed from workspace, save, review, navigation, comment, preview, export, and Git hooks
 - Light and dark themes
 
 Markroot deliberately does not execute QMD code cells, upload files, provide accounts, or connect to Git remotes.
