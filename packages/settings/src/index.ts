@@ -39,6 +39,8 @@ const SETTINGS_KEY = 'global';
 const WORKSPACE_KEY = 'recent-workspace';
 const WORKSPACE_IDS_KEY = 'workspace-ids';
 const PROJECTS_KEY = 'recent-projects';
+/** Bumped by every write; lets registry operations commit only if nothing changed meanwhile. */
+const VERSION_KEY = 'storage-version';
 const MAX_RECENT_PROJECTS = 12;
 const THEMES: readonly ThemePreference[] = ['system', 'light', 'dark'];
 const FONTS: readonly PaneFont[] = ['serif', 'sans', 'mono'];
@@ -205,54 +207,60 @@ let backend: SettingsBackend = indexedDbBackend;
 /** Swap persistence (tests, embedding); call without arguments to restore IndexedDB. */
 export function setSettingsBackend(next: SettingsBackend = indexedDbBackend): void { backend = next; }
 
+const localQueues = new Map<string, Promise<unknown>>();
+/**
+ * Serializes a registry read/compare/write across tabs (Web Locks) and within this tab.
+ * Each read and write is its own IndexedDB transaction: comparing directory handles awaits
+ * isSameEntry(), which is not an IndexedDB request, and Chrome rejects requests on a
+ * transaction after such an await (TransactionInactiveError) even if it has not committed yet.
+ */
 async function withSettingsLock<T>(name: string, run: () => Promise<T>): Promise<T> {
-  if (typeof navigator !== 'undefined' && navigator.locks) return navigator.locks.request(name, { mode: 'exclusive' }, run);
-  return run();
+  const locked = (): Promise<T> => typeof navigator !== 'undefined' && navigator.locks ? navigator.locks.request(name, { mode: 'exclusive' }, run) as Promise<T> : run();
+  const queued = (localQueues.get(name) ?? Promise.resolve()).then(locked);
+  localQueues.set(name, queued.catch(() => undefined));
+  return queued;
 }
 
-const backendQueues = new WeakMap<SettingsBackend, Promise<unknown>>();
-/** Custom backends retain the original get/set/delete seam; serialize their operations in-process. */
+type StagedWrite = { readonly value?: unknown; readonly deleted: boolean };
+
+/**
+ * Optimistic read/compare/write: reads use their own transactions, writes are staged and then
+ * committed in one transaction that issues only chained IDB requests, and only if no other tab
+ * wrote meanwhile (version check). Conflicts retry, so atomicity holds even without Web Locks.
+ */
 async function atomicBackend<T>(operation: (storage: SettingsBackend) => Promise<T>): Promise<T> {
-  const storage = backend;
-  if (storage === indexedDbBackend) return indexedDbTransaction(operation);
-  const next = (backendQueues.get(storage) ?? Promise.resolve()).then(() => operation(storage));
-  backendQueues.set(storage, next.catch(() => undefined));
-  return next;
+  if (backend !== indexedDbBackend) return operation(backend);
+  for (let attempt = 0; ; attempt++) {
+    const version = await getValue<number>(VERSION_KEY) ?? 0;
+    const writes = new Map<string, StagedWrite>();
+    const staged: SettingsBackend = {
+      get: async <V>(key: string) => { const write = writes.get(key); return write ? (write.deleted ? undefined : write.value as V) : getValue<V>(key); },
+      set: async <V>(key: string, value: V) => { writes.set(key, { value, deleted: false }); },
+      delete: async (key: string) => { writes.set(key, { deleted: true }); },
+    };
+    const result = await operation(staged);
+    if (!writes.size || await commitWrites(writes, version)) return result;
+    if (attempt >= 8) throw new Error('Browser settings kept changing in another tab. Try again.');
+  }
 }
 
-/** The complete registry read/compare/write shares one readwrite transaction, even without Web Locks. */
-async function indexedDbTransaction<T>(operation: (storage: SettingsBackend) => Promise<T>): Promise<T> {
+async function commitWrites(writes: ReadonlyMap<string, StagedWrite>, expectedVersion?: number): Promise<boolean> {
   const db = await database();
-  return new Promise<T>((resolve, reject) => {
+  return new Promise<boolean>((resolve, reject) => {
     const transaction = db.transaction(STORE, 'readwrite');
     const store = transaction.objectStore(STORE);
-    let finished = false;
-    let result: T;
-    transaction.oncomplete = () => resolve(result);
-    transaction.onerror = () => { finished = true; reject(transaction.error); };
-    transaction.onabort = () => { finished = true; reject(transaction.error ?? new Error('Settings transaction aborted.')); };
-    const request = <V>(value: IDBRequest<V>) => new Promise<V>((done, fail) => {
-      value.onsuccess = () => done(value.result);
-      value.onerror = () => fail(value.error);
-    });
-    const storage: SettingsBackend = {
-      get: async <V>(key: string) => await request(store.get(key)) as V | undefined,
-      set: async <V>(key: string, value: V) => { await request(store.put(value, key)); },
-      delete: async (key: string) => { await request(store.delete(key)); },
+    let committed = false;
+    transaction.oncomplete = () => resolve(committed);
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => { if (transaction.error) reject(transaction.error); else resolve(false); };
+    const current = store.get(VERSION_KEY);
+    current.onsuccess = () => {
+      const version = (current.result as number | undefined) ?? 0;
+      if (expectedVersion !== undefined && version !== expectedVersion) { transaction.abort(); return; }
+      for (const [key, write] of writes) { if (write.deleted) store.delete(key); else store.put(write.value, key); }
+      store.put(version + 1, VERSION_KEY);
+      committed = true;
     };
-    // isSameEntry() is asynchronous outside IDB. Keep a request pending until it settles;
-    // otherwise IDB auto-commits before the comparison can enqueue the registry update.
-    const keepAlive = () => {
-      if (finished) return;
-      const pending = store.get(WORKSPACE_IDS_KEY);
-      pending.onsuccess = keepAlive;
-    };
-    keepAlive();
-    void operation(storage).then((value) => { result = value; finished = true; }, (error: unknown) => {
-      finished = true;
-      reject(error);
-      try { transaction.abort(); } catch { /* A failed request may already have aborted it. */ }
-    });
   }).finally(() => db.close());
 }
 
@@ -274,25 +282,8 @@ async function getValue<T>(key: string): Promise<T | undefined> {
   }).finally(() => db.close());
 }
 
-async function setValue<T>(key: string, value: T): Promise<void> {
-  const db = await database();
-  return new Promise<void>((resolve, reject) => {
-    const transaction = db.transaction(STORE, 'readwrite');
-    transaction.objectStore(STORE).put(value, key);
-    transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(transaction.error);
-  }).finally(() => db.close());
-}
-
-async function deleteValue(key: string): Promise<void> {
-  const db = await database();
-  return new Promise<void>((resolve, reject) => {
-    const transaction = db.transaction(STORE, 'readwrite');
-    transaction.objectStore(STORE).delete(key);
-    transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(transaction.error);
-  }).finally(() => db.close());
-}
+async function setValue<T>(key: string, value: T): Promise<void> { await commitWrites(new Map([[key, { value, deleted: false }]])); }
+async function deleteValue(key: string): Promise<void> { await commitWrites(new Map([[key, { deleted: true }]])); }
 
 function pendingKey(workspace: PendingWorkspace, path: string): string { return typeof workspace === 'string' ? `pending:${workspace}:${path}` : `pending-id:${workspace.id}:${path}`; }
 function oneOf<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T { return allowed.includes(value as T) ? value as T : fallback; }

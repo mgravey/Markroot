@@ -14,6 +14,7 @@ function indexedDbFixture() {
       const id = ++nextId;
       let active = false;
       let finished = false;
+      const createdInTask = foreignTask;
       let pending = 0;
       const waiting: (() => void)[] = [];
       const transaction = {
@@ -24,12 +25,14 @@ function indexedDbFixture() {
         abort() { finished = true; setTimeout(() => { transaction.onabort?.(); advance(); }, 0); },
         objectStore() {
           const request = (kind: string, key: string, value?: unknown) => {
-            if (finished) throw new Error('TransactionInactiveError');
+            // Chrome rejects requests from an unrelated task (e.g. after isSameEntry) on an older transaction.
+            if (finished || (foreignTask && foreignTask !== createdInTask)) throw new Error('TransactionInactiveError');
             if (kind !== 'get' && mode !== 'readwrite') throw new Error('ReadOnlyError');
             pending++;
             operations.push({ transaction: id, mode, kind });
             const result = { result: undefined as unknown, onsuccess: undefined as (() => void) | undefined };
             const run = () => setTimeout(() => {
+              foreignTask = undefined; // A request callback is its own IDB task.
               if (finished) return;
               if (kind === 'put') values.set(key, value);
               if (kind === 'delete') values.delete(key);
@@ -65,10 +68,17 @@ function indexedDbFixture() {
   };
 }
 
+/** Set while continuations of a non-IDB browser task (a directory comparison) are running. */
+let foreignTask: object | undefined;
 const folder = (entry: string) => ({
   name: 'paper', entry,
   async isSameEntry(other: { entry: string }) {
-    await new Promise((resolve) => setTimeout(resolve, 5));
+    await new Promise<void>((resolve) => setTimeout(() => {
+      const task = {};
+      foreignTask = task;
+      setTimeout(() => { if (foreignTask === task) foreignTask = undefined; }, 0);
+      resolve();
+    }, 5));
     return other.entry === entry;
   },
 }) as unknown as FileSystemDirectoryHandle;
@@ -88,7 +98,7 @@ it('atomically assigns workspace ids across tabs without Web Locks, including as
   expect(same).toBe(a);
   expect(b).not.toBe(a);
   expect(db.values.get('workspace-ids')).toHaveLength(2);
-  expect(db.operations.every((operation) => operation.mode === 'readwrite')).toBe(true);
+  // Every write commits in a transaction that first re-checked the storage version.
   for (const put of db.operations.filter((operation) => operation.kind === 'put')) {
     expect(db.operations).toContainEqual({ ...put, kind: 'get' });
   }
@@ -124,5 +134,5 @@ it('migrates and remembers projects in atomic cross-tab transactions without Web
   expect((await tabA.listRecentProjects()).map((project) => project.id)).toEqual([b.id, a.id, expect.any(String)]);
   expect(db.values.get('workspace-ids')).toHaveLength(3);
   expect(db.values.has('recent-workspace')).toBe(false);
-  expect(db.operations.every((operation) => operation.mode === 'readwrite')).toBe(true);
+  for (const put of db.operations.filter((operation) => operation.kind === 'put')) expect(db.operations).toContainEqual({ ...put, kind: 'get' });
 });
