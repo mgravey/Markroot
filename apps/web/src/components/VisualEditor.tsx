@@ -4,7 +4,8 @@ import { EditorState } from 'prosemirror-state';
 import { EditorView } from 'prosemirror-view';
 import type { DocumentBlock, DocumentSnapshot } from '@markroot/document';
 import { maskMarkdownHtmlComments } from '@markroot/rendering';
-import { centeredScrollTop, isScrollKey, ScrollIntentGate, viewportCenter } from './scroll-sync.js';
+import { blockProgress, isScrollKey, ScrollIntentGate, viewportCenter } from './scroll-sync.js';
+import { centerPoint, fontStack, isHtmlElement, revealPoint, type ViewerFont } from './dom-utils.js';
 
 interface Props {
   snapshot: DocumentSnapshot;
@@ -12,7 +13,7 @@ interface Props {
   scrollTarget?: string | undefined;
   scrollProgress?: number | undefined;
   scrollAlignment: 'center' | 'reveal';
-  fontFamily: 'serif' | 'sans' | 'mono';
+  fontFamily: ViewerFont;
   fontSize: number;
   justified: boolean;
   onApply(block: DocumentBlock, replacement: string): void;
@@ -53,8 +54,7 @@ export function VisualEditor({ snapshot, activeBlock, scrollTarget, scrollProgre
         const index = blocks.indexOf(current);
         const next = blocks[index + 1];
         const start = current.getBoundingClientRect().top;
-        const span = Math.max(1, (next?.getBoundingClientRect().top ?? current.getBoundingClientRect().bottom) - start);
-        latestOnScroll.current(current.dataset.blockId!, Math.max(0, Math.min(1, (center - start) / span)));
+        latestOnScroll.current(current.dataset.blockId!, blockProgress(center, { from: start, to: next?.getBoundingClientRect().top ?? current.getBoundingClientRect().bottom }));
       });
     };
     const beginPointer = () => scrollIntent.current.beginPointer();
@@ -150,30 +150,6 @@ function lightweight(block: DocumentBlock): string {
 function stripFence(value: string): string { return value.replace(/^(```+|~~~+)[^\n]*\n?/, '').replace(/\n?(```+|~~~+)\s*$/, ''); }
 function escapeHtml(value: string): string { return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;'); }
 
-function centerPoint(container: HTMLElement, target: HTMLElement, next: HTMLElement | undefined, progress: number): boolean {
-  const viewport = container.getBoundingClientRect();
-  const rect = target.getBoundingClientRect();
-  const span = Math.max(0, (next?.getBoundingClientRect().top ?? rect.bottom) - rect.top);
-  const point = rect.top + span * Math.max(0, Math.min(1, progress));
-  const nextScrollTop = centeredScrollTop(container.scrollTop, point - viewport.top, viewport.height, container.scrollHeight);
-  if (Math.abs(nextScrollTop - container.scrollTop) <= 1) return false;
-  container.scrollTop = nextScrollTop;
-  return true;
-}
-
-function revealPoint(container: HTMLElement, target: HTMLElement, next: HTMLElement | undefined, progress: number): boolean {
-  const viewport = container.getBoundingClientRect();
-  const rect = target.getBoundingClientRect();
-  const span = Math.max(0, (next?.getBoundingClientRect().top ?? rect.bottom) - rect.top);
-  const point = rect.top + span * Math.max(0, Math.min(1, progress));
-  const margin = Math.min(48, viewport.height * .12);
-  if (point >= viewport.top + margin && point <= viewport.bottom - margin) return false;
-  const nextScrollTop = centeredScrollTop(container.scrollTop, point - viewport.top, viewport.height, container.scrollHeight);
-  if (Math.abs(nextScrollTop - container.scrollTop) <= 1) return false;
-  container.scrollTop = nextScrollTop;
-  return true;
-}
-
 function visualSourceOffset(event: ReactMouseEvent<HTMLElement>, block: DocumentBlock): number {
   const ownerDocument = event.currentTarget.ownerDocument;
   const caret = ownerDocument.caretPositionFromPoint?.(event.clientX, event.clientY);
@@ -188,14 +164,4 @@ function visualSourceOffset(event: ReactMouseEvent<HTMLElement>, block: Document
   const rendered = event.currentTarget.textContent ?? '';
   const ratio = range.toString().length / Math.max(1, rendered.length);
   return Math.min(block.to, block.from + Math.round((block.to - block.from) * ratio));
-}
-
-function fontStack(font: Props['fontFamily']): string {
-  if (font === 'mono') return '"IBM Plex Mono", "SFMono-Regular", Consolas, monospace';
-  if (font === 'sans') return '"Manrope", system-ui, sans-serif';
-  return '"Source Serif 4", Georgia, serif';
-}
-
-function isHtmlElement(value: unknown): value is HTMLElement {
-  return typeof value === 'object' && value !== null && 'nodeType' in value && (value as Node).nodeType === 1;
 }

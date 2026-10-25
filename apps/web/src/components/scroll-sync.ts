@@ -10,6 +10,11 @@ export function viewportCenter(viewport: VerticalViewport): number {
   return viewport.top + viewport.height / 2;
 }
 
+/** Relative position of a source offset inside a block, clamped to 0..1. */
+export function blockProgress(position: number, block: { from: number; to: number }): number {
+  return Math.max(0, Math.min(1, (position - block.from) / Math.max(1, block.to - block.from)));
+}
+
 /**
  * Returns the scroll position that places a point at the viewport midpoint.
  * Browser-like clamping keeps the beginning and end of the document reachable.

@@ -1,10 +1,11 @@
 import { useEffect, useRef } from 'react';
-import DOMPurify from 'dompurify';
 import type { ParsedComments } from '@markroot/comments';
 import type { SourceRange } from '@markroot/core';
 import { documentBlockAt, type DocumentBlock } from '@markroot/document';
-import { centeredScrollTop, isScrollKey, ScrollIntentGate, viewportCenter } from './scroll-sync.js';
+import { blockProgress, isScrollKey, ScrollIntentGate, viewportCenter } from './scroll-sync.js';
+import { centerPoint, fontStack, isHtmlElement, revealPoint, type ViewerFont } from './dom-utils.js';
 import { mapRenderedOffset, mapSourceOffset, opensExternalPage, protectLocalObjectUrls, resolveWorkspaceLink, trustedDoiUrl } from './preview-utils.js';
+import { replaceBlockedImages, sanitizePreviewHtml } from './preview-sanitize.js';
 import { applyRenderedTrackChanges, type RenderedReviewChange } from '../rendered-track-changes.js';
 
 interface Props {
@@ -20,7 +21,7 @@ interface Props {
   scrollAlignment: 'center' | 'reveal';
   anchorTarget?: Readonly<{ id: string; request: number }> | undefined;
   allowRemoteResources: boolean;
-  fontFamily: 'serif' | 'sans' | 'mono';
+  fontFamily: ViewerFont;
   fontSize: number;
   justified: boolean;
   trackChangesBaseHtml?: string | undefined;
@@ -59,14 +60,17 @@ export function Preview({ html, objectUrls, warnings, blocks, search, regularExp
     style.textContent = previewStyle;
     const article = ownerDocument.createElement('article');
     article.classList.toggle('justified', justified);
-    article.innerHTML = DOMPurify.sanitize(protectLocalObjectUrls(html, objectUrls), { FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed'], FORBID_ATTR: ['style'] });
+    // Remote references are stripped during sanitization so no fetch can start before a post-pass sees the element.
+    const sanitizeOptions = { allowRemoteResources, baseUrl: ownerDocument.baseURI };
+    article.innerHTML = sanitizePreviewHtml(protectLocalObjectUrls(html, objectUrls), sanitizeOptions);
     restoreLocalObjectUrls(article, objectUrls);
     secureLinks(article);
-    if (!allowRemoteResources) blockRemoteResources(article);
+    replaceBlockedImages(article);
     prepareFigureImages(article);
     if (trackChangesBaseHtml) {
       const baseArticle = ownerDocument.createElement('article');
-      baseArticle.innerHTML = DOMPurify.sanitize(trackChangesBaseHtml, { FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed'], FORBID_ATTR: ['style'] });
+      baseArticle.innerHTML = sanitizePreviewHtml(trackChangesBaseHtml, sanitizeOptions);
+      replaceBlockedImages(baseArticle);
       applyRenderedTrackChanges(article, baseArticle);
     }
     appendViewerWarnings(article, warnings);
@@ -158,8 +162,7 @@ export function Preview({ html, objectUrls, warnings, blocks, search, regularExp
         const index = blocks.indexOf(current);
         const next = blocks[index + 1];
         const start = current.getBoundingClientRect().top;
-        const span = Math.max(1, (next?.getBoundingClientRect().top ?? current.getBoundingClientRect().bottom) - start);
-        latestOnScroll.current(current.dataset.blockId!, Math.max(0, Math.min(1, (center - start) / span)));
+        latestOnScroll.current(current.dataset.blockId!, blockProgress(center, { from: start, to: next?.getBoundingClientRect().top ?? current.getBoundingClientRect().bottom }));
       });
     };
     const beginPointer = () => scrollIntent.current.beginPointer();
@@ -234,8 +237,14 @@ export function Preview({ html, objectUrls, warnings, blocks, search, regularExp
       openTrustedDoi(doiLink.dataset.doiUrl, doiLink.ownerDocument.defaultView ?? window);
       return;
     }
-    const link = path.find((item): item is HTMLAnchorElement => isHtmlElement(item) && item.tagName === 'A') as HTMLAnchorElement | undefined;
-    const href = link?.getAttribute('href') ?? '';
+    const link = path.find((item): item is HTMLElement => isHtmlElement(item) && item.localName === 'a');
+    const href = link ? linkHref(link) : '';
+    if (link && opensExternalPage(href)) {
+      // Always a new browsing context: neither the app window nor the detached viewer popup may navigate away.
+      event.preventDefault();
+      (link.ownerDocument.defaultView ?? window).open(href, '_blank', 'noopener,noreferrer');
+      return;
+    }
     if (href.startsWith('#')) {
       event.preventDefault();
       navigatePreviewAnchor(host.current, decodeFragment(href.slice(1)), blocks, scrollIntent.current, onNavigate);
@@ -351,30 +360,6 @@ const previewStyle = `
   .remote-resource-placeholder { display: block; padding: 1.333em; color: var(--muted); background: var(--surface-strong); border: max(1px, .083em) dashed var(--line-strong); border-radius: .5em; font-family: 'Manrope', sans-serif; font-size: .706em; text-align: center; }
   @media (max-width: 640px) { .figure-layout { grid-template-columns: 1fr !important; } }
 `;
-
-function centerPoint(container: HTMLElement, target: HTMLElement, next: HTMLElement | undefined, progress: number): boolean {
-  const viewport = container.getBoundingClientRect();
-  const rect = target.getBoundingClientRect();
-  const span = Math.max(0, (next?.getBoundingClientRect().top ?? rect.bottom) - rect.top);
-  const point = rect.top + span * Math.max(0, Math.min(1, progress));
-  const nextScrollTop = centeredScrollTop(container.scrollTop, point - viewport.top, viewport.height, container.scrollHeight);
-  if (Math.abs(nextScrollTop - container.scrollTop) <= 1) return false;
-  container.scrollTop = nextScrollTop;
-  return true;
-}
-
-function revealPoint(container: HTMLElement, target: HTMLElement, next: HTMLElement | undefined, progress: number): boolean {
-  const viewport = container.getBoundingClientRect();
-  const rect = target.getBoundingClientRect();
-  const span = Math.max(0, (next?.getBoundingClientRect().top ?? rect.bottom) - rect.top);
-  const point = rect.top + span * Math.max(0, Math.min(1, progress));
-  const margin = Math.min(48, viewport.height * .12);
-  if (point >= viewport.top + margin && point <= viewport.bottom - margin) return false;
-  const nextScrollTop = centeredScrollTop(container.scrollTop, point - viewport.top, viewport.height, container.scrollHeight);
-  if (Math.abs(nextScrollTop - container.scrollTop) <= 1) return false;
-  container.scrollTop = nextScrollTop;
-  return true;
-}
 
 function sourceOffsetAtPoint(shadow: ShadowRoot | null | undefined, blockElement: HTMLElement, block: DocumentBlock, x: number, y: number): number {
   if (!shadow) return block.from;
@@ -810,12 +795,6 @@ function textPositionAt(root: HTMLElement, targetOffset: number, ignoreDeleted =
   return last ? { node: last, offset: last.length } : undefined;
 }
 
-function fontStack(font: Props['fontFamily']): string {
-  if (font === 'mono') return `'IBM Plex Mono', 'SFMono-Regular', Consolas, monospace`;
-  if (font === 'sans') return `'Manrope', system-ui, sans-serif`;
-  return `'Source Serif 4', Georgia, serif`;
-}
-
 function prepareFigureImages(root: HTMLElement): void {
   const ownerDocument = root.ownerDocument;
   for (const image of root.querySelectorAll<HTMLImageElement>('img')) {
@@ -868,17 +847,19 @@ function appendViewerWarnings(root: HTMLElement, warnings: readonly string[]): v
 function safeCssLength(value?: string): boolean { return Boolean(value && /^(?:auto|\d+(?:\.\d+)?(?:%|px|em|rem|vw|vh)?)$/i.test(value)); }
 
 function secureLinks(root: HTMLElement): void {
-  for (const link of root.querySelectorAll<HTMLAnchorElement>('a[href]')) {
-    const href = link.getAttribute('href') ?? '';
-    if (opensExternalPage(href)) {
-      link.target = '_blank';
-      link.rel = 'noopener noreferrer';
+  // Includes SVG anchors, whose target/rel are not writable reflected properties.
+  for (const link of root.querySelectorAll('a')) {
+    if (opensExternalPage(linkHref(link))) {
+      link.setAttribute('target', '_blank');
+      link.setAttribute('rel', 'noopener noreferrer');
     } else {
       link.removeAttribute('target');
       link.removeAttribute('rel');
     }
   }
 }
+
+function linkHref(link: Element): string { return link.getAttribute('href') ?? link.getAttribute('xlink:href') ?? ''; }
 
 function openTrustedDoi(value: string | undefined, targetWindow: Window): void {
   const url = trustedDoiUrl(value);
@@ -910,26 +891,6 @@ function decodeFragment(value: string): string {
   catch { return value; }
 }
 
-function blockRemoteResources(root: HTMLElement): void {
-  const ownerDocument = root.ownerDocument;
-  const selector = 'img[src], audio[src], video[src], source[src], track[src], input[src], link[href]';
-  for (const element of root.querySelectorAll<HTMLElement>(selector)) {
-    const attribute = element.hasAttribute('src') ? 'src' : 'href';
-    const value = element.getAttribute(attribute) ?? '';
-    if (!/^https?:\/\//i.test(value)) continue;
-    if (element.tagName === 'IMG') {
-      const placeholder = ownerDocument.createElement('span');
-      placeholder.className = 'remote-resource-placeholder';
-      const image = element as HTMLImageElement;
-      placeholder.textContent = image.alt ? `Remote image blocked: ${image.alt}` : 'Remote image blocked';
-      element.replaceWith(placeholder);
-    } else {
-      element.removeAttribute(attribute);
-      element.dataset.remoteResourceBlocked = 'true';
-    }
-  }
-}
-
 function highlight(root: HTMLElement, query: string, regularExpression: boolean): void {
   let expression: RegExp;
   try { expression = new RegExp(regularExpression ? query : escapeRegExp(query), 'giu'); }
@@ -956,7 +917,3 @@ function highlight(root: HTMLElement, query: string, regularExpression: boolean)
 }
 
 function escapeRegExp(value: string): string { return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
-
-function isHtmlElement(value: unknown): value is HTMLElement {
-  return typeof value === 'object' && value !== null && 'nodeType' in value && (value as Node).nodeType === 1 && 'hasAttribute' in value;
-}
