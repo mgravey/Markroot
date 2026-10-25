@@ -1,10 +1,8 @@
 import { memo, useState } from 'react';
 import { Check, Download, RefreshCw, X } from 'lucide-react';
-import type { ProgressEvent } from '@markroot/core';
 import type { ExportFormat } from '@markroot/export';
 
-export interface ExportProgressState extends ProgressEvent { readonly format: ExportFormat }
-export type ExportDestination = 'download' | 'save-as' | 'workspace';
+import type { ExportDestination, ExportProgressState } from '../export-progress.js';
 
 export const ExportPanel = memo(function ExportPanel({ disabled, busy, progress, onCancel, onExport }: { disabled: boolean; busy: boolean; progress: ExportProgressState | undefined; onCancel(): void; onExport(format: ExportFormat, destination: ExportDestination): Promise<void> }) {
   const [destination, setDestination] = useState<ExportDestination>('download');
@@ -22,16 +20,4 @@ function ExportProgress({ progress, busy, onCancel }: { progress: ExportProgress
     <ol>{steps.map((step, index) => <li key={step} className={index < progress.completed || !busy && index === steps.length - 1 ? 'done' : index === progress.completed ? 'active' : ''}><span>{index < progress.completed || !busy && index === steps.length - 1 ? <Check size={10}/> : index + 1}</span>{step}</li>)}</ol>
     {busy && <div className="export-progress-actions"><button className="export-cancel" onClick={onCancel}><X size={13}/>Cancel export</button></div>}
   </section>;
-}
-
-export function exportStepTotal(format: ExportFormat): number { return format === 'pdf' ? 4 : 3; }
-
-export function appExportProgress(format: ExportFormat, progress: ProgressEvent): ExportProgressState {
-  const total = exportStepTotal(format);
-  const completed = progress.phase === 'complete' ? total - 1 : progress.phase === 'typst' ? 2 : progress.phase === 'pandoc' || progress.phase === 'prepare' ? 1 : 0;
-  return { format, phase: progress.phase, completed, total, ...(progress.message ? { message: progress.message } : {}) };
-}
-
-export function exportSaveMessage(destination: ExportDestination): string {
-  return destination === 'workspace' ? 'Saving beside the source' : destination === 'save-as' ? 'Writing selected file' : 'Preparing browser download';
 }

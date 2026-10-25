@@ -21,3 +21,14 @@ pnpm vitest run apps/web/src/hooks/useWorkspaceDocuments.test.ts apps/web/src/ho
   DOM anchor lookup, including renderer-provided alias anchors.
 
 Keep optional local reproduction logs and captures in `.review-regression-debug/` (ignored).
+
+Inspector panels, the commit proposal dialog and the visual editor load on demand. Git
+loads when connecting a folder; export modules load after an export starts (after the
+Save As picker to preserve browser activation). Shared export progress helpers stay
+independent of the panel so they cannot pull its UI into the initial bundle.
+React, CodeMirror and KaTeX have separate vendor chunks for browser caching; these
+are still required by the initial app and are not counted as deferred code.
+
+Keep `base: './'` in Vite: lazy chunks, export workers and `export-smoke.html` must
+resolve from both the site root and `/markroot/`. Compare chunk sizes with `pnpm build`;
+keep optional bundle reports in `.bundle-analysis/` (ignored).
