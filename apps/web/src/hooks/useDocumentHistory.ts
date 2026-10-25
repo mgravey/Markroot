@@ -23,13 +23,13 @@ export function useDocumentHistory({ session, workspaceId, backend = browserHist
   const navigateCursor = useEvent(onNavigate);
   useEffect(() => {
     if (!session) { live.current = undefined; setState(undefined); return; }
-    let disposed = false; let timer: ReturnType<typeof setTimeout> | undefined; let warned = false;
+    let disposed = false; let timer: ReturnType<typeof setTimeout> | undefined; let warned = false; let persistent = true;
     const key = workspaceId ? historyKey(workspaceId, session.path) : undefined;
     const pending: { text: string; origin: HistoryOrigin; time: number }[] = [];
     const warn = () => { if (!warned && !disposed) { warned = true; notify('History could not be restored or saved locally. Editing can continue.'); } };
     const flush = () => {
       clearTimeout(timer);
-      if (key && controller.ready) void saveHistory(backend, key, controller.tree).catch(warn);
+      if (key && controller.ready && persistent) void saveHistory(backend, key, controller.tree).catch(warn);
     };
     const changed = () => {
       if (!disposed) setState((previous) => ({ session, tree: controller.tree, ready: controller.ready, revision: (previous?.revision ?? 0) + 1 }));
@@ -57,7 +57,9 @@ export function useDocumentHistory({ session, workspaceId, backend = browserHist
     void (async () => {
       try {
         await previousRestore;
-        const saved = key ? await loadHistory(backend, key) : undefined;
+        let saved: unknown;
+        try { saved = key ? await loadHistory(backend, key) : undefined; }
+        catch { persistent = false; warn(); }
         if (saved !== undefined) {
           const tree = UndoTree.fromJSON(saved);
           tree.attachExternal(session.initialSource);

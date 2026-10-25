@@ -83,12 +83,36 @@ describe('document history integration', () => {
     await act(async () => { pending.resolve(undefined); await pending.promise; }); await settle();
     expect(next.current.ready).toBe(true); expect(next.current.tree!.textAt('h0')).toBe('root'); expect(next.current.tree!.text).toBe('first'); next.unmount();
   });
-  it('falls back quietly for corrupt or unavailable storage and keeps editing', async () => {
-    const { hook, session, options } = setup('root', { version: 99 }); await settle();
-    expect(options.setNotice).toHaveBeenCalledOnce();
-    act(() => { session.replace('new'); hook.current.command('undo'); }); expect(session.snapshot().source).toBe('root'); hook.unmount();
-    const backend: HistoryBackend = { load: vi.fn().mockRejectedValue(new Error('disabled')), save: vi.fn().mockRejectedValue(new Error('quota')) };
-    const next = mountHook(useDocumentHistory, { ...options, backend }); await settle(); expect(next.current.ready).toBe(true); next.unmount(); await settle();
+  it('replaces corrupt history and persists subsequent edits', async () => {
+    vi.useFakeTimers(); const { hook, session, options, backend, values } = setup('root', { version: 99 }); await settle();
+    expect(options.setNotice).toHaveBeenCalledOnce(); expect(hook.current.ready).toBe(true);
+    act(() => { session.replace('new'); hook.current.command('undo'); }); expect(session.snapshot().source).toBe('root');
+    act(() => { hook.current.command('redo'); hook.current.flush(); }); await settle();
+    expect(backend.save).toHaveBeenCalledOnce(); expect(UndoTree.fromJSON(values.get(historyKey('project', 'a.md'))).text).toBe('new');
+    hook.unmount(); await settle(); expect(backend.save).toHaveBeenCalledTimes(2);
+  });
+  it('disables persistence after a load error while keeping in-memory undo and redo ready', async () => {
+    vi.useFakeTimers(); const pending = deferred<unknown>(); const session = new DocumentSession(workspacePath('a.md'), 'root');
+    const backend: HistoryBackend = { load: () => pending.promise, save: vi.fn().mockResolvedValue(undefined) };
+    const options = { session, workspaceId: 'project', backend, setNotice: vi.fn(), onNavigate: vi.fn() };
+    const hook = mountHook(useDocumentHistory, options);
+    act(() => { session.replace('pending'); });
+    await act(async () => { pending.reject(new Error('read failed')); await Promise.resolve(); }); await settle();
+    expect(hook.current.ready).toBe(true); expect(options.setNotice).toHaveBeenCalledOnce();
+    act(() => { hook.current.command('undo'); }); expect(session.snapshot().source).toBe('root');
+    act(() => { hook.current.command('redo'); }); expect(session.snapshot().source).toBe('pending');
+    act(() => { session.replace('edited', 'review'); hook.current.flush(); window.dispatchEvent(new Event('pagehide')); document.dispatchEvent(new Event('visibilitychange')); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(hook.current.tree!.text).toBe('edited'); expect(backend.save).not.toHaveBeenCalled();
+    hook.unmount(); await settle(); expect(backend.save).not.toHaveBeenCalled();
+  });
+  it('never flushes a failed load that finishes after unmount', async () => {
+    const pending = deferred<unknown>(); const session = new DocumentSession(workspacePath('a.md'), 'root');
+    const backend: HistoryBackend = { load: () => pending.promise, save: vi.fn().mockResolvedValue(undefined) };
+    const hook = mountHook(useDocumentHistory, { session, workspaceId: 'project', backend, setNotice: vi.fn(), onNavigate: vi.fn() });
+    act(() => { session.replace('pending'); }); hook.unmount();
+    await act(async () => { pending.reject(new Error('blocked')); await Promise.resolve(); }); await settle();
+    expect(backend.save).not.toHaveBeenCalled();
   });
   it('isolates projects/files and flushes the previous session when switching', async () => {
     const { hook, session, options, backend } = setup(); await settle();
