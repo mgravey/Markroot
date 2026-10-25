@@ -7,13 +7,15 @@ interface Props {
   progress?: CommitGenerationProgress | undefined;
   proposal?: CommitProposal | undefined;
   fileCount: number;
+  /** Paths matched by .gitignore that the commit leaves out. */
+  ignored?: readonly string[] | undefined;
   onProposalChange(proposal: CommitProposal): void;
   onAccept(): void;
   onRegenerate(): void;
   onCancel(): void;
 }
 
-export function CommitProposalDialog({ phase, progress, proposal, fileCount, onProposalChange, onAccept, onRegenerate, onCancel }: Props) {
+export function CommitProposalDialog({ phase, progress, proposal, fileCount, ignored, onProposalChange, onAccept, onRegenerate, onCancel }: Props) {
   const dialog = useRef<HTMLDialogElement>(null);
   const subject = useRef<HTMLInputElement>(null);
 
@@ -42,6 +44,7 @@ export function CommitProposalDialog({ phase, progress, proposal, fileCount, onP
       <p>The file is already saved. Chrome manages model downloads outside this tab’s normal Network requests. Cancelling will not create a commit.</p>
     </section> : <section className="commit-dialog-form">
       <p className="ai-review-note">Review or edit the generated message before committing.</p>
+      {ignored?.length ? <p className="warning">Ignored by .gitignore and left out of this commit: {ignored.slice(0, 5).join(', ')}{ignored.length > 5 ? ` and ${ignored.length - 5} more` : ''}.</p> : null}
       <label className="field"><span>Subject</span><input ref={subject} value={proposal?.subject ?? ''} onChange={(event) => onProposalChange({ subject: event.target.value, body: proposal?.body ?? '' })}/></label>
       <label className="field"><span>Body <small>optional</small></span><textarea rows={5} value={proposal?.body ?? ''} onChange={(event) => onProposalChange({ subject: proposal?.subject ?? '', body: event.target.value })}/></label>
     </section>}
