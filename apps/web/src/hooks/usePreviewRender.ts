@@ -20,7 +20,7 @@ export function usePreviewRender({ previewSnapshot, workspace, citations, allowR
   const engine = useMemo(() => new BasicDocumentEngine(), []);
   const resources = useMemo(() => new PreviewResourceCache(), []);
   const urls = useMemo(() => new PreviewUrlCache(), []);
-  const [result, setResult] = useState<{ artifact: RenderArtifact; release(): void }>();
+  const [result, setResult] = useState<{ artifact: RenderArtifact; snapshot: DocumentSnapshot; release(): void }>();
   const [renderedBaseHtml, setRenderedBaseHtml] = useState<string>();
   const previewPath = previewSnapshot?.path;
   // Passive cleanup runs after React has replaced the old HTML in both viewer windows.
@@ -39,7 +39,7 @@ export function usePreviewRender({ previewSnapshot, workspace, citations, allowR
         try {
           const artifact = await engine.render({ snapshot: previewSnapshot, dependencies: lease.dependencies, citations, allowRemoteResources }, { signal: controller.signal });
           if (controller.signal.aborted) { lease.release(); return; }
-          setResult({ artifact, release: lease.release });
+          setResult({ artifact, snapshot: previewSnapshot, release: lease.release });
         } catch (error) { lease.release(); throw error; }
       })().catch((error: unknown) => { if (!controller.signal.aborted) reportError(error); });
     }, 120);
@@ -56,6 +56,6 @@ export function usePreviewRender({ previewSnapshot, workspace, citations, allowR
     return () => controller.abort();
   }, [previewPath, baseSource, engine, citations, allowRemoteResources, reportError]);
 
-  return { rendered: result?.artifact, renderedBaseHtml };
+  return { rendered: result?.artifact, renderedSnapshot: result?.snapshot, renderedBaseHtml };
 }
 

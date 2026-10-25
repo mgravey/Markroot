@@ -55,6 +55,11 @@ export function protectLocalObjectUrls(html: string, objectUrls: readonly string
 
 export function opensExternalPage(href: string): boolean { return /^https?:\/\//i.test(href); }
 
+export function decodeFragment(value: string): string {
+  try { return decodeURIComponent(value); }
+  catch { return value; }
+}
+
 /** Resolves a document-relative preview link to a workspace path; undefined for schemes, absolute paths or links escaping the folder. */
 export function resolveWorkspaceLink(href: string, documentPath: string): Readonly<{ path: string; fragment?: string }> | undefined {
   if (!href || href.startsWith('#') || href.startsWith('/') || /^[a-z][a-z\d+.-]*:/i.test(href)) return undefined;

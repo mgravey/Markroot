@@ -3,10 +3,45 @@ import { workspacePath } from '@markroot/core';
 import { DocumentSession } from '@markroot/document';
 import { MemoryWorkspace } from '@markroot/workspace';
 import { collectPreviewResources, IMAGE_REFERENCE, PreviewResourceCache } from './document-resources.js';
+import { deferred } from './hooks/hook-test-utils.js';
 
 const snapshot = (source: string) => new DocumentSession(workspacePath('docs/a.md'), source).snapshot();
 
 describe('preview resources', () => {
+  it('lets a newer render reuse a delayed image read after the initiating render is cancelled', async () => {
+    const workspace = new MemoryWorkspace({ 'docs/x.png': 'one' });
+    const cache = new PreviewResourceCache();
+    const controller = new AbortController();
+    const started = deferred();
+    const gate = deferred<Uint8Array>();
+    const read = vi.spyOn(workspace, 'readBytes').mockImplementation(() => { started.resolve(); return gate.promise; });
+    const first = collectPreviewResources(workspace, snapshot('![x](x.png)'), cache, controller.signal);
+    const cancelled = expect(first).rejects.toMatchObject({ name: 'AbortError' });
+    await started.promise;
+    controller.abort();
+    await cancelled; // Cancellation does not wait for the shared filesystem read to finish.
+    const second = collectPreviewResources(workspace, snapshot('![x](x.png) edited'), cache);
+    gate.resolve(new TextEncoder().encode('one'));
+    const resources = await second;
+    expect(resources).toHaveLength(1);
+    expect(await (resources[0]!.content as Blob).text()).toBe('one');
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries a delayed image read rejected with AbortError on the next render', async () => {
+    const workspace = new MemoryWorkspace({ 'docs/x.png': 'one' });
+    const cache = new PreviewResourceCache();
+    const gate = deferred<Uint8Array>();
+    const started = deferred();
+    const read = vi.spyOn(workspace, 'readBytes').mockImplementationOnce(() => { started.resolve(); return gate.promise; });
+    const first = collectPreviewResources(workspace, snapshot('![x](x.png)'), cache);
+    await started.promise;
+    gate.reject(new DOMException('Interrupted read', 'AbortError'));
+    expect(await first).toEqual([]);
+    expect(await collectPreviewResources(workspace, snapshot('![x](x.png)'), cache)).toHaveLength(1);
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
   it('matches wrapped and titled image references', () => {
     const refs = [...'![a](x.png) ![b [c]](<my img.png> "t")'.matchAll(IMAGE_REFERENCE)].map((match) => match[1]);
     expect(refs).toEqual(['x.png', '<my img.png>']);

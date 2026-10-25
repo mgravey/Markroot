@@ -75,7 +75,8 @@ export function useComments({ workspace, session, snapshot, selection, reviewing
   useEffect(() => {
     const refresh = () => { void reload().catch(reportReloadError); };
     window.addEventListener('focus', refresh);
-    return () => { window.removeEventListener('focus', refresh); loadRequest.current += 1; };
+    // Session changes cancel focus refreshes, not the replacement document's explicit load.
+    return () => { window.removeEventListener('focus', refresh); refreshRequest.current += 1; };
   }, [store, session, reload, reportReloadError]);
 
   async function change(operation: CommentOperation) {

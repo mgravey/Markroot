@@ -20,7 +20,7 @@ interface Options {
   reportError(error: unknown): void;
   onFolderReset(): void;
   onDocumentLoading(): void;
-  onDocumentOpened(path: WorkspacePath, base: string | undefined, firstBlock: string | undefined): void;
+  onDocumentOpened(path: WorkspacePath, base: string | undefined, firstBlock: string | undefined, fragment?: string): void;
 }
 
 /** Owns folder generations, document loads and the live session subscription. */
@@ -104,14 +104,14 @@ export function useWorkspaceDocuments({ comments, repository, settingsRef, setSe
     setNotice(`Opened ${handle.name}. Files stay on this device.${skippedEntriesNotice(next.skippedEntries)}`);
   }
 
-  const openWorkspaceLink = useEvent((path: string) => {
+  const openWorkspaceLink = useEvent((path: string, fragment?: string) => {
     const entry = entries.find((item) => item.kind === 'file' && item.path === path);
     if (!entry) { setNotice(`${path} is not a file in this folder.`); return; }
-    if (/\.(?:md|qmd|markdown|txt|bib|bibtex|ya?ml)$/i.test(path)) void openFile(entry.path).catch(reportError);
+    if (/\.(?:md|qmd|markdown|txt|bib|bibtex|ya?ml)$/i.test(path)) void openFile(entry.path, fragment).catch(reportError);
     else setNotice(`${path} cannot be opened in Markroot.`);
   });
 
-  async function openFile(path: WorkspacePath) {
+  async function openFile(path: WorkspacePath, fragment?: string) {
     if (!workspace || !comments().store) return;
     if (comments().writeBusy.current) { setNotice('Wait for the comment to finish saving.'); return; }
     if (snapshot?.dirty) {
@@ -161,7 +161,7 @@ export function useWorkspaceDocuments({ comments, repository, settingsRef, setSe
       const firstBlock = next.snapshot().blocks.find((block) => block.kind !== 'frontmatter') ?? next.snapshot().blocks[0];
       fileVersionRef.current = stat.version;
       setFileVersion(stat.version);
-      onDocumentOpened(path, base, firstBlock?.id);
+      onDocumentOpened(path, base, firstBlock?.id, fragment);
       setNotice([migrationThreads.length ? 'Embedded comments will move to YAML sidecars when you save. The editor now shows clean Markdown.' : undefined, brokenNotice].filter(Boolean).join(' ') || undefined);
     } catch (error) { reportError(error); }
   }

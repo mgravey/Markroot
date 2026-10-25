@@ -12,6 +12,7 @@ import { defaultSettings, savePendingSession, saveSettings, type MarkrootSetting
 import { SourceEditor } from './components/SourceEditor.js';
 import { VisualEditor } from './components/VisualEditor.js';
 import { Preview } from './components/Preview.js';
+import { decodeFragment } from './components/preview-utils.js';
 import { WorkspaceTree } from './components/WorkspaceTree.js';
 import { DocumentOutline } from './components/DocumentOutline.js';
 import { PaneResizer } from './components/PaneResizer.js';
@@ -79,10 +80,11 @@ export function App() {
       scroll.set({ target: undefined, progress: 0, origin: 'command', alignment: 'reveal' });
       reattachViewer();
     }),
-    onDocumentOpened: useEvent((path: WorkspacePath, base: string | undefined, firstBlock: string | undefined) => {
+    onDocumentOpened: useEvent((path: WorkspacePath, base: string | undefined, firstBlock: string | undefined, fragment?: string) => {
       setSelection({ from: 0, to: 0 }); setGitBase(base === undefined ? undefined : { path, source: base });
       setTrackChangesOpen(false); resetReview(); scroll.set({ target: firstBlock, progress: 0, origin: 'command', alignment: 'reveal' });
-      setSourceCursorTarget(undefined); setActiveCommentId(undefined); setOutlineOpen(false); setPreviewAnchor(undefined);
+      setSourceCursorTarget(undefined); setActiveCommentId(undefined); setOutlineOpen(false);
+      setPreviewAnchor((current) => fragment ? { id: decodeFragment(fragment), request: (current?.request ?? 0) + 1 } : undefined);
     }),
   });
   const reloadCommentsEvent = useEvent(() => commentState.reload());
@@ -111,7 +113,7 @@ export function App() {
   settingsRef.current = settings;
 
   const { selectSource, navigateFromRight, selectFromRight, navigateFromSourceScroll, navigateOutline } = usePaneNavigation({ snapshot: presentedSnapshot, review, reviewPreviewSnapshot, scroll, setSelection, setSourceCursorTarget, setRightMode, setPreviewAnchor });
-  const { rendered, renderedBaseHtml } = usePreviewRender({ previewSnapshot, workspace, citations, allowRemoteResources: settings.allowRemoteResources, baseSource: trackedChangesVisible ? renderedComparisonBaseSource : undefined, reportError });
+  const { rendered, renderedSnapshot, renderedBaseHtml } = usePreviewRender({ previewSnapshot, workspace, citations, allowRemoteResources: settings.allowRemoteResources, baseSource: trackedChangesVisible ? renderedComparisonBaseSource : undefined, reportError });
   const refreshWorkspaceInBackground = useEvent(() => { void refreshWorkspace().catch(reportError); });
   const exports = useExport({ snapshot, workspace, justified: settings.viewerJustified, setNotice, onWorkspaceChanged: refreshWorkspaceInBackground });
 
@@ -376,7 +378,7 @@ export function App() {
 
   const renderViewerContent = () => presentedSnapshot ? <ScrollBound store={scroll} render={(position) => rightMode === 'visual' && !review
     ? <VisualEditor snapshot={presentedSnapshot} activeBlock={position.target} scrollTarget={position.origin === 'right' ? undefined : position.target} scrollProgress={position.progress} scrollAlignment={position.alignment} fontFamily={settings.viewerFont} fontSize={settings.viewerFontSize} justified={settings.viewerJustified} onApply={applyVisualBlock} onNavigate={navigateFromRight} onScroll={handleViewerScroll}/>
-    : <Preview html={rendered?.html ?? ''} objectUrls={rendered?.objectUrls ?? EMPTY_WARNINGS} warnings={rendered?.warnings ?? EMPTY_WARNINGS} blocks={previewSnapshot?.blocks ?? presentedSnapshot.blocks} search={search} regularExpression={regularExpression} activeBlock={position.target} scrollTarget={position.origin === 'right' ? undefined : position.target} scrollProgress={position.progress} scrollAlignment={position.alignment} anchorTarget={previewAnchor} allowRemoteResources={settings.allowRemoteResources} fontFamily={settings.viewerFont} fontSize={settings.viewerFontSize} justified={settings.viewerJustified} trackChangesBaseHtml={trackedChangesVisible ? renderedBaseHtml : undefined} activeTrackChange={activeTrackChange} reviewChanges={renderedReviewChanges} reviewDecisions={renderedReviewDecisions} comments={review ? undefined : comments} activeCommentId={review ? undefined : activeCommentId} onNavigate={navigateFromRight} documentPath={presentedSnapshot.path} onOpenWorkspaceLink={openWorkspaceLink} onSelect={selectFromRight} onCommentActivate={activateComment} onScroll={handleViewerScroll}/>}/> : null;
+    : <Preview html={rendered?.html ?? ''} objectUrls={rendered?.objectUrls ?? EMPTY_WARNINGS} warnings={rendered?.warnings ?? EMPTY_WARNINGS} blocks={previewSnapshot?.blocks ?? presentedSnapshot.blocks} search={search} regularExpression={regularExpression} activeBlock={position.target} scrollTarget={position.origin === 'right' ? undefined : position.target} scrollProgress={position.progress} scrollAlignment={position.alignment} anchorTarget={renderedSnapshot === previewSnapshot ? previewAnchor : undefined} allowRemoteResources={settings.allowRemoteResources} fontFamily={settings.viewerFont} fontSize={settings.viewerFontSize} justified={settings.viewerJustified} trackChangesBaseHtml={trackedChangesVisible ? renderedBaseHtml : undefined} activeTrackChange={activeTrackChange} reviewChanges={renderedReviewChanges} reviewDecisions={renderedReviewDecisions} comments={review ? undefined : comments} activeCommentId={review ? undefined : activeCommentId} onNavigate={navigateFromRight} documentPath={presentedSnapshot.path} onOpenWorkspaceLink={openWorkspaceLink} onSelect={selectFromRight} onCommentActivate={activateComment} onScroll={handleViewerScroll}/>}/> : null;
 
   const switchRightMode = (mode: RightMode) => { scroll.set({ origin: 'command', alignment: 'reveal' }); setRightMode(mode); };
   const viewerToolbar = (detached: boolean) => <div className="pane-title viewer-toolbar">

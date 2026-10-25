@@ -79,14 +79,14 @@ export async function collectPreviewResources(workspace: GuardedWorkspace | unde
       throwIfAborted(context);
       if (stat.kind !== 'file') continue;
       const version = stat.version ?? `${stat.modifiedAt ?? 'unknown'}:${stat.size}`;
-      const content = await cache.get(path, version, async () => {
-        const bytes = await workspace.readBytes(path, context);
-        throwIfAborted(context);
+      // Cached work can outlive the render that started it. Only the consumer's wait is abortable.
+      const content = await abortable(cache.get(path, version, async () => {
+        const bytes = await workspace.readBytes(path);
         const localFile = new Blob([bytes.slice()], { type: mediaTypeForPath(path) });
         if (!isPdfFigurePath(path)) return localFile;
         try { return await renderPdfFigurePreview(localFile, `${path}:${version}`); }
         catch { return localFile; /* the viewer presents its normal image-unavailable fallback */ }
-      });
+      }), signal);
       throwIfAborted(context);
       resources.push({ path: reference, content });
     } catch (error) {

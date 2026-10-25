@@ -38,10 +38,20 @@ export function useDocumentSave({ workspace, session, activeSession, git, commen
   async function writeDocument(context: number): Promise<DocumentSnapshot | undefined> {
     if (!workspace || !session || session !== activeSession.current) return undefined;
     const current = session.snapshot();
-    if (!current.dirty && !commentState.legacy.current.length) return current;
     const migration = commentState.legacy.current;
     let brokenNotice: string | undefined;
     try {
+      if (!current.dirty && !migration.length) {
+        const stat = await workspace.stat(current.path);
+        // Metadata misses same-size external edits. A byte read preserves the guarded-write baseline.
+        const source = new TextDecoder().decode(await workspace.readBytes(current.path));
+        if (context !== documentRequest.current || session !== activeSession.current || session.snapshot().revision !== current.revision) return undefined;
+        if ((fileVersionRef.current !== undefined && stat.version !== fileVersionRef.current) || source !== current.source) {
+          setNotice(`${current.path} changed outside Markroot. Reload or compare before saving.`);
+          return undefined;
+        }
+        return current;
+      }
       if (migration.length && commentState.store) {
         const commit = git ? (await git.history(1).catch(() => []))[0]?.oid ?? null : null;
         await commentState.store.importLegacy(current.path, migration, await commentRevision(current.source, commit));

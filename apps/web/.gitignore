@@ -1,0 +1,2 @@
+# Local logs and captures used when reproducing app review regressions.
+.review-regression-debug/

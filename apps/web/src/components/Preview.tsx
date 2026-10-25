@@ -4,7 +4,7 @@ import type { SourceRange } from '@markroot/core';
 import { documentBlockAt, type DocumentBlock } from '@markroot/document';
 import { blockProgress, isScrollKey, ScrollIntentGate, viewportCenter } from './scroll-sync.js';
 import { centerPoint, fontStack, isHtmlElement, revealPoint, type ViewerFont } from './dom-utils.js';
-import { mapRenderedOffset, mapSourceOffset, opensExternalPage, protectLocalObjectUrls, resolveWorkspaceLink, trustedDoiUrl } from './preview-utils.js';
+import { decodeFragment, mapRenderedOffset, mapSourceOffset, opensExternalPage, protectLocalObjectUrls, resolveWorkspaceLink, trustedDoiUrl } from './preview-utils.js';
 import { replaceBlockedImages, sanitizePreviewHtml } from './preview-sanitize.js';
 import { applyRenderedTrackChanges, type RenderedReviewChange } from '../rendered-track-changes.js';
 
@@ -885,11 +885,6 @@ function navigatePreviewAnchor(host: HTMLDivElement | null, id: string, blocks: 
   const sourceBlock = blocks.find((candidate) => candidate.id === block.dataset.blockId);
   const exact = Number(target.dataset.sourceOffset ?? block.dataset.sourceFrom);
   onNavigate(block.dataset.blockId, Number.isFinite(exact) ? exact : sourceBlock?.from);
-}
-
-function decodeFragment(value: string): string {
-  try { return decodeURIComponent(value); }
-  catch { return value; }
 }
 
 function highlight(root: HTMLElement, query: string, regularExpression: boolean): void {
