@@ -36,6 +36,8 @@ const STORE = 'settings';
 const SETTINGS_KEY = 'global';
 const WORKSPACE_KEY = 'recent-workspace';
 const WORKSPACE_IDS_KEY = 'workspace-ids';
+const PROJECTS_KEY = 'recent-projects';
+const MAX_RECENT_PROJECTS = 12;
 const THEMES: readonly ThemePreference[] = ['system', 'light', 'dark'];
 const FONTS: readonly PaneFont[] = ['serif', 'sans', 'mono'];
 
@@ -46,6 +48,14 @@ export interface SettingsBackend {
   get<T>(key: string): Promise<T | undefined>;
   set<T>(key: string, value: T): Promise<void>;
   delete(key: string): Promise<void>;
+}
+/** Browser-local folder bookmark; forgetting it never removes files or recovery drafts. */
+export interface RecentProject {
+  readonly id: string;
+  readonly name: string;
+  readonly handle: FileSystemDirectoryHandle;
+  readonly lastOpenedAt: number;
+  readonly pinned?: boolean;
 }
 interface KnownWorkspace { readonly id: string; readonly handle: FileSystemDirectoryHandle }
 
@@ -106,18 +116,61 @@ export async function saveSettings(settings: MarkrootSettings): Promise<void> {
   await backend.set(SETTINGS_KEY, settings);
 }
 
-export async function loadRecentWorkspace(): Promise<FileSystemDirectoryHandle | undefined> { return backend.get<FileSystemDirectoryHandle>(WORKSPACE_KEY); }
-export async function saveRecentWorkspace(handle: FileSystemDirectoryHandle): Promise<void> { await backend.set(WORKSPACE_KEY, handle); }
+export async function loadRecentWorkspace(): Promise<FileSystemDirectoryHandle | undefined> { return (await listRecentProjects())[0]?.handle; }
+export async function saveRecentWorkspace(handle: FileSystemDirectoryHandle): Promise<void> { await rememberProject(handle); }
+
+/** Shares the identity registry's lock and transaction, including first-load legacy migration. */
+export async function listRecentProjects(): Promise<readonly RecentProject[]> {
+  return withProjects((storage) => readProjects(storage));
+}
+
+export async function rememberProject(handle: FileSystemDirectoryHandle): Promise<RecentProject> {
+  return withProjects(async (storage) => {
+    const projects = await readProjects(storage);
+    const id = await workspaceIdIn(storage, handle);
+    const previous = projects.find((project) => project.id === id);
+    const project: RecentProject = { ...previous, id, name: previous?.name ?? handle.name, handle, lastOpenedAt: Date.now() };
+    await storage.set(PROJECTS_KEY, [project, ...projects.filter((item) => item.id !== id)].slice(0, MAX_RECENT_PROJECTS));
+    return project;
+  });
+}
+
+export async function forgetProject(id: string): Promise<void> {
+  await withProjects(async (storage) => { await storage.set(PROJECTS_KEY, (await readProjects(storage)).filter((project) => project.id !== id)); });
+}
+
+/** An empty label resets the display name to the folder name. */
+export async function renameProject(id: string, label: string): Promise<void> {
+  await withProjects(async (storage) => {
+    await storage.set(PROJECTS_KEY, (await readProjects(storage)).map((project) => project.id === id ? { ...project, name: label.trim() || project.handle.name } : project));
+  });
+}
+
+function withProjects<T>(operation: (storage: SettingsBackend) => Promise<T>): Promise<T> {
+  return withSettingsLock('markroot:workspace-ids', () => atomicBackend(operation));
+}
+
+async function readProjects(storage: SettingsBackend): Promise<readonly RecentProject[]> {
+  const stored = await storage.get<readonly RecentProject[]>(PROJECTS_KEY);
+  if (stored) return stored;
+  const legacy = await storage.get<FileSystemDirectoryHandle>(WORKSPACE_KEY);
+  const projects: readonly RecentProject[] = legacy ? [{ id: await workspaceIdIn(storage, legacy), name: legacy.name, handle: legacy, lastOpenedAt: Date.now() }] : [];
+  await storage.set(PROJECTS_KEY, projects);
+  await storage.delete(WORKSPACE_KEY);
+  return projects;
+}
 
 /** Stable id for a folder: reuses the id of a known handle to the same entry, else assigns a new UUID. */
 export async function workspaceIdFor(handle: FileSystemDirectoryHandle): Promise<string> {
-  return withSettingsLock('markroot:workspace-ids', () => atomicBackend(async (storage) => {
-    const known = await storage.get<readonly KnownWorkspace[]>(WORKSPACE_IDS_KEY) ?? [];
-    for (const entry of known) if (await entry.handle.isSameEntry(handle).catch(() => false)) return entry.id;
-    const id = crypto.randomUUID();
-    await storage.set(WORKSPACE_IDS_KEY, [...known, { id, handle }]);
-    return id;
-  }));
+  return withProjects((storage) => workspaceIdIn(storage, handle));
+}
+
+async function workspaceIdIn(storage: SettingsBackend, handle: FileSystemDirectoryHandle): Promise<string> {
+  const known = await storage.get<readonly KnownWorkspace[]>(WORKSPACE_IDS_KEY) ?? [];
+  for (const entry of known) if (await entry.handle.isSameEntry(handle).catch(() => false)) return entry.id;
+  const id = crypto.randomUUID();
+  await storage.set(WORKSPACE_IDS_KEY, [...known, { id, handle }]);
+  return id;
 }
 
 export async function loadPendingSession(workspace: PendingWorkspace, path: string): Promise<PendingSession | undefined> {

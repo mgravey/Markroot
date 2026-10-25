@@ -11,7 +11,8 @@ vi.mock('./components/SourceEditor.js', () => ({ SourceEditor: vi.fn(() => null)
 vi.mock('@markroot/settings', async (original) => {
   const actual = await original<typeof import('@markroot/settings')>();
   return { ...actual, loadSettings: vi.fn().mockResolvedValue(actual.defaultSettings()),
-    loadRecentWorkspace: vi.fn().mockResolvedValue({ name: 'test' }), workspaceIdFor: vi.fn().mockResolvedValue('folder-id'),
+    loadRecentWorkspace: vi.fn().mockResolvedValue({ name: 'test' }), listRecentProjects: vi.fn().mockResolvedValue([]),
+    rememberProject: vi.fn().mockResolvedValue(undefined), workspaceIdFor: vi.fn().mockResolvedValue('folder-id'),
     loadPendingSession: vi.fn().mockResolvedValue(undefined),
   };
 });
