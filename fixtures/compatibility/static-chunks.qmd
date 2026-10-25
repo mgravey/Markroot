@@ -1,0 +1,56 @@
+---
+title: Synthetic instrument report
+metadata-files:
+  - shared.yml
+execute:
+  echo: false
+knitr:
+  opts_knit:
+    root.dir: ".."
+---
+
+```{r setup, include=FALSE}
+caption_text <- "A **calibration** trace with $x$ and @fig-second."
+caption_format <- sprintf("Range %.2f units; coverage %d%%.", low, coverage)
+```
+
+```{r summary, results="asis"}
+cat(report_text)
+```
+
+# Background
+
+**Data policy.** All observations here are synthetic. See @fig-first and @eq-linear.
+
+1. **Prepare.** Inspect the inputs.
+2. **Compare.** Review the trace and `r sample_count` or `{r} mean(values)`.
+
+```{r}
+#| label: fig-first
+#| fig-cap: !expr caption_text
+#| out-width: 75%
+fig("calibration_trace")
+```
+
+```{r fig-second, fig.cap='A second trace.'}
+knitr::include_graphics(file.path("figures", "comparison.pdf"))
+```
+
+$$
+y = a x + b
+
+\text{for all } x
+$$ {#eq-linear}
+
+```{r}
+#| label: fig-computed
+#| fig-cap: !expr caption_format
+plot(values)
+```
+
+# References
+
+::: {#refs}
+:::
+
+After the references.

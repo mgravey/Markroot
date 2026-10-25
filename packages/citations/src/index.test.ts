@@ -69,3 +69,9 @@ it('preserves literal whitespace, backslashes and internal braces in identifier 
   expect(record?.url).toBe(String.raw`https://example.org/{token}--a\~b`);
   expect(record?.eprint).toBe('a  b~c');
 });
+
+it.each([String.raw`P{\'e}ron`, String.raw`{P{\'e}ron}`, String.raw`P\'{e}ron`])('decodes the surname %s in BibTeX names', (surname) => {
+  const [record] = parseBibTeX(`@article{accent, author={${surname}, Guillaume and Calabrese, Justin M.}, year={2020}}`, workspacePath('refs.bib'));
+  expect(record?.author).toBe('Péron, Guillaume and Calabrese, Justin M.');
+  expect(record?.authors).toEqual([{ family: 'Péron', given: 'Guillaume' }, { family: 'Calabrese', given: 'Justin M.' }]);
+});

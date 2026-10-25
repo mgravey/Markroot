@@ -24,7 +24,15 @@ The selected folder is the only repository source of truth. Folder handles, pref
 
 `DocumentSession` owns one source string and revision. Source and visual editors submit revision-guarded range edits. Untouched source is retained byte-for-byte. The visual pane edits recognized prose blocks and treats raw or unsupported blocks as atomic source-backed nodes.
 
-QMD code fences are displayed but never executed. The compatibility layer recognizes Pandoc Markdown, YAML front matter, citations, math, figures, fenced callouts, and common cross-reference labels. Full Quarto CLI execution is intentionally out of scope.
+QMD code fences are never executed; preview source visibility follows static Quarto/knitr display options. The compatibility layer recognizes Pandoc Markdown, YAML front matter, citations, math, figures, fenced callouts, and common cross-reference labels. Full Quarto CLI execution is intentionally out of scope.
+
+### Static Quarto preview
+
+The mapped preview reads YAML `execute` defaults and `knitr.opts_chunk` defaults, then applies knitr header arguments and leading `#|`/`//|` (also `--|`, `;|`, `%|`) options. `include: false` hides the entire chunk, `echo: false` hides its source, and `echo: fenced` displays the literal fence. Hidden chunks retain zero-height source anchors for navigation. Hidden sources with an output label or `results: asis` receive a muted unavailable-output message; conventional setup/configuration chunks stay invisible. `eval: false`, `output: false`, and `results: hide` suppress output placeholders. Inline R expressions display their expression with a not-executed tooltip.
+
+Chunks labeled `fig-*` share numbering and cross-references with Markdown figures and labeled fenced div figures. A fenced figure div uses its final paragraph as its caption, without numbering its unlabeled image a second time. The renderer and preview resource collector use the same `documentResourceReferences(snapshot, workspacePaths)` resolver. Literal image paths try the document directory, `knitr.opts_knit.root.dir` relative to that directory, and the project root, in that order. Extensionless references try PNG, SVG, JPG, JPEG, GIF, WebP, and PDF; a unique nearest matching stem can also resolve under a figures/fig/images directory. Ambiguous matches remain placeholders. PDF files use the existing first-page rasterization cache. Simple percentage `out-width` values are honored.
+
+Figure captions accept Markdown, citations, math and cross-references. Static `!expr` captions can use quoted strings or literal R assignments from other R chunks (including multiline strings and escapes). For `sprintf` assignments only the format template is shown, with substitutions replaced by ellipses. Arbitrary computed captions and missing figures have muted placeholders. Metadata files and arbitrary R expressions are not evaluated or imported by the preview. Export remains a separate Pandoc pipeline.
 
 ### Compatibility profile
 

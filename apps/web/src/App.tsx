@@ -113,7 +113,7 @@ export function App() {
   settingsRef.current = settings;
 
   const { selectSource, navigateFromRight, selectFromRight, navigateFromSourceScroll, navigateOutline } = usePaneNavigation({ snapshot: presentedSnapshot, review, reviewPreviewSnapshot, scroll, setSelection, setSourceCursorTarget, setRightMode, setPreviewAnchor });
-  const { rendered, renderedSnapshot, renderedBaseHtml } = usePreviewRender({ previewSnapshot, workspace, citations, allowRemoteResources: settings.allowRemoteResources, baseSource: trackedChangesVisible ? renderedComparisonBaseSource : undefined, reportError });
+  const { rendered, renderedSnapshot, renderedBaseHtml } = usePreviewRender({ previewSnapshot, workspace, workspacePaths, citations, allowRemoteResources: settings.allowRemoteResources, baseSource: trackedChangesVisible ? renderedComparisonBaseSource : undefined, reportError });
   const refreshWorkspaceInBackground = useEvent(() => { void refreshWorkspace().catch(reportError); });
   const exports = useExport({ snapshot, workspace, justified: settings.viewerJustified, setNotice, onWorkspaceChanged: refreshWorkspaceInBackground });
 
