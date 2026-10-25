@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { UndoTree, applyHistoryEdits, contentHash, textEdit } from './tree.js';
 
 const record = (tree: UndoTree, text: string, time = 0, origin = 'source') => tree.record(textEdit(tree.text, text), { origin, time });
@@ -118,6 +118,76 @@ describe('undo tree', () => {
     record(tree, target); expect(tree.text).toBe(target);
     const restored = UndoTree.fromJSON(tree.toJSON()); restored.undo(); expect(restored.text).toBe(source);
     expect(applyHistoryEdits(source, restored.redo())).toBe(target);
+  });
+  it('keeps capped large-document edits incremental and every retained version exact', () => {
+    const options = { maxBytes: 512 * 1024 }; const source = 'lorem ipsum dolor sit amet '.repeat(1000);
+    const tree = new UndoTree(source, options); const versions = new Map([[tree.rootId, source]]);
+    const stringify = vi.spyOn(JSON, 'stringify'); let calls: number;
+    try {
+      for (let i = 0; i < 600; i += 1) {
+        const before = tree.text; const from = (i * 7919) % before.length;
+        const id = tree.record({ from, to: from, insert: 'x' }, { origin: 'source', time: i * 2000 });
+        versions.set(id, before.slice(0, from) + 'x' + before.slice(from));
+      }
+      calls = stringify.mock.calls.length;
+    } finally { stringify.mockRestore(); }
+    expect(calls).toBe(0); expect(tree.size).toBeGreaterThan(120); expect(tree.size).toBeLessThan(600);
+    for (const node of tree.allNodes) expect(tree.textAt(node.id)).toBe(versions.get(node.id));
+    const data = tree.toJSON(); expect(JSON.stringify(data).length * 2).toBeLessThan(options.maxBytes);
+    const restored = UndoTree.fromJSON(JSON.parse(JSON.stringify(data)), options);
+    expect(restored.toJSON()).toEqual(data); expect(restored.text).toBe(tree.text);
+    for (const node of restored.allNodes) {
+      expect(restored.textAt(node.id)).toBe(versions.get(node.id));
+      let distance = 0; let ancestor = node;
+      while (ancestor.checkpoint === undefined) { distance += 1; ancestor = restored.get(ancestor.parentId!); }
+      expect(distance).toBeLessThan(40);
+    }
+    const current = restored.currentId; const parent = restored.current.parentId!; const before = restored.text;
+    expect(applyHistoryEdits(before, restored.undo())).toBe(versions.get(parent)); expect(restored.text).toBe(versions.get(parent));
+    expect(applyHistoryEdits(restored.text, restored.redo())).toBe(before); expect(restored.currentId).toBe(current); expect(restored.text).toBe(before);
+  });
+  it('caches current text across typing and refreshes it on navigation and external attachment', () => {
+    const tree = new UndoTree('root', { checkpointEvery: 3 }); const replay = vi.spyOn(tree, 'textAt');
+    for (let i = 0; i < 10; i += 1) { record(tree, tree.text + 'x', i * 2000); expect(tree.text).toBe('root' + 'x'.repeat(i + 1)); }
+    record(tree, tree.text + 'y', 18001); expect(tree.text).toBe('root' + 'x'.repeat(10) + 'y');
+    expect(replay).not.toHaveBeenCalled();
+    tree.undo(); const count = replay.mock.calls.length; expect(tree.text).toBe('root' + 'x'.repeat(9)); expect(tree.text).toBe('root' + 'x'.repeat(9));
+    expect(replay).toHaveBeenCalledTimes(count + 1);
+    tree.redo(); expect(tree.text).toBe('root' + 'x'.repeat(10) + 'y');
+    tree.attachExternal('root'); expect(tree.text).toBe('root'); tree.attachExternal('disk'); expect(tree.text).toBe('disk');
+  });
+  it('bounds checkpoint replay through compacted branches and byte-heavy edits', () => {
+    const options = { maxNodes: 10, checkpointEvery: 3, checkpointBytes: 1024 }; const tree = new UndoTree('root', options);
+    const versions = new Map([[tree.rootId, 'root']]);
+    for (let i = 0; i < 30; i += 1) {
+      if (i === 15) tree.checkout(tree.rootId);
+      const text = tree.text + String(i).repeat(200); const id = record(tree, text, i * 2000); versions.set(id, text);
+      if (i === 4) tree.star(id);
+      for (const node of tree.allNodes) {
+        expect(tree.textAt(node.id)).toBe(versions.get(node.id));
+        let distance = 0; let bytes = 0; let ancestor = node;
+        while (ancestor.checkpoint === undefined) { distance += 1; bytes += [...ancestor.changes, ...ancestor.inverse].reduce((sum, edit) => sum + edit.insert.length * 2, 0); ancestor = tree.get(ancestor.parentId!); }
+        expect(distance).toBeLessThan(options.checkpointEvery); expect(bytes).toBeLessThan(options.checkpointBytes);
+      }
+    }
+    expect(tree.size).toBeLessThanOrEqual(options.maxNodes); expect(UndoTree.fromJSON(tree.toJSON(), options).text).toBe(tree.text);
+  });
+  it('collapses oversized composed patches so discarded rewrites do not pin the byte cap', () => {
+    const options = { maxBytes: 24 * 1024, checkpointEvery: 4 }; const tree = new UndoTree('a'.repeat(2000), options);
+    for (let i = 0; i < 40; i += 1) record(tree, (i % 2 ? 'a' : 'b').repeat(2000), i * 2000);
+    expect(tree.size).toBeGreaterThan(1); expect(JSON.stringify(tree.toJSON()).length * 2).toBeLessThan(options.maxBytes);
+    expect(UndoTree.fromJSON(tree.toJSON(), options).text).toBe(tree.text);
+  });
+  it('accounts for escaped text, grouped changes, stars and pruning after restoration', () => {
+    const source = '\u0000\u0001\"\\\ud800'.repeat(200); const options = { maxBytes: 64 * 1024, checkpointEvery: 4 };
+    let tree = new UndoTree(source, options);
+    for (let i = 0; i < 100; i += 1) {
+      record(tree, tree.text + source.slice(0, 10), i * 2000); record(tree, tree.text + 'x', i * 2000 + 1);
+      tree.star(tree.currentId); tree.star(tree.currentId, false);
+      if (i % 10 === 0) tree = UndoTree.fromJSON(tree.toJSON(), options);
+      expect(JSON.stringify(tree.toJSON()).length * 2).toBeLessThan(options.maxBytes);
+    }
+    expect(tree.text).toBe(source + (source.slice(0, 10) + 'x').repeat(100));
   });
   it('validates edit ranges', () => { expect(() => applyHistoryEdits('a', [{ from: -1, to: 0, insert: '' }])).toThrow(); });
 });

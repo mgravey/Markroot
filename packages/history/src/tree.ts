@@ -45,9 +45,21 @@ export function applyHistoryEdits(text: string, edits: readonly HistoryEdit[]): 
   return text;
 }
 
+// Include JSON escaping and spare space for keys, numbers and separators.
+function stringBytes(text: string): number {
+  let bytes = 4 + text.length * 2;
+  for (const match of text.matchAll(/["\\\u0000-\u001f\ud800-\udfff]/g)) bytes += match[0] === '"' || match[0] === '\\' ? 2 : 10;
+  return bytes;
+}
+function editBytes(edits: readonly HistoryEdit[]): number { return edits.reduce((bytes, edit) => bytes + 128 + stringBytes(edit.insert), 0); }
+
 export class UndoTree {
   private nodes = new Map<string, HistoryNode>();
   private sequence = 0;
+  private bytes = 256;
+  private nodeBytes = new Map<string, number>();
+  private currentText: string;
+  private textId: string | undefined;
   private groupable = false;
   private previousEdit: HistoryEdit | undefined;
   private options: typeof defaults;
@@ -56,13 +68,25 @@ export class UndoTree {
 
   constructor(text: string, options: HistoryOptions = {}, time = Date.now()) {
     this.options = { ...defaults, ...options };
-    this.rootId = 'h0'; this.currentId = this.rootId;
+    this.rootId = 'h0'; this.currentId = this.rootId; this.currentText = text; this.textId = this.currentId;
     this.nodes.set(this.rootId, { id: this.rootId, parentId: null, children: [], createdAt: time, updatedAt: time, origin: 'restore', label: 'Opened document', changes: [], inverse: [], hash: contentHash(text), checkpoint: text });
+    this.measure(this.nodes.get(this.rootId)!);
   }
   get current(): Readonly<HistoryNode> { return this.get(this.currentId); }
   get size(): number { return this.nodes.size; }
   get allNodes(): readonly Readonly<HistoryNode>[] { return [...this.nodes.values()]; }
-  get text(): string { return this.textAt(this.currentId); }
+  get text(): string { if (this.textId !== this.currentId) { this.currentText = this.textAt(this.currentId); this.textId = this.currentId; } return this.currentText; }
+  private measure(node: HistoryNode): void {
+    const bytes = 512 + [node.id, node.parentId ?? '', node.origin, node.label, node.hash, node.checkpoint ?? '', node.lastActiveChild ?? '', ...node.children].reduce((sum, text) => sum + stringBytes(text), 0) + editBytes(node.changes) + editBytes(node.inverse);
+    this.bytes += bytes - (this.nodeBytes.get(node.id) ?? 0); this.nodeBytes.set(node.id, bytes);
+  }
+  private remove(id: string): void { this.bytes -= this.nodeBytes.get(id)!; this.nodeBytes.delete(id); this.nodes.delete(id); }
+  private checkpoint(node: HistoryNode, text?: string): void {
+    if (node.checkpoint !== undefined) return;
+    let distance = 1; let bytes = editBytes(node.changes) + editBytes(node.inverse);
+    for (let ancestor = this.nodes.get(node.parentId!)!; ancestor.checkpoint === undefined && ancestor.parentId; ancestor = this.nodes.get(ancestor.parentId)!) { distance += 1; bytes += editBytes(ancestor.changes) + editBytes(ancestor.inverse); }
+    if (distance >= this.options.checkpointEvery || bytes >= this.options.checkpointBytes) node.checkpoint = text ?? this.textAt(node.id);
+  }
   get(id: string): Readonly<HistoryNode> { const node = this.nodes.get(id); if (!node) throw new Error('Unknown history version.'); return node; }
   path(id = this.currentId): string[] {
     const path: string[] = [];
@@ -88,18 +112,18 @@ export class UndoTree {
     const adjacent = previous && change.from <= previous.from + previous.insert.length && change.to >= previous.from;
     const merge = this.groupable && previous && adjacent && !node.starred && !node.children.length && node.parentId !== null && node.origin === metadata.origin && ['source', 'visual'].includes(node.origin) && time >= node.updatedAt && time - node.updatedAt <= this.options.groupDelay;
     if (merge) {
-      const parentText = this.textAt(node.parentId!);
+      const parentText = applyHistoryEdits(before, node.inverse);
       node.changes = [textEdit(parentText, after)]; node.inverse = [textEdit(after, parentText)];
       node.hash = contentHash(after); node.updatedAt = time;
-      if (node.checkpoint !== undefined || JSON.stringify(node.changes).length * 2 >= this.options.checkpointBytes) node.checkpoint = after;
+      if (node.checkpoint !== undefined) node.checkpoint = after; else this.checkpoint(node, after);
     } else {
       const id = `h${++this.sequence}`;
       const next: HistoryNode = { id, parentId: node.id, children: [], createdAt: time, updatedAt: time, origin: metadata.origin, label: metadata.label ?? `${metadata.origin} edit`, changes: [change], inverse: [textEdit(after, before)], hash: contentHash(after) };
-      let distance = 1; let bytes = change.insert.length * 2 + (change.to - change.from) * 2;
-      for (let ancestor = node; ancestor.checkpoint === undefined && ancestor.parentId; ancestor = this.nodes.get(ancestor.parentId)!) { distance += 1; bytes += JSON.stringify(ancestor.changes).length * 2; }
-      if (distance >= this.options.checkpointEvery || bytes >= this.options.checkpointBytes || metadata.origin === 'external') next.checkpoint = after;
       node.children.push(id); node.lastActiveChild = id; this.nodes.set(id, next); this.currentId = id;
+      if (metadata.origin === 'external') next.checkpoint = after; else this.checkpoint(next, after);
+      this.measure(next);
     }
+    this.measure(node); this.currentText = after; this.textId = this.currentId;
     this.groupable = true; this.previousEdit = change; this.prune();
     return this.currentId;
   }
@@ -129,9 +153,9 @@ export class UndoTree {
     let common = 0;
     while (common < targetPath.length && currentPath[common] === targetPath[common]) common += 1;
     const edits: HistoryEdit[] = [];
-    for (const step of currentPath.slice(common).reverse()) { const node = this.get(step); edits.push(...node.inverse); this.nodes.get(node.parentId!)!.lastActiveChild = step; }
-    for (const step of targetPath.slice(common)) { const node = this.get(step); edits.push(...node.changes); this.nodes.get(node.parentId!)!.lastActiveChild = step; }
-    this.currentId = id; this.groupable = false; this.previousEdit = undefined;
+    for (const step of currentPath.slice(common).reverse()) { const node = this.get(step); edits.push(...node.inverse); const parent = this.nodes.get(node.parentId!)!; parent.lastActiveChild = step; this.measure(parent); }
+    for (const step of targetPath.slice(common)) { const node = this.get(step); edits.push(...node.changes); const parent = this.nodes.get(node.parentId!)!; parent.lastActiveChild = step; this.measure(parent); }
+    this.currentId = id; this.textId = undefined; this.groupable = false; this.previousEdit = undefined;
     return edits;
   }
   attachExternal(text: string): string {
@@ -142,17 +166,17 @@ export class UndoTree {
     else { this.groupable = false; this.record(textEdit(this.text, text), { origin: 'external', label: 'Changed outside Markroot' }); this.groupable = false; }
     return this.currentId;
   }
-  star(id: string, value = !this.get(id).starred): void { this.nodes.get(id)!.starred = value; this.groupable = false; }
+  star(id: string, value = !this.get(id).starred): void { const node = this.nodes.get(id)!; node.starred = value; this.measure(node); this.groupable = false; }
   toJSON(): HistoryJSON { return { version: 1, rootId: this.rootId, currentId: this.currentId, sequence: this.sequence, nodes: structuredClone([...this.nodes.values()]) }; }
   static fromJSON(value: unknown, options: HistoryOptions = {}): UndoTree {
     if (!value || typeof value !== 'object') throw new Error('Invalid history.');
     const data = value as HistoryJSON;
     if (data.version !== 1 || !Array.isArray(data.nodes) || !data.nodes.length || data.nodes.length > 10000 || JSON.stringify(value).length * 2 > (options.maxBytes ?? defaults.maxBytes) * 2) throw new Error('Unsupported or oversized history.');
     if (data.rootId !== 'h0' || !Number.isSafeInteger(data.sequence) || data.sequence < 0) throw new Error('Invalid history root.');
-    const tree = new UndoTree('', options); tree.nodes.clear(); tree.sequence = data.sequence;
+    const tree = new UndoTree('', options); tree.nodes.clear(); tree.nodeBytes.clear(); tree.bytes = 256; tree.textId = undefined; tree.sequence = data.sequence;
     for (const node of structuredClone(data.nodes)) {
       if (!node || typeof node.id !== 'string' || !/^h\d+$/.test(node.id) || Number(node.id.slice(1)) > data.sequence || tree.nodes.has(node.id) || !Array.isArray(node.children) || !Array.isArray(node.changes) || !Array.isArray(node.inverse) || typeof node.label !== 'string' || typeof node.origin !== 'string' || !Number.isFinite(node.createdAt) || !Number.isFinite(node.updatedAt) || (node.checkpoint !== undefined && typeof node.checkpoint !== 'string')) throw new Error('Invalid history node.');
-      tree.nodes.set(node.id, node);
+      tree.nodes.set(node.id, node); tree.measure(node);
     }
     if (tree.get(tree.rootId).parentId !== null || tree.get(tree.rootId).checkpoint === undefined) throw new Error('Missing history root.');
     const visited = new Set<string>(); const pending = [tree.rootId];
@@ -168,41 +192,50 @@ export class UndoTree {
     if (visited.size !== tree.size || !visited.has(data.currentId)) throw new Error('Detached history node.');
     tree.currentId = data.currentId; tree.prune(); return tree;
   }
+  private compact(node: HistoryNode, cached?: { id: string; text: string }): { id: string; text: string } {
+    const child = this.nodes.get(node.children[0]!)!; const parent = this.nodes.get(node.parentId!)!;
+    const childText = child.checkpoint ?? applyHistoryEdits(cached?.id === node.id ? cached.text : this.textAt(node.id), child.changes);
+    child.parentId = parent.id; child.changes = [...node.changes, ...child.changes]; child.inverse = [...child.inverse, ...node.inverse];
+    const bytes = editBytes(child.changes) + editBytes(child.inverse);
+    if (bytes > childText.length * 4 + 256) {
+      const parentText = this.textAt(parent.id); const changes = [textEdit(parentText, childText)]; const inverse = [textEdit(childText, parentText)];
+      if (editBytes(changes) + editBytes(inverse) < bytes) { child.changes = changes; child.inverse = inverse; }
+    }
+    parent.children = parent.children.map((id) => id === node.id ? child.id : id);
+    if (parent.lastActiveChild === node.id) parent.lastActiveChild = child.id;
+    this.remove(node.id); this.measure(parent);
+    const pending = [child];
+    while (pending.length) {
+      const next = pending.pop()!;
+      this.checkpoint(next, next === child ? childText : undefined); this.measure(next);
+      if (next.checkpoint === undefined) for (const id of next.children) pending.push(this.nodes.get(id)!);
+    }
+    return { id: child.id, text: childText };
+  }
   /** Leaf pruning protects ancestry; linear compaction retains exact current and starred versions. */
   prune(): void {
+    const over = () => this.size > this.options.maxNodes || this.bytes > this.options.maxBytes;
+    if (!over()) return;
+    let compacted: { id: string; text: string } | undefined;
     const protectedIds = new Set(this.path());
     for (const node of this.nodes.values()) if (node.starred) for (const id of this.path(node.id)) protectedIds.add(id);
-    const over = () => this.size > this.options.maxNodes || JSON.stringify([...this.nodes.values()]).length * 2 > this.options.maxBytes;
-    // Compact old, unprotected linear runs into a checkpoint before dropping branches.
-    if (!over()) return;
     for (const node of [...this.nodes.values()]) {
       if (!over()) break;
       if (protectedIds.has(node.id) || !node.parentId || node.children.length !== 1) continue;
-      const child = this.nodes.get(node.children[0]!)!; const parent = this.nodes.get(node.parentId)!;
-      const parentText = this.textAt(parent.id); const childText = this.textAt(child.id);
-      child.parentId = parent.id; child.changes = [textEdit(parentText, childText)]; child.inverse = [textEdit(childText, parentText)]; child.checkpoint = childText;
-      parent.children = parent.children.map((id) => id === node.id ? child.id : id);
-      if (parent.lastActiveChild === node.id) parent.lastActiveChild = child.id;
-      this.nodes.delete(node.id);
+      compacted = this.compact(node, compacted);
     }
     const oldest = [...this.nodes.values()].sort((a, b) => a.createdAt - b.createdAt);
     while (over()) {
       const leaf = oldest.find((node) => this.nodes.has(node.id) && !protectedIds.has(node.id) && !node.children.length);
       if (!leaf) {
-        // A long active run has no disposable leaves. Fold its oldest unstarred step
-        // into its child, retaining root, forks, current and every starred version.
+        // Fold the oldest unstarred step, retaining root, forks and current.
         const step = oldest.find((node) => this.nodes.has(node.id) && node.id !== this.currentId && node.parentId && !node.starred && node.children.length === 1);
         if (!step) break; // Pinned/forked data can exceed the soft cap.
-        const child = this.nodes.get(step.children[0]!)!; const parent = this.nodes.get(step.parentId!)!;
-        const parentText = this.textAt(parent.id); const childText = this.textAt(child.id);
-        child.parentId = parent.id; child.changes = [textEdit(parentText, childText)]; child.inverse = [textEdit(childText, parentText)]; child.checkpoint = childText;
-        parent.children = parent.children.map((id) => id === step.id ? child.id : id);
-        if (parent.lastActiveChild === step.id) parent.lastActiveChild = child.id;
-        this.nodes.delete(step.id); continue;
+        compacted = this.compact(step, compacted); continue;
       }
       const parent = this.nodes.get(leaf.parentId!)!; parent.children = parent.children.filter((id) => id !== leaf.id);
       if (parent.lastActiveChild === leaf.id) { delete parent.lastActiveChild; if (parent.children.length) parent.lastActiveChild = parent.children.at(-1)!; }
-      this.nodes.delete(leaf.id);
+      this.remove(leaf.id); this.measure(parent);
     }
   }
 }
