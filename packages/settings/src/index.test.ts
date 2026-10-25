@@ -47,6 +47,40 @@ describe('settings', () => {
     expect(await loadPendingSession({ id: idA }, 'a.md')).toBeUndefined();
   });
 
+  it('serializes concurrent first connections without losing identities or other folders', async () => {
+    const storage = memoryBackend();
+    setSettingsBackend(storage);
+    const entry = {};
+    const [a, same, b] = await Promise.all([
+      workspaceIdFor(handle('paper', entry)), workspaceIdFor(handle('paper', entry)), workspaceIdFor(handle('paper', {})),
+    ]);
+    expect(same).toBe(a);
+    expect(b).not.toBe(a);
+    expect(storage.values.get('workspace-ids')).toHaveLength(2);
+  });
+
+  it('deletes only id-owned recovery when a same-named legacy draft exists', async () => {
+    setSettingsBackend(memoryBackend());
+    await savePendingSession({ workspaceName: 'paper', path: 'a.md', source: 'other folder', updatedAt: 'then' });
+    await savePendingSession({ workspaceName: 'paper', workspaceId: 'ours', path: 'a.md', source: 'ours', updatedAt: 'now' });
+    expect(await loadPendingSession({ id: 'ours', name: 'paper' }, 'a.md')).toMatchObject({ source: 'ours' });
+    await deletePendingSession({ id: 'ours', name: 'paper' }, 'a.md');
+    expect(await loadPendingSession('paper', 'a.md')).toMatchObject({ source: 'other folder' });
+  });
+
+  it('does not delete an unclaimed legacy draft, and migrates only a loaded legacy draft', async () => {
+    const storage = memoryBackend();
+    setSettingsBackend(storage);
+    await savePendingSession({ workspaceName: 'paper', path: 'a.md', source: 'legacy', updatedAt: 'then' });
+    await deletePendingSession({ id: 'unclaimed', name: 'paper' }, 'a.md');
+    expect(await loadPendingSession('paper', 'a.md')).toMatchObject({ source: 'legacy' });
+    expect(await loadPendingSession({ id: 'claimed', name: 'paper' }, 'a.md')).toMatchObject({ source: 'legacy' });
+    expect(storage.values.get('pending-id:claimed:a.md')).toMatchObject({ workspaceId: 'claimed', source: 'legacy' });
+    expect(await loadPendingSession('paper', 'a.md')).toBeUndefined();
+    await deletePendingSession({ id: 'claimed', name: 'paper' }, 'a.md');
+    expect(await loadPendingSession({ id: 'claimed' }, 'a.md')).toBeUndefined();
+  });
+
   it('still reads recovery data saved under the legacy folder-name key', async () => {
     setSettingsBackend(memoryBackend());
     await savePendingSession({ workspaceName: 'paper', path: 'a.md', source: 'old', updatedAt: 'then' });

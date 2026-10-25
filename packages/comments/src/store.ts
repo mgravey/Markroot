@@ -16,10 +16,10 @@ interface ThreadRecord {
   resolution: CommentResolution | null;
   deleted: boolean;
 }
-type ThreadEvent =
+type ThreadEvent = { readonly seq?: number } & (
   | { version: 1; id: string; at: string; type: 'resolve'; resolution: CommentResolution }
   | { version: 1; id: string; at: string; type: 'reopen' | 'delete' }
-  | { version: 1; id: string; at: string; type: 'reattach'; selector: CommentSelector; sourceRevision: CommentRevision | null };
+  | { version: 1; id: string; at: string; type: 'reattach'; selector: CommentSelector; sourceRevision: CommentRevision | null });
 interface ThreadState {
   readonly record: ThreadRecord;
   readonly status: 'open' | 'resolved';
@@ -157,8 +157,10 @@ export class CommentStore {
     if (preserveExisting && await this.exists(path)) return;
     await this.workspace.writeFileGuarded(path, encode({ id: message.id, author: message.author, createdAt: message.createdAt, body: message.body }));
   }
-  private async writeEvent(threadId: string, change: DistributiveOmit<ThreadEvent, 'version' | 'id' | 'at'>): Promise<void> {
-    const event = { version: 1, id: crypto.randomUUID(), at: new Date().toISOString(), ...change } as ThreadEvent;
+  private async writeEvent(threadId: string, change: DistributiveOmit<ThreadEvent, 'version' | 'id' | 'at' | 'seq'>): Promise<void> {
+    const known = await this.events(threadId);
+    const seq = 1 + known.reduce((maximum, event) => Math.max(maximum, event.seq ?? 0), 0);
+    const event = { version: 1, id: crypto.randomUUID(), at: new Date().toISOString(), seq, ...change } as ThreadEvent;
     validateEvent(event);
     await this.workspace.writeFileGuarded(workspacePath(`${threadDirectory(threadId)}/events/${event.id}.yaml`), encode(event));
   }
@@ -168,17 +170,22 @@ export class CommentStore {
     if (!state || state.deleted) throw new Error(`Comment thread not found: ${id}`);
     return state;
   }
-  /** Folds the append-only events deterministically: by time, then event ID; deletion always wins. */
-  private async state(record: ThreadRecord): Promise<ThreadState> {
+  private async events(id: string): Promise<ThreadEvent[]> {
     const events: ThreadEvent[] = [];
-    for (const entry of await this.list(workspacePath(`${threadDirectory(record.id)}/events`))) {
+    for (const entry of await this.list(workspacePath(`${threadDirectory(id)}/events`))) {
       if (entry.kind !== 'file' || !entry.path.endsWith('.yaml')) continue;
       const value = await this.parsed(entry.path);
       validateEvent(value);
       if (entry.path.split('/').at(-1) !== `${value.id}.yaml`) throw new Error(`Comment event ID does not match ${entry.path}`);
       events.push(value);
     }
-    events.sort((a, b) => a.at.localeCompare(b.at) || a.id.localeCompare(b.id));
+    return events;
+  }
+  /** Legacy unsequenced events form the initial history in timestamp order; new causal events follow.
+   * Concurrent events at the same sequence use timestamp and ID as deterministic tie breakers. */
+  private async state(record: ThreadRecord): Promise<ThreadState> {
+    const events = await this.events(record.id);
+    events.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0) || a.at.localeCompare(b.at) || a.id.localeCompare(b.id));
     let { status, selector, sourceRevision, resolution, deleted } = record;
     for (const event of events) {
       if (event.type === 'resolve') { status = 'resolved'; resolution = event.resolution; }
@@ -255,6 +262,7 @@ function validateRecord(value: unknown): asserts value is ThreadRecord {
 function validateEvent(value: unknown): asserts value is ThreadEvent {
   if (!object(value) || value.version !== 1 || typeof value.id !== 'string' || typeof value.at !== 'string' || !['resolve', 'reopen', 'reattach', 'delete'].includes(value.type as string)) throw new Error('Invalid comment event YAML.');
   safeId(value.id);
+  if (value.seq !== undefined && (!Number.isSafeInteger(value.seq) || (value.seq as number) < 1)) throw new Error('Invalid comment event sequence.');
   if (value.type === 'resolve') validateResolution(value.resolution);
   if (value.type === 'reattach' && (!selector(value.selector) || (value.sourceRevision !== null && !revision(value.sourceRevision)))) throw new Error('Invalid comment reattach event YAML.');
 }

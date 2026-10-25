@@ -250,6 +250,51 @@ Evidence supports the result [@doe2026].
     expect(result.html).toContain('href="#fig-café"');
   });
 
+  it('emits legacy ASCII and fallback heading anchors alongside Unicode primary ids', async () => {
+    const result = await render('# α Biology\n\n## 引言\n\nSee [old](#biology), [new](#α-biology) and [fallback](#mr-section-2).\n');
+    expect(result.html).toContain('<h1 id="α-biology"');
+    expect(result.html).toMatch(/<span id="biology"[^>]*data-source-offset="0"[^>]*><\/span>/);
+    expect(result.html).toContain('<h2 id="引言"');
+    expect(result.html).toContain('<span id="mr-section-2"');
+    expect(result.html).toContain('href="#biology"');
+    expect(result.html).toContain('href="#%CE%B1-biology"');
+  });
+
+  it('allocates aliases without duplicating primary ids and replays cached aliases correctly', async () => {
+    const engine = new BasicDocumentEngine();
+    const source = '# α Biology\n\n# Biology\n\n# α Biology\n\n# 日本語\n';
+    const result = await render(source, { engine });
+    expect(result.html).toContain('<h1 id="biology"');
+    expect(result.html).toContain('<span id="biology-2"');
+    expect(result.html).toContain('<span id="biology-3"');
+    expect(result.html).toContain('<span id="mr-section-4"');
+    const ids = [...result.html.matchAll(/\bid="([^"]*)"/g)].map((match) => match[1]);
+    expect(new Set(ids).size).toBe(ids.length);
+    const revised = '![Figure](missing.png){#fig-one}\n\n' + source;
+    expect((await render(revised, { engine })).html).toBe((await render(revised)).html);
+    expect((await render(revised, { engine })).html).toContain('<span id="mr-section-5"');
+  });
+
+  it('resolves cross-references through both generated Unicode and legacy heading ids', async () => {
+    const result = await render('# Sec α Biology\n\nSee @sec-α-biology and @sec-biology.\n');
+    expect(result.html).toMatch(/href="#sec-α-biology"[^>]*>Section 1<\/a>/);
+    expect(result.html).toMatch(/href="#sec-biology"[^>]*>Section 1<\/a>/);
+    expect(result.html).toContain('<span id="sec-biology"');
+  });
+
+  it('does not add aliases when duplicate ASCII heading ids already match the legacy ids', async () => {
+    const result = await render('# Biology\n\n# Biology\n');
+    expect(result.html).toContain('<h1 id="biology"');
+    expect(result.html).toContain('<h1 id="biology-2"');
+    expect(result.html).not.toMatch(/<span id=/);
+  });
+
+  it('reserves bibliography ids before allocating heading aliases', async () => {
+    const result = await render('# α Ref Doe\n\n[@doe]\n', { citations: [doe] });
+    expect(result.html).toContain('<span id="ref-doe-2"');
+    expect(result.html.match(/ id="ref-doe"/g)).toHaveLength(1);
+  });
+
   it('keeps brace-protected corporate authors whole in citation labels', async () => {
     const result = await render('[@who]\n', { citations: [{ key: 'who', author: 'World Health Organization', authors: [{ literal: 'World Health Organization' }], year: '2020' }] });
     expect(result.html).toContain('World Health Organization, 2020');

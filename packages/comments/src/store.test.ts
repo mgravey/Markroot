@@ -72,6 +72,58 @@ describe('Git-friendly YAML comment storage', () => {
     await expect(store.reply(path, id, 'Late reply', author)).rejects.toThrow('not found');
   });
 
+  it.each(['tie', 'clock skew'])('keeps resolve then reopen causal under %s', async (clock) => {
+    const { workspace, store, id, revision } = await fixture();
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-10-25T12:00:00Z'));
+      const uuid = vi.spyOn(crypto, 'randomUUID');
+      uuid.mockReturnValueOnce('ffffffff-ffff-4fff-afff-ffffffffffff');
+      await store.setStatus(path, id, 'resolved', { revision, selector: createSelector(source, range), author, at: 'now' });
+      if (clock === 'clock skew') vi.setSystemTime(new Date('2020-01-01T00:00:00Z'));
+      uuid.mockReturnValueOnce('00000000-0000-4000-a000-000000000000');
+      await new CommentStore(workspace).setStatus(path, id, 'open');
+      expect((await new CommentStore(workspace).load(path))[0]?.status).toBe('open');
+      const events = Object.entries(await files(workspace)).filter(([file]) => file.includes('/events/'));
+      expect(events.map(([, content]) => /seq: (\d+)/.exec(content)?.[1]).sort()).toEqual(['1', '2']);
+    } finally { vi.useRealTimers(); vi.restoreAllMocks(); }
+  });
+
+  it('orders unsequenced intermediate events by time, then extends them with a logical clock', async () => {
+    const { workspace, store, id, revision } = await fixture();
+    await store.setStatus(path, id, 'resolved', { revision, selector: createSelector(source, range), author, at: 'now' });
+    await store.setStatus(path, id, 'open');
+    const events = (await listTree(workspace)).filter((entry) => entry.path.includes('/events/'));
+    for (const event of events) {
+      const content = await workspace.readFile(event.path);
+      const at = content.includes('type: "resolve"') ? '2030-01-01T00:00:00.000Z' : '2029-01-01T00:00:00.000Z';
+      await workspace.writeFile(event.path, content.replace(/^seq: .*\n/m, '').replace(/^at: .*$/m, `at: "${at}"`));
+    }
+    expect((await new CommentStore(workspace).load(path))[0]?.status).toBe('resolved');
+    await store.setStatus(path, id, 'open');
+    expect((await new CommentStore(workspace).load(path))[0]?.status).toBe('open');
+  });
+
+  it('folds merged concurrent sequences deterministically and advances past every known event', async () => {
+    const { workspace, id, revision } = await fixture();
+    const seed = await files(workspace);
+    const a = new MemoryWorkspace(seed);
+    const b = new MemoryWorkspace(seed);
+    const resolution = { revision, selector: createSelector(source, range), author, at: 'now' };
+    await new CommentStore(a).setStatus(path, id, 'resolved', resolution);
+    await new CommentStore(b).setStatus(path, id, 'open');
+    const merged = { ...await files(a), ...await files(b) };
+    const forward = new MemoryWorkspace(merged);
+    const reverse = new MemoryWorkspace(Object.fromEntries(Object.entries(merged).reverse()));
+    const first = await new CommentStore(forward).load(path);
+    expect(await new CommentStore(reverse).load(path)).toEqual(first);
+    await new CommentStore(forward).setStatus(path, id, 'resolved', resolution);
+    const saved = Object.entries(await files(forward)).filter(([file]) => file.includes('/events/'));
+    expect(saved.filter(([, content]) => content.includes('seq: 1'))).toHaveLength(2);
+    expect(saved.filter(([, content]) => content.includes('seq: 2'))).toHaveLength(1);
+    expect((await new CommentStore(forward).load(path))[0]?.status).toBe('resolved');
+  });
+
   it('reattaches explicitly without rewriting Markdown', async () => {
     const { workspace, store, id, revision } = await fixture();
     const changed = source.replace('this', 'that');

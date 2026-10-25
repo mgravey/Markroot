@@ -55,3 +55,17 @@ it('decodes LaTeX accents and keeps brace-protected corporate authors whole', ()
   expect(record?.author).toBe('World Health Organization and Müller, Jörg and Ana García');
   expect(record?.authors).toEqual([{ literal: 'World Health Organization' }, { family: 'Müller', given: 'Jörg' }, { family: 'García', given: 'Ana' }]);
 });
+
+it('preserves identifier punctuation while decoding display typography', () => {
+  const [record] = parseBibTeX('@article{verbatim, title={A--B~study}, doi={{10.1234/a--b~c}}, url={https://example.org/a--b~c}, eprint={a--b~c}}', workspacePath('refs.bib'));
+  expect(record?.title).toBe('A–B study');
+  expect(record?.doi).toBe('10.1234/a--b~c');
+  expect(record?.url).toBe('https://example.org/a--b~c');
+  expect(record?.eprint).toBe('a--b~c');
+});
+
+it('preserves literal whitespace, backslashes and internal braces in identifier fields', () => {
+  const [record] = parseBibTeX(String.raw`@misc{literal, url={{https://example.org/{token}--a\~b}}, eprint={a  b~c}}`, workspacePath('refs.bib'));
+  expect(record?.url).toBe(String.raw`https://example.org/{token}--a\~b`);
+  expect(record?.eprint).toBe('a  b~c');
+});

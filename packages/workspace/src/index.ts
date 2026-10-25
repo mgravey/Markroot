@@ -307,17 +307,28 @@ export class FileSystemAccessWorkspace implements GuardedWorkspace {
       catch (cause) { if (!hasDomExceptionName(cause, 'NotSupportedError') && !(cause instanceof TypeError)) throw mapFsError(cause, source); }
     }
     if (kind === 'file') await this.writeBytes(destination, await this.readBytes(source, context), context);
-    else { await this.createDirectory(destination, { recursive: true }, context); await this.copyChildren(source, destination, context); }
+    else { await this.createDirectory(destination, { recursive: true }, context); await this.copyChildren(await this.directory(source, false, context), await this.directory(destination, false, context), context); }
     await this.remove(source, { recursive: true }, context);
     this.knownContent.delete(source);
   }
 
-  private async copyChildren(source: WorkspacePath, destination: WorkspacePath, context?: OperationContext): Promise<void> {
-    for (const entry of await this.listFiles(source, context)) {
-      const suffix = entry.path.slice(source.length + 1);
-      const target = workspacePath(`${destination}/${suffix}`);
-      if (entry.kind === 'file') await this.writeBytes(target, await this.readBytes(entry.path, context), context);
-      else { await this.createDirectory(target, { recursive: true }, context); await this.copyChildren(entry.path, target, context); }
+  /** Raw handles preserve names listFiles intentionally hides; never delete a partially copied source. */
+  private async copyChildren(source: FileSystemDirectoryHandle, destination: FileSystemDirectoryHandle, context?: OperationContext): Promise<void> {
+    for await (const [name, entry] of (source as IterableDirectoryHandle).entries()) {
+      throwIfAborted(context);
+      if (entry.kind === 'directory') {
+        await this.copyChildren(await source.getDirectoryHandle(name), await destination.getDirectoryHandle(name, { create: true }), context);
+      } else {
+        const file = await (await source.getFileHandle(name)).getFile();
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        throwIfAborted(context);
+        const writable = await (await destination.getFileHandle(name, { create: true })).createWritable();
+        try {
+          await writable.write(bytes);
+          throwIfAborted(context);
+          await writable.close();
+        } catch (cause) { await writable.abort(cause).catch(() => undefined); throw cause; }
+      }
     }
   }
 

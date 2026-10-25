@@ -10,6 +10,8 @@ export interface CitationRecord {
   readonly authors?: readonly CitationName[];
   readonly year?: string;
   readonly doi?: string;
+  readonly url?: string;
+  readonly eprint?: string;
   readonly source: WorkspacePath;
   readonly raw: string;
 }
@@ -60,6 +62,8 @@ export class LocalCitationProvider implements CitationProvider {
   }
 }
 
+const DISPLAY_FIELDS = new Set(['title', 'subtitle', 'author', 'editor', 'journal', 'journaltitle', 'booktitle', 'publisher', 'organization', 'institution', 'school', 'address', 'location', 'series', 'edition', 'note', 'abstract', 'keywords']);
+
 export function parseBibTeX(source: string, path: WorkspacePath): readonly CitationRecord[] {
   const records: CitationRecord[] = [];
   const macros = new Map(['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'].map((month, index) => [month, String(index + 1)]));
@@ -81,7 +85,7 @@ export function parseBibTeX(source: string, path: WorkspacePath): readonly Citat
     if (!key) continue;
     const comma = body.indexOf(',');
     const rawFields = comma < 0 ? new Map<string, string>() : parseBibFields(body.slice(comma + 1), macros);
-    const fields = new Map([...rawFields].map(([name, value]) => [name, decodeLatex(value)]));
+    const fields = new Map([...rawFields].map(([name, value]) => [name, DISPLAY_FIELDS.has(name) ? decodeLatex(value) : trimOuterBraces(value)]));
     const title = fields.get('title');
     const author = fields.get('author');
     const authors = rawFields.has('author') ? parseNames(rawFields.get('author')!) : [];
@@ -95,11 +99,20 @@ export function parseBibTeX(source: string, path: WorkspacePath): readonly Citat
       ...(authors.length ? { authors } : {}),
       ...(year ? { year } : {}),
       ...(doi ? { doi } : {}),
+      ...(fields.get('url') ? { url: fields.get('url')! } : {}),
+      ...(fields.get('eprint') ? { eprint: fields.get('eprint')! } : {}),
       source: path,
       raw,
     });
   }
   return records;
+}
+
+/** Remove protective outer grouping only; identifier punctuation and internal braces are literal. */
+function trimOuterBraces(value: string): string {
+  let result = value.trim();
+  while (result.startsWith('{') && topLevelEnd(result) === result.length - 1) result = result.slice(1, -1).trim();
+  return result;
 }
 
 /** Finds the end of an entry opened at `open`; quotes delimit values only at the entry's top brace level. */
@@ -148,7 +161,7 @@ function parseBibFields(body: string, macros: ReadonlyMap<string, string>): Read
       if (body[cursor] !== '#') break;
       cursor += 1;
     }
-    fields.set(key, value.replace(/\s+/g, ' ').trim());
+    fields.set(key, value.trim());
   }
   return fields;
 }
