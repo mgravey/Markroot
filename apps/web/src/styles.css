@@ -376,3 +376,24 @@ mark { color: inherit; background: #ffd76a; border-radius: .118em; }
 }
 
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+
+/* Project switcher: browser-local recent folders. Keep this block independent of viewer styles. */
+.project-switcher { position: relative; min-width: 0; }
+.project-switcher .workspace-button { width: 100%; }
+.project-menu { position: absolute; top: calc(100% + 7px); left: 0; z-index: 30; width: min(340px, calc(100vw - 32px)); max-height: min(520px, 75vh); overflow-y: auto; padding: 5px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface-strong); box-shadow: var(--shadow); }
+.project-menu-heading, .project-menu-empty { padding: 7px 9px; margin: 0; color: var(--muted); font-size: 11px; }
+.project-row { display: flex; align-items: center; gap: 3px; min-width: 0; }
+.project-select, .project-open { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 9px; color: var(--ink); background: transparent; border-radius: 5px; text-align: left; }
+.project-select { flex: 1; }
+.project-select:hover, .project-remove:hover, .project-open:hover { background: var(--surface); }
+.project-check { display: grid; place-items: center; width: 16px; flex-shrink: 0; color: var(--accent); }
+.project-label { display: grid; gap: 3px; min-width: 0; }
+.project-label > span, .project-label small { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.project-label small { font-size: 10px; color: var(--muted); }
+.project-remove { display: grid; place-items: center; flex-shrink: 0; width: 28px; height: 28px; color: var(--muted); background: transparent; border-radius: 5px; }
+.project-open { width: 100%; margin-top: 5px; border-top: 1px solid var(--line); border-radius: 0 0 5px 5px; }
+.project-menu button:focus-visible, .recent-projects button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.recent-projects { margin: 22px auto 0; max-height: 35vh; overflow-y: auto; text-align: left; }
+.recent-projects h2 { margin: 0 0 6px; color: var(--muted); font-size: 11px; font-weight: 600; }
+.notice .project-notice-remove { display: inline-block; width: auto; height: auto; padding: 4px 6px; white-space: nowrap; color: var(--ink); text-decoration: underline; }
+@media (max-width: 760px) { .project-switcher { flex: 1; } }

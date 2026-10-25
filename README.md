@@ -26,6 +26,7 @@ The visual identity uses a rooted pilcrow, with a Lottie-ready After Effects sou
 - Opt-in Conventional Commit suggestions from Chrome's on-device Gemini Nano model after explicit saves, with editable review, large-diff reduction, and guarded one-click local commits
 - Worker-isolated HTML/DOCX export through Pandoc WASM and PDF export through Pandoc-to-Typst plus Typst WASM, including documents and resources stored in nested folders, header-selected DOCX/HTML/Typst templates, and setting-based paragraph justification when no template styling is supplied
 - Download, native Save As, and save-beside-source export targets with visible step-by-step progress and cancellation
+- Recent-project selector with one-click folder switching, browser-local bookmarks, and Ctrl/Cmd+Shift+O
 - Browser-only settings, local author profiles, and IndexedDB crash-recovery drafts
 - Live system/light/dark themes, global save/find shortcuts, folder-scoped async operations, and leased preview image URLs
 - App behavior composed from workspace, save, review, navigation, comment, preview, export, and Git hooks

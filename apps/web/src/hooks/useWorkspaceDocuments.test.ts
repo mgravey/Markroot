@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import { act } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { defaultSettings, loadRecentWorkspace, loadSettings } from '@markroot/settings';
-import { MemoryWorkspace } from '@markroot/workspace';
+import { defaultSettings, listRecentProjects, loadRecentWorkspace, loadSettings, rememberProject, forgetProject } from '@markroot/settings';
+import { FileSystemAccessWorkspace, ensureDirectoryPermission, MemoryWorkspace } from '@markroot/workspace';
 import { workspacePath } from '@markroot/core';
 import { resolveWorkspaceLink } from '../components/preview-utils.js';
 import { useComments } from './useComments.js';
@@ -11,7 +11,9 @@ import { deferred, mountHook } from './hook-test-utils.js';
 
 vi.mock('@markroot/settings', async (original) => ({
   ...await original<typeof import('@markroot/settings')>(),
-  loadSettings: vi.fn(), loadRecentWorkspace: vi.fn(), workspaceIdFor: vi.fn().mockResolvedValue('folder-id'),
+  loadSettings: vi.fn(), loadRecentWorkspace: vi.fn(), listRecentProjects: vi.fn().mockResolvedValue([]),
+  rememberProject: vi.fn(async (handle: FileSystemDirectoryHandle) => ({ id: `id-${handle.name}`, name: handle.name, handle, lastOpenedAt: 1 })),
+  forgetProject: vi.fn().mockResolvedValue(undefined), workspaceIdFor: vi.fn().mockResolvedValue('folder-id'),
   loadPendingSession: vi.fn().mockResolvedValue(undefined), saveRecentWorkspace: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock('@markroot/workspace', async (original) => {
@@ -37,7 +39,7 @@ function setup(realComments = false) {
     comments: () => comments as unknown as ReturnType<Parameters<typeof useWorkspaceDocuments>[0]['comments']>,
     repository: () => repository as unknown as ReturnType<Parameters<typeof useWorkspaceDocuments>[0]['repository']>,
     settingsRef, setSettings: vi.fn(), updateSettings: vi.fn(), setNotice: vi.fn(), reportError: vi.fn(),
-    onFolderReset: vi.fn(), onDocumentLoading: vi.fn(), onDocumentOpened: vi.fn(),
+    saveBeforeSwitch: vi.fn(), onFolderReset: vi.fn(), onDocumentLoading: vi.fn(), onDocumentOpened: vi.fn(),
   };
   const hook = mountHook((props: typeof options) => {
     const documents = useWorkspaceDocuments({ ...props, comments: () => realComments ? commentState : props.comments() });
@@ -54,6 +56,8 @@ function setup(realComments = false) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(listRecentProjects).mockResolvedValue([]);
+  vi.mocked(ensureDirectoryPermission).mockResolvedValue('granted');
   vi.mocked(loadRecentWorkspace).mockResolvedValue({ name: 'test' } as FileSystemDirectoryHandle);
 });
 
@@ -180,6 +184,153 @@ describe('document loads with real comment lifecycle effects', () => {
       await act(async () => { reloading = hook.current.openFile(path); await started.promise; });
       await act(async () => { gate.resolve('checked-out version'); await reloading; });
       expect(hook.current.snapshot).toMatchObject({ path, source: 'checked-out version' });
+    } finally { hook.unmount(); }
+  });
+});
+
+const project = (name: string, requestPermission = vi.fn().mockResolvedValue('granted')) => ({
+  id: `id-${name}`, name, lastOpenedAt: 1, handle: { name, requestPermission } as unknown as FileSystemDirectoryHandle,
+});
+
+async function readyProject() {
+  vi.mocked(loadSettings).mockResolvedValue(defaultSettings());
+  const result = setup();
+  await act(async () => { await result.connected.promise; });
+  return result;
+}
+
+describe('project selection', () => {
+  it('shows remembered projects without requesting permission on startup when access needs a click', async () => {
+    const request = vi.fn().mockResolvedValue('granted');
+    const recent = project('paper', request);
+    vi.mocked(loadSettings).mockResolvedValue(defaultSettings());
+    vi.mocked(loadRecentWorkspace).mockResolvedValue(recent.handle);
+    vi.mocked(listRecentProjects).mockResolvedValue([recent]);
+    vi.mocked(ensureDirectoryPermission).mockResolvedValue('prompt');
+    const { hook, options } = setup();
+    try {
+      await act(async () => {});
+      expect(hook.current.workspace).toBeUndefined();
+      expect(hook.current.recentProjects).toEqual([recent]);
+      expect(ensureDirectoryPermission).toHaveBeenCalledWith(recent.handle);
+      expect(request).not.toHaveBeenCalled();
+      expect(options.onFolderReset).not.toHaveBeenCalled();
+    } finally { hook.unmount(); }
+  });
+
+  it('offers removal when the most recent project has disappeared during startup restore', async () => {
+    const recent = project('missing');
+    vi.mocked(loadSettings).mockResolvedValue(defaultSettings());
+    vi.mocked(loadRecentWorkspace).mockResolvedValue(recent.handle);
+    vi.mocked(listRecentProjects).mockResolvedValue([recent]);
+    const list = vi.spyOn(FileSystemAccessWorkspace.prototype, 'listFiles').mockRejectedValueOnce(new DOMException('Missing', 'NotFoundError'));
+    const { hook, options } = setup();
+    try {
+      await act(async () => {});
+      expect(hook.current.workspace).toBeUndefined();
+      expect(hook.current.unavailableProject).toBe(recent);
+      expect(options.setNotice).toHaveBeenLastCalledWith(expect.stringContaining('unavailable'));
+      expect(options.onFolderReset).not.toHaveBeenCalled();
+    } finally { list.mockRestore(); hook.unmount(); }
+  });
+
+  it('requests permission synchronously, then resets and remembers the selected folder', async () => {
+    const { hook, options } = await readyProject();
+    const permission = deferred<PermissionState>();
+    const request = vi.fn(() => permission.promise);
+    const recent = project('next', request);
+    try {
+      let opening!: Promise<void>;
+      act(() => { opening = hook.current.selectProject(recent); expect(request).toHaveBeenCalledWith({ mode: 'readwrite' }); });
+      expect(hook.current.rootName).toBe('test');
+      await act(async () => { permission.resolve('granted'); await opening; });
+      expect(hook.current.rootName).toBe('next');
+      expect(hook.current.snapshot).toBeUndefined();
+      expect(rememberProject).toHaveBeenCalledWith(recent.handle);
+      expect(options.onFolderReset).toHaveBeenCalledTimes(2);
+    } finally { hook.unmount(); }
+  });
+
+  it('retains the current folder when permission is denied and can forget the unavailable bookmark', async () => {
+    const { hook, options } = await readyProject();
+    const recent = project('denied', vi.fn().mockResolvedValue('denied'));
+    try {
+      await act(async () => { await hook.current.selectProject(recent); });
+      expect(hook.current.rootName).toBe('test');
+      expect(hook.current.unavailableProject).toBe(recent);
+      expect(options.setNotice).toHaveBeenLastCalledWith(expect.stringContaining('not granted'));
+      await act(async () => { await hook.current.removeProject(recent.id); });
+      expect(forgetProject).toHaveBeenCalledWith(recent.id);
+      expect(hook.current.unavailableProject).toBeUndefined();
+      expect(options.onFolderReset).toHaveBeenCalledOnce();
+    } finally { hook.unmount(); }
+  });
+
+  it('offers removal for a missing directory without clearing the current document', async () => {
+    const { hook, options } = await readyProject();
+    await act(async () => { await hook.current.openFile(workspacePath('docs/a.md')); });
+    const list = vi.spyOn(FileSystemAccessWorkspace.prototype, 'listFiles').mockRejectedValueOnce(new DOMException('Missing', 'NotFoundError'));
+    const recent = project('missing');
+    try {
+      await act(async () => { await hook.current.selectProject(recent); });
+      expect(hook.current.unavailableProject).toBe(recent);
+      expect(hook.current.rootName).toBe('test');
+      expect(hook.current.snapshot?.source).toBe('first');
+      expect(options.onFolderReset).toHaveBeenCalledOnce();
+    } finally { list.mockRestore(); hook.unmount(); }
+  });
+
+  it('asks before discarding edits, with cancellation leaving the handle untouched', async () => {
+    const { hook } = await readyProject();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const request = vi.fn().mockResolvedValue('granted');
+    try {
+      await act(async () => { await hook.current.openFile(workspacePath('docs/a.md')); });
+      act(() => { hook.current.session!.replace('unsaved', 'source'); });
+      await act(async () => { await hook.current.selectProject(project('next', request)); });
+      expect(confirm).toHaveBeenCalledWith('Discard unsaved edits and open another folder?');
+      expect(request).not.toHaveBeenCalled();
+      expect(hook.current.snapshot?.source).toBe('unsaved');
+      confirm.mockReturnValue(true);
+      await act(async () => { await hook.current.selectProject(project('next', request)); });
+      expect(confirm).toHaveBeenCalledTimes(2);
+      expect(hook.current.rootName).toBe('next');
+    } finally { confirm.mockRestore(); hook.unmount(); }
+  });
+
+  it('requests permission before autosaving and keeps edits open when saving fails', async () => {
+    const { hook, options } = await readyProject();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const request = vi.fn().mockResolvedValue('granted');
+    try {
+      options.settingsRef.current = { ...options.settingsRef.current, autosave: true };
+      await act(async () => { await hook.current.openFile(workspacePath('docs/a.md')); });
+      act(() => { hook.current.session!.replace('unsaved', 'source'); });
+      vi.mocked(options.saveBeforeSwitch).mockResolvedValue(undefined);
+      await act(async () => { await hook.current.selectProject(project('next', request)); });
+      expect(request).toHaveBeenCalledBefore(vi.mocked(options.saveBeforeSwitch));
+      expect(confirm).not.toHaveBeenCalled();
+      expect(hook.current.snapshot?.source).toBe('unsaved');
+      expect(hook.current.rootName).toBe('test');
+      vi.mocked(options.saveBeforeSwitch).mockImplementation(async () => {
+        const current = hook.current.session!.snapshot();
+        hook.current.session!.markSaved(current.revision);
+        return current;
+      });
+      await act(async () => { await hook.current.selectProject(project('next', request)); });
+      expect(hook.current.rootName).toBe('next');
+    } finally { confirm.mockRestore(); hook.unmount(); }
+  });
+
+  it('lets the most recent selection win over a delayed permission result', async () => {
+    const { hook } = await readyProject();
+    const permission = deferred<PermissionState>();
+    try {
+      let earlier!: Promise<void>;
+      act(() => { earlier = hook.current.selectProject(project('earlier', vi.fn(() => permission.promise))); });
+      await act(async () => { await hook.current.selectProject(project('latest')); });
+      await act(async () => { permission.resolve('granted'); await earlier; });
+      expect(hook.current.rootName).toBe('latest');
     } finally { hook.unmount(); }
   });
 });

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  AlignJustify, BookOpen, ChevronRight, CircleAlert, CircleDot, Code2, Columns2, Download, FileCode2,
+  AlignJustify, BookOpen, CircleAlert, CircleDot, Code2, Columns2, Download, FileCode2,
   ExternalLink, Files, GitBranch, GitCompare, ListTree, MessageSquare, PanelRight,
   RefreshCw, Save, Search, Settings2, X,
 } from 'lucide-react';
@@ -13,6 +13,7 @@ import { SourceEditor } from './components/SourceEditor.js';
 import { VisualEditor } from './components/VisualEditor.js';
 import { Preview } from './components/Preview.js';
 import { decodeFragment } from './components/preview-utils.js';
+import { ProjectSwitcher, RecentProjects } from './components/ProjectSwitcher.js';
 import { WorkspaceTree } from './components/WorkspaceTree.js';
 import { DocumentOutline } from './components/DocumentOutline.js';
 import { PaneResizer } from './components/PaneResizer.js';
@@ -71,8 +72,9 @@ export function App() {
   const scroll = useMemo(() => new ScrollStore(), []);
   const lineInputId = useId();
   const reportError = useCallback((error: unknown) => { if (!isAbortError(error)) setNotice(errorMessage(error)); }, []);
-  const { workspace, rootName, entries, session, snapshot, fileVersion, setFileVersion, activeSession, documentRequest, fileVersionRef, workspaceIdRef, citations, chooseFolder, openFile, openWorkspaceLink, pendingWorkspace, loadCitations, refreshWorkspace } = useWorkspaceDocuments({
+  const { workspace, rootName, entries, session, snapshot, fileVersion, setFileVersion, activeSession, documentRequest, fileVersionRef, workspaceIdRef, citations, recentProjects, unavailableProject, selectProject, removeProject, chooseFolder, openFile, openWorkspaceLink, pendingWorkspace, loadCitations, refreshWorkspace } = useWorkspaceDocuments({
     comments: () => commentState, repository: () => repo, settingsRef, setSettings, updateSettings: useEvent((next: MarkrootSettings) => updateSettings(next)), setNotice, reportError,
+    saveBeforeSwitch: useEvent(() => saveDocument()),
     onDocumentLoading: useEvent(() => resetReview()),
     onFolderReset: useEvent(() => {
       closeCommitDialog(false); resetReview(); setInspector((open) => open === 'review' ? undefined : open);
@@ -397,7 +399,7 @@ export function App() {
   return <><div className={`app ${inspector ? 'with-inspector' : ''}`} style={{ '--files-width': `${settings.filesPaneWidth}px` } as CSSProperties}>
     <header className="topbar">
       <div className="brand" aria-label="Markroot"><BrandMark className="brand-mark"/><strong>Markroot</strong></div>
-      <button className="workspace-button" onClick={() => void chooseFolder().catch(reportError)} title="Open another folder"><Files size={16}/><span>{rootName}</span><ChevronRight size={14}/></button>
+      <ProjectSwitcher projects={recentProjects} currentId={workspace ? workspaceIdRef.current : undefined} rootName={rootName} onSelect={(project) => void selectProject(project).catch(reportError)} onRemove={(id) => void removeProject(id).catch(reportError)} onOpen={() => void chooseFolder().catch(reportError)}/>
       <div className="document-title"><FileCode2 size={16}/><span>{snapshot?.path ?? 'Open a Markdown or QMD file'}</span>{snapshot?.dirty && <CircleDot size={13} aria-label="Unsaved"/>}</div>
       <div className="top-actions">
         {snapshot && <button onClick={saveFromEditor} title="Save (Ctrl/Cmd+S)" aria-label="Save"><Save size={17}/></button>}
@@ -410,20 +412,20 @@ export function App() {
     </header>
 
     {findOpen && <div className="findbar" role="search"><Search size={15}/><input ref={searchInput} aria-label="Find in source and rendered view" value={search} onChange={(event) => { setSearch(event.target.value); setMatchCursor(-1); }} placeholder="Find in source and rendered view"/><button className={regularExpression ? 'find-option active' : 'find-option'} onClick={() => { setRegularExpression((value) => !value); setMatchCursor(-1); }} title="Use regular expression" aria-label="Use regular expression" aria-pressed={regularExpression}>.*</button><button className="find-step" disabled={!matches.length} onClick={() => navigateMatch(-1)} title="Previous match" aria-label="Previous match">↑</button><button className="find-step" disabled={!matches.length} onClick={() => navigateMatch(1)} title="Next match" aria-label="Next match">↓</button><span aria-live="polite">{matches.length} source matches</span><form className="goto-line" onSubmit={(event) => { event.preventDefault(); const line = Number.parseInt(lineInput, 10); if (Number.isFinite(line) && line > 0) { setGoToLine(undefined); window.setTimeout(() => setGoToLine(line), 0); } }}><label htmlFor={lineInputId}>Line</label><input id={lineInputId} inputMode="numeric" value={lineInput} onChange={(event) => setLineInput(event.target.value.replace(/\D/g, ''))} placeholder="#"/><button type="submit">Go</button></form><button onClick={() => { setSearch(''); setFindOpen(false); }} title="Close find" aria-label="Close find"><X size={15}/></button></div>}
-    {notice && <div className="notice" role="status"><span>{notice}</span><button onClick={() => setNotice(undefined)} aria-label="Dismiss notice"><X size={14}/></button></div>}
+    {notice && <div className="notice" role="status"><span>{notice}</span>{unavailableProject && <button className="project-notice-remove" onClick={() => void removeProject(unavailableProject.id).catch(reportError)}>Remove from list</button>}<button onClick={() => setNotice(undefined)} aria-label="Dismiss notice"><X size={14}/></button></div>}
     {aiErrorNotice && <div className="notice error-notice" role="alert"><CircleAlert size={18}/><span>{aiErrorNotice}</span><button onClick={() => setAiErrorNotice(undefined)} aria-label="Dismiss error"><X size={14}/></button></div>}
 
     <aside className="files-panel">
       <div className="panel-heading"><span>Workspace</span><div className="panel-heading-actions"><button className={outlineOpen ? 'selected' : ''} disabled={!rendered?.outline?.length} onClick={() => setOutlineOpen((open) => !open)} title="Document outline" aria-label="Document outline" aria-expanded={outlineOpen}><ListTree size={14}/></button><button onClick={() => void refreshWorkspace().catch(reportError)} title="Refresh" aria-label="Refresh workspace"><RefreshCw size={14}/></button></div></div>
       {outlineOpen && <ScrollBound store={scroll} render={(position) => <DocumentOutline items={rendered?.outline ?? []} activeBlock={position.target} maxLevel={settings.outlineDepth} showFigures={settings.outlineShowFigures} onSelect={navigateOutline} onMaxLevelChange={changeOutlineDepth} onShowFiguresChange={changeOutlineFigures} onClose={closeOutline}/>}/>}
       {!workspace ? <div className="empty-files"><div className="folder-illustration"><Files size={28}/></div><h2>Open a working folder</h2><p>Markroot reads and writes the folder directly. Nothing is uploaded.</p><button className="primary" onClick={() => void chooseFolder().catch(reportError)}>Choose folder</button></div>
-      : <WorkspaceTree key={rootName} entries={entries} activePath={snapshot?.path} gitStatus={gitStatus} onOpen={openWorkspaceFile} onCopy={copyPath}/>}
+      : <WorkspaceTree key={workspaceIdRef.current ?? rootName} entries={entries} activePath={snapshot?.path} gitStatus={gitStatus} onOpen={openWorkspaceFile} onCopy={copyPath}/>}
       <div className="side-footer"><button onClick={() => toggleInspector('citations')} aria-pressed={inspector === 'citations'}><BookOpen size={15}/>Citations</button><span>Local only</span></div>
       <PaneResizer className="files-resizer" label="Resize workspace tree" value={settings.filesPaneWidth} min={180} max={420} keyboardStep={12} onChange={resizeFilesPane}/>
     </aside>
 
     <main className={`workspace ${detachedViewerRoot ? 'viewer-detached' : ''}`} ref={workspacePane} style={{ '--source-width': `${settings.sourcePaneRatio * 100}%` } as CSSProperties}>
-      {!presentedSnapshot ? <div className="welcome"><BrandMark className="welcome-symbol"/><h1>Your local writing workspace</h1><p>Choose a folder, then open a Markdown or QMD file. Source, preview, comments, and Git stay together on this device.</p>{!workspace && <button className="primary" onClick={() => void chooseFolder().catch(reportError)}>Open folder</button>}</div>
+      {!presentedSnapshot ? <div className="welcome"><BrandMark className="welcome-symbol"/><h1>Your local writing workspace</h1><p>Choose a folder, then open a Markdown or QMD file. Source, preview, comments, and Git stay together on this device.</p>{!workspace && <><button className="primary" onClick={() => void chooseFolder().catch(reportError)}>Open folder</button><RecentProjects projects={recentProjects} onSelect={(project) => void selectProject(project).catch(reportError)} onRemove={(id) => void removeProject(id).catch(reportError)}/></>}</div>
       : <>
         <section className="pane source-pane"><div className="pane-title"><Code2 size={15}/><span>{review ? 'Source · branch review' : 'Source'}</span>{trackChangesToggle}<span className="spacer"/>{detachedViewerRoot && <><button className="detached-indicator" onClick={() => detachedViewerWindow.current?.focus()} title="Focus the detached viewer"><ExternalLink size={13}/>Viewer detached</button><button className="viewer-option" onClick={reattachViewer} title="Return viewer to this window" aria-label="Reattach viewer"><Columns2 size={15}/></button></>}<span>{settings.sourceFontSize}px · Ln {currentLine}</span></div><ScrollBound store={scroll} render={(position) => { const location = sourceScrollLocation(position, review, reviewPreviewSnapshot, presentedSnapshot); return <SourceEditor key={presentedSnapshot.path} path={presentedSnapshot.path} workspacePaths={workspacePaths} value={presentedSnapshot.source} comparisonBase={review ? undefined : comparisonBaseSource} trackChangesOverride={reviewTrackChanges} showTrackChanges={trackedChangesVisible} activeTrackChange={activeSourceTrackChange} readOnly={Boolean(review)} blocks={presentedSnapshot.blocks} search={search} regularExpression={regularExpression} dark={dark} fontFamily={settings.sourceFont} fontSize={settings.sourceFontSize} activeBlock={location.target} scrollTarget={position.origin === 'source' ? undefined : location.target} scrollProgress={location.progress} scrollAlignment={position.alignment} cursorTarget={sourceCursorTarget} goToLine={goToLine} onChange={applySource} onSelection={selectSource} onTrackChangeActivate={selectReviewChange} onScroll={navigateFromSourceScroll} onSave={saveFromEditor} onFind={openFind}/>; }}/></section>
         {!detachedViewerRoot && <><PaneResizer label="Resize source and viewer panes" value={settings.sourcePaneRatio} min={0.25} max={0.75} keyboardStep={0.02} pixelsPerUnit={workspacePaneWidth} onChange={resizeSourcePane}/><section className="pane right-pane">{viewerToolbar(false)}<div className="right-scroll">{renderViewerContent()}</div></section></>}
